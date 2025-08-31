@@ -361,68 +361,63 @@ async def _fetch_with_playwright(url: str) -> str:
 # ================================
 # Regras simples de decisão
 # ================================
-#def decide_bet(odds_home: Optional[float], odds_draw: Optional[float], odds_away: Optional[float],
-#               competition: str, teams: Tuple[str, str]) -> Tuple[bool, str, float, float, str]:
-#    """Decisão simplificada (troque pelo seu analisador inteligente se quiser)."""
-#    try:
-#        odds = [odds_home or 0, odds_draw or 0, odds_away or 0]
-#        if any(o < 1.01 for o in odds):
-#            return False, "", 0.0, 0.0, "Odds insuficientes"
-#        imp = [1.0/o for o in odds]
-#        tot = sum(imp)
-#        true = [p/tot for p in imp] if tot > 0 else [0, 0, 0]
-#        evs = [(p*o - 1.0) for p, o in zip(true, odds)]
-#        idx = max(range(3), key=lambda i: evs[i])
-#        if evs[idx] < 0.02:
-#            return False, "", true[idx], evs[idx], "EV baixo"
-#        pick = ["home", "draw", "away"][idx]
-#        return True, pick, true[idx], evs[idx], "EV positivo (regra simples)"
-#    except Exception as e:
-#        return False, "", 0.0, 0.0, f"erro: {e}"
 
 # --- regra simples de decisão ---
 def decide_bet(odds_home, odds_draw, odds_away, competition, teams):
     """
-    Decide se vale selecionar o jogo.
-    Retorna:
-      will (bool), pick ('home'|'draw'|'away' ou ''), pprob(float), pev(float), reason(str)
+    Híbrida:
+      - Seleciona +EV quando existir (valor puro).
+      - OU aceita 'favorito claro' se:
+          prob_top >= FAV_PROB_MIN  e (prob_top - prob_2) >= FAV_GAP_MIN
+        e o EV não for pior que EV_TOL (tolerância).
     """
-    # configurações mínimas
+    # ---- parâmetros ajustáveis (ou leve p/ .env) ----
     MIN_ODD = 1.01
-    MIN_EV = 0.02          # 2%
-    MIN_PROB = 0.25        # 25%
+    MIN_EV = float(os.getenv("MIN_EV", "0.02"))         # 2% para value puro
+    MIN_PROB = float(os.getenv("MIN_PROB", "0.25"))     # 25% mínimo
+    FAV_MODE = os.getenv("FAV_MODE", "on").lower()      # on|off
+    FAV_PROB_MIN = float(os.getenv("FAV_PROB_MIN", "0.70"))  # favorito com >=70%
+    FAV_GAP_MIN = float(os.getenv("FAV_GAP_MIN", "0.18"))    # gap de 18 p.p. p/ o 2º
+    EV_TOL = float(os.getenv("EV_TOL", "-0.03"))        # tolera até -3% em favorito claro
 
-    # odds válidas
     names = ("home", "draw", "away")
-    odds = (
-        float(odds_home or 0.0),
-        float(odds_draw or 0.0),
-        float(odds_away or 0.0),
-    )
+    odds = (float(odds_home or 0.0), float(odds_draw or 0.0), float(odds_away or 0.0))
     avail = [(n, o) for n, o in zip(names, odds) if o >= MIN_ODD]
     if len(avail) < 2:
         return False, "", 0.0, 0.0, "Odds insuficientes (menos de 2 mercados)"
 
-    # probabilidades implícitas normalizadas (remove a margem do book)
+    # Probabilidades 'verdadeiras' (remove margem via normalização)
     inv = [(n, 1.0 / o) for n, o in avail]
     tot = sum(v for _, v in inv)
-    if not tot or not (tot > 0):
+    if tot <= 0:
         return False, "", 0.0, 0.0, "Probabilidades inválidas"
 
-    true = {n: v / tot for n, v in inv}                 # probs verdadeiras somam 1
-    ev_map = {n: true[n] * o - 1.0 for n, o in avail}   # EV por mercado
+    true = {n: v / tot for n, v in inv}                 # soma = 1
+    odd_map = dict(avail)
+    ev_map = {n: true[n] * odd_map[n] - 1.0 for n in true}
 
-    # melhor mercado disponível
-    pick, best_ev = max(ev_map.items(), key=lambda x: x[1])
-    pprob = true[pick]
+    # Melhor mercado pelo EV
+    pick_ev, best_ev = max(ev_map.items(), key=lambda x: x[1])
+    pprob_ev = true[pick_ev]
 
-    # regras mínimas
-    if best_ev < EV_MIN:
-    return False, "", true[pick], best_ev, f"EV baixo (<{int(EV_MIN*100)}%)"
-    if pprob < MIN_PROB:
-        return False, "", pprob, best_ev, f"Probabilidade baixa (<{int(MIN_PROB*100)}%)"
+    # 1) Regra de valor puro
+    if best_ev >= MIN_EV and pprob_ev >= MIN_PROB:
+        return True, pick_ev, pprob_ev, best_ev, "EV positivo"
 
-    return True, pick, pprob, best_ev, "EV positivo"
+    # 2) Modo favorito claro (opcional)
+    if FAV_MODE == "on":
+        # ordena por prob
+        probs_sorted = sorted(true.items(), key=lambda x: x[1], reverse=True)
+        (pick_fav, p1), (_, p2) = probs_sorted[0], probs_sorted[1]
+        ev_fav = ev_map[pick_fav]
+        if (p1 >= FAV_PROB_MIN) and ((p1 - p2) >= FAV_GAP_MIN) and (ev_fav >= EV_TOL):
+            # exige prob mínima global também, para evitar zebra
+            if p1 >= max(MIN_PROB, 0.40):
+                return True, pick_fav, p1, ev_fav, "Favorito claro (regra híbrida)"
+
+    # Caso contrário, descarta
+    reason = f"EV baixo (<{int(MIN_EV*100)}%)" if best_ev < MIN_EV else f"Probabilidade baixa (<{int(MIN_PROB*100)}%)"
+    return False, "", pprob_ev, best_ev, reason
 
 # ================================
 # Links monitorados (do seu pedido)
