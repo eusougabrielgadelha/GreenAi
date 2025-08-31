@@ -232,113 +232,95 @@ class EventRow:
     odds_away: Optional[float]
     ext_id: Optional[str] = None
 
-def try_parse_events(html: str) -> List[EventRow]:
+def try_parse_events(html: str, url: str):
+    """
+    Lê a lista de eventos da página de 'odds' do Betnacional (HTML já renderizado).
+    Retorna uma lista de objetos com: ext_id, competition, team_home, team_away,
+    start_local_str, odds_home, odds_draw, odds_away.
+    """
     soup = BeautifulSoup(html, "html.parser")
-    events: List[EventRow] = []
+    cards = soup.select('[data-testid="preMatchOdds"]')
+    evs = []
 
-    MONTHS = {
-        "janeiro": 1, "fevereiro": 2, "março": 3, "marco": 3, "abril": 4,
-        "maio": 5, "junho": 6, "julho": 7, "agosto": 8, "setembro": 9,
-        "outubro": 10, "novembro": 11, "dezembro": 12
-    }
+    def num_from_text(txt: str):
+        if not txt:
+            return None
+        # normaliza (site usa ponto decimal)
+        txt = txt.strip().replace(",", ".")
+        m = re.search(r"\d+(?:\.\d+)?", txt)
+        return float(m.group(0)) if m else None
 
-    containers = soup.select("[data-testid^='eventsListByCategory-']")
-    if not containers:
-        containers = [soup]
+    for card in cards:
+        # --- id externo / link ---
+        a = card.select_one('a[href*="/event/"]')
+        if not a:
+            continue
+        href = a.get("href", "")
+        m = re.search(r"/event/\d+/\d+/(\d+)", href)
+        ext_id = m.group(1) if m else ""
 
-    for cont in containers:
-        current_label = None  # "hoje" ou "dd mês"
-        for child in cont.children:
-            if not getattr(child, "get", None):
-                continue
+        # --- nomes dos times (desktop: 'A x B'; mobile: 2 spans) ---
+        title = a.get_text(" ", strip=True)
+        team_home, team_away = "", ""
+        if " x " in title:
+            team_home, team_away = [p.strip() for p in title.split(" x ", 1)]
+        else:
+            # mobile
+            names = [s.get_text(strip=True) for s in a.select("span.text-ellipsis")]
+            if len(names) >= 2:
+                team_home, team_away = names[0], names[1]
 
-            # cabeçalho de data
-            classes = child.get("class") or []
-            if "text-odds-subheader-text" in classes:
-                current_label = (child.get_text(" ", strip=True) or "").strip().lower()
-                continue
+        # --- hora local (ex: 13:45) ---
+        t = card.select_one(".text-text-light-secondary")
+        start_local_str = t.get_text(strip=True) if t else ""
 
-            # card do jogo
-            if child.get("data-testid") == "preMatchOdds":
-                block = child
+        # --- odds (células por data-testid) ---
+        odd_home = odd_draw = odd_away = None
 
-                # link + ext_id
-                a = block.select_one("a[href^='/event/']")
-                if not a:
-                    continue
-                href = a.get("href", "")
-                m = re.search(r"/event/\d+/\d+/(\d+)", href)
-                ext_id = m.group(1) if m else None
+        def pick_cell(i: int):
+            # padrão principal do site novo
+            if ext_id:
+                sel = f"[data-testid='odd-{ext_id}_1_{i}_']"
+                c = card.select_one(sel)
+                if c:
+                    return num_from_text(c.get_text(" ", strip=True))
+            return None
 
-                # times
-                title_text = a.get_text(" ", strip=True)
-                title_text = re.sub(r"\bAo Vivo\b", "", title_text).strip()
-                team_home = team_away = ""
-                for sep in [" x ", " X ", " vs ", " VS ", " v "]:
-                    if sep in title_text:
-                        team_home, team_away = [p.strip() for p in title_text.split(sep, 1)]
-                        break
-                if not team_home:
-                    names = [s.get_text(strip=True) for s in block.select("a span.text-ellipsis")]
-                    if len(names) >= 2:
-                        team_home, team_away = names[0], names[1]
+        odd_home = pick_cell(1)
+        odd_draw = pick_cell(2)
+        odd_away = pick_cell(3)
 
-                # hora (HH:MM) — se não existir, fica vazio
-                start_hhmm = ""
-                for sp in block.select("span"):
-                    t = sp.get_text(strip=True)
-                    if re.fullmatch(r"\d{1,2}:\d{2}", t):
-                        start_hhmm = t
-                        break
+        # Fallback: se por algum motivo não achou por ext_id, pega as 3 primeiras
+        # células de odd dentro do grid e ordena pelo índice _1_(\d)_
+        if odd_home is None or odd_draw is None or odd_away is None:
+            cells = card.select("[data-testid^='odd-'][data-testid$='_']")
+            # se tivermos ext_id, filtramos só as do evento
+            if ext_id:
+                cells = [c for c in cells if c.get("data-testid", "").startswith(f"odd-{ext_id}_1_")]
 
-                # compõe a data local usando rótulo atual
-                start_local_str = start_hhmm
-                if current_label and start_hhmm:
-                    nowl = datetime.now(ZONE)
-                    lbl = current_label.strip().lower()
-                    if lbl.startswith("hoje"):
-                        start_local_str = f"{start_hhmm} {nowl.day:02d}/{nowl.month:02d}/{nowl.year}"
-                    else:
-                        mdate = re.match(r"(\d{1,2})\s+([a-zç]+)", lbl, flags=re.I)
-                        if mdate:
-                            d = int(mdate.group(1))
-                            mon = MONTHS.get(mdate.group(2).lower())
-                            if mon:
-                                start_local_str = f"{start_hhmm} {d:02d}/{mon:02d}/{nowl.year}"
+            def col_index(c):
+                mm = re.search(r"_1_(\d)_", c.get("data-testid", ""))
+                return int(mm.group(1)) if mm else 99
 
-                # odds 1X2
-                def find_odd(col_code: int) -> Optional[float]:
-                    el = None
-                    if ext_id:
-                        el = block.find(attrs={"data-testid": f"odd-{ext_id}_1_{col_code}_"})
-                    if not el:
-                        el = block.find("div", attrs={
-                            "data-testid": re.compile(rf"^odd-\d+_1_{col_code}_$")
-                        })
-                    if not el:
-                        return None
-                    return num_from_text(el.get_text(strip=True))
+            cells = sorted(cells, key=col_index)
+            vals = [num_from_text(c.get_text(" ", strip=True)) for c in cells[:3]]
+            if len(vals) >= 3:
+                odd_home, odd_draw, odd_away = vals
 
-                odd_home = find_odd(1)
-                odd_draw = find_odd(2)
-                odd_away = find_odd(3)
+        # monta objeto esperado pelo restante do fluxo
+        evs.append(NS(
+            ext_id=ext_id,
+            source_link=url,
+            competition="",  # se precisar, puxe de um cabeçalho de liga da página
+            team_home=team_home,
+            team_away=team_away,
+            start_local_str=start_local_str,
+            odds_home=odd_home,
+            odds_draw=odd_draw,
+            odds_away=odd_away,
+        ))
 
-                # competição (nome do cabeçalho)
-                comp = ""
-                header = soup.find(attrs={"data-testid": "odds-header"})
-                if header:
-                    comp = header.get_text(" ", strip=True)
-
-                if team_home or team_away:
-                    events.append(EventRow(
-                        competition=comp,
-                        team_home=team_home, team_away=team_away,
-                        start_local_str=start_local_str,
-                        odds_home=odd_home, odds_draw=odd_draw, odds_away=odd_away,
-                        ext_id=ext_id
-                    ))
-
-    return events
+    return evs
 
 async def fetch_events_from_link(url: str, backend: str) -> List[EventRow]:
     """Busca HTML e parseia eventos. Loga backend usado e contagem."""
