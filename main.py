@@ -52,8 +52,8 @@ ZONE = pytz.timezone(APP_TZ)
 MORNING_HOUR = int(os.getenv("MORNING_HOUR", "6"))
 
 DB_URL = os.getenv("DB_URL", "sqlite:///betauto.sqlite3")
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8487738643:AAHfnEEB6PKN6rDlRKrKkrh6HGRyTYtrge0")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "-1002952840130")
 
 SCRAPE_BACKEND = os.getenv("SCRAPE_BACKEND", "requests").lower()  # requests | playwright | auto
 REQUESTS_TIMEOUT = float(os.getenv("REQUESTS_TIMEOUT", "20"))
@@ -474,12 +474,15 @@ class BetAuto:
             "Brasil - Paulista": {"pais": "Brasil", "campeonato": "Paulista", "link": "https://betnacional.bet.br/events/1/0/15644"},
             "França - Ligue 1": {"pais": "França", "campeonato": "Ligue 1", "link": "https://betnacional.bet.br/events/1/0/34"},
             "Itália - Série A": {"pais": "Itália", "campeonato": "Série A", "link": "https://betnacional.bet.br/events/1/0/23"},
-            "Alemanha - Bundesliga": {"pais": "Alemanha", "campeonato": "Bundesliga", "link": "https://betnacional.bet.br/events/1/0/38"},
+            "Alemanha - Bundesliga": {"pais": "Alemanha", "campeonato": "Bundesliga", "link": "https://betnacional.bet.br/events/1/0/35"},
             "Brasil - Série A": {"pais": "Brasil", "campeonato": "Brasileirão Série A", "link": "https://betnacional.bet.br/events/1/0/325"},
             "Brasil - Série B": {"pais": "Brasil", "campeonato": "Brasileirão Série B", "link": "https://betnacional.bet.br/events/1/0/390"},
             "Brasil - Série C": {"pais": "Brasil", "campeonato": "Brasileirão Série C", "link": "https://betnacional.bet.br/events/1/0/1281"},
             "Argentina - Série A": {"pais": "Argentina", "campeonato": "Argentina Série A", "link": "https://betnacional.bet.br/events/1/0/30106"},
             "Argentina - Série B": {"pais": "Argentina", "campeonato": "Argentina Série B", "link": "https://betnacional.bet.br/events/1/0/703"},
+            "Argentina - Super Liga 2": {"pais": "Argentina", "campeonato": "Super Liga", "link": "https://betnacional.bet.br/events/1/0/155"},
+            "México - Geral": {"pais": "México", "campeonato": "Todos", "link": "https://betnacional.bet.br/events/1/12/0"},
+            "Portugal - Primeira Liga": {"pais": "Portugal", "campeonato": "Primeira Liga", "link": "https://betnacional.bet.br/events/1/0/238"},
             "Estados Unidos - Major League Soccer": {"pais": "Estados Unidos", "campeonato": "Major League Soccer", "link": "https://betnacional.bet.br/events/1/0/242"},
         }
 
@@ -502,7 +505,7 @@ def global_accuracy(session) -> float:
     hits = session.query(Game).filter(Game.hit.is_(True)).count()
     return hits / total
 
-def fmt_morning_summary(date_local: datetime, analyzed: int, chosen: List[Game]) -> str:
+def fmt_morning_summary(date_local: datetime, analyzed: int, chosen: List[Dict[str, Any]]) -> str:
     dstr = date_local.strftime("%d/%m/%Y")
     lines = [
         f"Hoje, {h(dstr)}, analisei um total de {h(str(analyzed))} jogos.",
@@ -510,10 +513,11 @@ def fmt_morning_summary(date_local: datetime, analyzed: int, chosen: List[Game])
         ""
     ]
     for g in chosen:
-        local_t = g.start_time.astimezone(ZONE).strftime("%H:%M")
-        comp = g.competition or "—"
-        jogo = f"{g.team_home} vs {g.team_away}"
-        pick_str = {"home": g.team_home, "draw": "Empate", "away": g.team_away}.get(g.pick, "—")
+        local_t = g["start_time"].astimezone(ZONE).strftime("%H:%M")
+        comp = g.get("competition") or "—"
+        jogo = f"{g.get('team_home')} vs {g.get('team_away')}"
+        pick_map = {"home": g.get('team_home'), "draw": "Empate", "away": g.get('team_away')}
+        pick_str = pick_map.get(g.get("pick"), "—")
         lines.append(f"{local_t} | {comp} | {jogo} | Apostar em {h(pick_str)}")
     lines.append("")
     with SessionLocal() as s:
@@ -556,7 +560,7 @@ scheduler = AsyncIOScheduler(timezone=APP_TZ)
 app = BetAuto()
 
 # --- Config extra por .env ---
-START_ALERT_MIN = int(os.getenv("START_ALERT_MIN", "15"))           # janela para alerta "começa agora"
+START_ALERT_MIN = int(os.getenv("START_ALERT_MIN", "15"))               # janela para alerta "começa agora"
 LATE_WATCH_WINDOW_MIN = int(os.getenv("LATE_WATCH_WINDOW_MIN", "130"))  # watcher tardio (até 2h10 após o início)
 
 # --- Helper: garantir sempre datetime aware em UTC ---
@@ -673,6 +677,8 @@ async def morning_scan_and_publish():
                         g.pick_ev = pev
                         g.pick_reason = reason
                         g.will_bet = will
+                        # status pela badge
+                        g.status = "live" if getattr(ev, "is_live", False) else (g.status or "scheduled")
                         session.commit()
                     else:
                         g = Game(
@@ -690,6 +696,7 @@ async def morning_scan_and_publish():
                             pick_ev=pev,
                             will_bet=will,
                             pick_reason=reason,
+                            status="live" if getattr(ev, "is_live", False) else "scheduled",
                         )
                         session.add(g)
                         try:
@@ -710,6 +717,7 @@ async def morning_scan_and_publish():
                                 g.pick_ev = pev
                                 g.pick_reason = reason
                                 g.will_bet = will
+                                g.status = "live" if getattr(ev, "is_live", False) else (g.status or "scheduled")
                                 session.commit()
                             else:
                                 raise
