@@ -22,13 +22,13 @@ from dotenv import load_dotenv
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 from types import SimpleNamespace as NS
 
 from sqlalchemy import (
     create_engine, Column, Integer, String, Float, Text, DateTime, Boolean, JSON, func, UniqueConstraint
 )
 from sqlalchemy.orm import declarative_base, sessionmaker
-    # noqa: E402
 from sqlalchemy.exc import IntegrityError
 
 # ================================
@@ -52,8 +52,8 @@ ZONE = pytz.timezone(APP_TZ)
 MORNING_HOUR = int(os.getenv("MORNING_HOUR", "6"))
 
 DB_URL = os.getenv("DB_URL", "sqlite:///betauto.sqlite3")
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8487738643:AAHfnEEB6PKN6rDlRKrKkrh6HGRyTYtrge0")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "-1002952840130")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
 SCRAPE_BACKEND = os.getenv("SCRAPE_BACKEND", "requests").lower()  # requests | playwright | auto
 REQUESTS_TIMEOUT = float(os.getenv("REQUESTS_TIMEOUT", "20"))
@@ -238,6 +238,7 @@ class EventRow:
     odds_draw: Optional[float]
     odds_away: Optional[float]
     ext_id: Optional[str] = None
+    is_live: bool = False
 
 # --- util: converte "13 setembro", "Hoje" etc. para data local (yyyy-mm-dd)
 _PT_MONTHS = {
@@ -251,7 +252,6 @@ def _date_from_header_text(txt: str) -> Optional[datetime]:
     if "hoje" in t:
         nowl = datetime.now(ZONE)
         return nowl.replace(hour=0, minute=0, second=0, microsecond=0)
-    # opcional: amanhã/ontem (se a casa usar)
     if "amanhã" in t or "amanha" in t:
         nowl = datetime.now(ZONE) + timedelta(days=1)
         return nowl.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -273,8 +273,8 @@ def _date_from_header_text(txt: str) -> Optional[datetime]:
 def try_parse_events(html: str, url: str):
     """
     Parser adaptado ao HTML do Betnacional (com data-testid='odd-<id>_1_<col>_').
-    Agora identifica o cabeçalho de data (“Hoje”, “13 setembro”, etc.) anterior a cada card
-    e compõe o start_local_str com data completa, evitando “pegar” jogos de outras datas como se fossem de hoje.
+    Identifica o cabeçalho de data (“Hoje”, “13 setembro”…), detecta badge “Ao Vivo”
+    e compõe start_local_str com data completa, evitando misturar dias diferentes.
     """
     soup = BeautifulSoup(html, "html.parser")
     cards = soup.select('[data-testid="preMatchOdds"]')
@@ -288,15 +288,12 @@ def try_parse_events(html: str, url: str):
         return float(m.group(0)) if m else None
 
     for card in cards:
-        # 1) identificar cabeçalho de data mais próximo acima
-        hdr = card.find_previous(
-            "div",
-            class_=lambda c: c and "text-odds-subheader-text" in c
-        )
+        # 1) cabeçalho de data mais próximo acima
+        hdr = card.find_previous("div", class_=lambda c: c and "text-odds-subheader-text" in c)
         header_text = hdr.get_text(strip=True) if hdr else ""
         header_date = _date_from_header_text(header_text)  # datetime local com 00:00
 
-        # 2) extrair identificadores e nomes
+        # 2) ext_id + times
         a = card.select_one('a[href*="/event/"]')
         if not a:
             continue
@@ -304,6 +301,7 @@ def try_parse_events(html: str, url: str):
         m = re.search(r"/event/\d+/\d+/(\d+)", href)
         ext_id = m.group(1) if m else ""
 
+        # nomes
         title = a.get_text(" ", strip=True)
         team_home, team_away = "", ""
         if " x " in title:
@@ -313,18 +311,23 @@ def try_parse_events(html: str, url: str):
             if len(names) >= 2:
                 team_home, team_away = names[0], names[1]
 
-        # 3) hora local (ex.: 20:30). Se houver cabeçalho de data, montamos "HH:MM dd/mm/YYYY"
+        # 3) detectar "Ao Vivo"
+        is_live = False
+        live_badge = a.find(string=lambda t: isinstance(t, str) and "Ao Vivo" in t)
+        if live_badge:
+            is_live = True
+
+        # 4) hora local (pode faltar se "Ao Vivo")
         t = card.select_one(".text-text-light-secondary")
         hour_local = t.get_text(strip=True) if t else ""
         start_local_str = hour_local
-
         if hour_local and header_date:
             dd = f"{header_date.day:02d}"
             mm = f"{header_date.month:02d}"
             yyyy = header_date.year
             start_local_str = f"{hour_local} {dd}/{mm}/{yyyy}"
 
-        # 4) odds
+        # 5) odds
         def pick_cell(i: int):
             if ext_id:
                 c = card.select_one(f"[data-testid='odd-{ext_id}_1_{i}_']")
@@ -351,13 +354,14 @@ def try_parse_events(html: str, url: str):
         evs.append(NS(
             ext_id=ext_id,
             source_link=url,
-            competition="",  # se precisar, complemente
+            competition="",
             team_home=team_home,
             team_away=team_away,
-            start_local_str=start_local_str,  # agora com a data correta para o card
+            start_local_str=start_local_str,  # poderá ficar vazio em jogos "Ao Vivo"
             odds_home=odd_home,
             odds_draw=odd_draw,
             odds_away=odd_away,
+            is_live=is_live,
         ))
 
     return evs
@@ -416,13 +420,12 @@ async def _fetch_with_playwright(url: str) -> str:
 def decide_bet(odds_home, odds_draw, odds_away, competition, teams):
     # parâmetros ajustáveis
     MIN_ODD = 1.01
-    MIN_EV = float(os.getenv("MIN_EV", "0.02"))
+    MIN_EV = float(os.getenv("MIN_EV", "0.01"))          # <- relaxado para 1% por padrão
     MIN_PROB = float(os.getenv("MIN_PROB", "0.25"))
     FAV_MODE = os.getenv("FAV_MODE", "on").lower()      # on|off
     FAV_PROB_MIN = float(os.getenv("FAV_PROB_MIN", "0.70"))
     FAV_GAP_MIN = float(os.getenv("FAV_GAP_MIN", "0.18"))
     EV_TOL = float(os.getenv("EV_TOL", "-0.03"))
-    # por padrão aceitamos favorito com EV negativo leve
     FAV_IGNORE_EV = os.getenv("FAV_IGNORE_EV", "on").lower() == "on"
 
     names = ("home", "draw", "away")
@@ -461,6 +464,45 @@ def decide_bet(odds_home, odds_draw, odds_away, competition, teams):
 
     reason = f"EV baixo (<{int(MIN_EV*100)}%)" if best_ev < MIN_EV else f"Probabilidade baixa (<{int(MIN_PROB*100)}%)"
     return False, "", pprob_ev, best_ev, reason
+
+# ================================
+# Watchlist helpers (Stat.key='watchlist')
+# ================================
+def stat_get(session, key: str, default=None):
+    st = session.query(Stat).filter_by(key=key).one_or_none()
+    return (st.value if (st and st.value is not None) else default)
+
+def stat_set(session, key: str, value):
+    st = session.query(Stat).filter_by(key=key).one_or_none()
+    if st:
+        st.value = value
+    else:
+        st = Stat(key=key, value=value)
+        session.add(st)
+    session.commit()
+
+def wl_load(session) -> Dict[str, Any]:
+    return stat_get(session, "watchlist", {"items": []}) or {"items": []}
+
+def wl_save(session, data: Dict[str, Any]) -> None:
+    stat_set(session, "watchlist", data)
+
+def wl_add(session, ext_id: str, link: str, start_time_utc: datetime):
+    wl = wl_load(session)
+    items = wl.get("items", [])
+    if any((it.get("ext_id")==ext_id and it.get("start_time")==start_time_utc.isoformat()) for it in items):
+        return False
+    items.append({"ext_id": ext_id, "link": link, "start_time": start_time_utc.isoformat()})
+    wl["items"] = items
+    wl_save(session, wl)
+    return True
+
+def wl_remove(session, predicate):
+    wl = wl_load(session)
+    before = len(wl.get("items", []))
+    wl["items"] = [it for it in wl.get("items", []) if not predicate(it)]
+    wl_save(session, wl)
+    return before - len(wl["items"])
 
 # ================================
 # Links monitorados
@@ -553,6 +595,24 @@ def fmt_pick_now(g: Game) -> str:
         f"Odds: {g.odds_home:.2f}/{g.odds_draw:.2f}/{g.odds_away:.2f}"
     )
 
+def fmt_watch_add(ev, ev_date_local: datetime, best_ev: float, pprob: float) -> str:
+    hhmm = ev_date_local.strftime("%H:%M")
+    return (
+        f"👀 {h('Watchlist')} ({hhmm})\n"
+        f"{ev.team_home} vs {ev.team_away}\n"
+        f"EV atual: {best_ev*100:.1f}% | Prob (pick): {pprob*100:.1f}%\n"
+        f"Link: {ev.source_link}"
+    )
+
+def fmt_watch_upgrade(g: Game) -> str:
+    hhmm = g.start_time.astimezone(ZONE).strftime("%H:%M")
+    side = {"home": g.team_home, "draw": "Empate", "away": g.team_away}.get(g.pick, "—")
+    return (
+        f"⬆️ {h('Upgrade da Watchlist → PICK')} ({hhmm})\n"
+        f"{g.team_home} vs {g.team_away}\n"
+        f"Pick: {h(side)} — Prob: {g.pick_prob*100:.1f}% | EV: {g.pick_ev*100:.1f}%"
+    )
+
 # ================================
 # Scheduler
 # ================================
@@ -563,6 +623,11 @@ app = BetAuto()
 START_ALERT_MIN = int(os.getenv("START_ALERT_MIN", "15"))               # janela para alerta "começa agora"
 LATE_WATCH_WINDOW_MIN = int(os.getenv("LATE_WATCH_WINDOW_MIN", "130"))  # watcher tardio (até 2h10 após o início)
 
+# Watchlist config
+WATCHLIST_DELTA = float(os.getenv("WATCHLIST_DELTA", "0.01"))           # faixa abaixo do MIN_EV
+WATCHLIST_MIN_LEAD_MIN = int(os.getenv("WATCHLIST_MIN_LEAD_MIN", "90")) # só lista se faltar >= X min
+WATCHLIST_RESCAN_MIN = int(os.getenv("WATCHLIST_RESCAN_MIN", "6"))      # rechecagem periódica
+
 # --- Helper: garantir sempre datetime aware em UTC ---
 def to_aware_utc(dt: datetime | None) -> datetime | None:
     if dt is None:
@@ -571,6 +636,69 @@ def to_aware_utc(dt: datetime | None) -> datetime | None:
         return pytz.UTC.localize(dt)
     return dt.astimezone(pytz.UTC)
 
+async def _schedule_all_for_game(g: Game):
+    """Agenda lembrete T-15, alerta 'começa já já' (se aplicável) e watcher/início tardio."""
+    try:
+        now_utc = datetime.now(pytz.UTC)
+        g_start = to_aware_utc(g.start_time)
+
+        # Lembrete T-15
+        reminder_at = (g_start - timedelta(minutes=START_ALERT_MIN))
+        if reminder_at > now_utc:
+            try:
+                scheduler.add_job(
+                    send_reminder_job,
+                    trigger=DateTrigger(run_date=reminder_at),
+                    args=[g.id],
+                    id=f"rem_{g.id}",
+                    replace_existing=True,
+                )
+            except Exception:
+                logger.exception("Falha ao agendar lembrete do jogo id=%s", g.id)
+        else:
+            delta_min = int((now_utc - reminder_at).total_seconds() // 60)
+            logger.info("⏩ Lembrete não agendado (horário já passou) id=%s (dif=%d min)", g.id, delta_min)
+
+        # Alerta “começa já já”
+        if (now_utc >= reminder_at) and (now_utc < g_start):
+            try:
+                local_kick = g_start.astimezone(ZONE).strftime('%H:%M')
+                tg_send_message(
+                    f"🚨 <b>Começa já já</b> ({local_kick})\n"
+                    f"{g.team_home} vs {g.team_away}\n"
+                    f"Pick: <b>{g.pick.upper()}</b>",
+                    parse_mode="HTML"
+                )
+            except Exception:
+                logger.exception("Falha ao enviar alerta 'começa agora' id=%s", g.id)
+
+        # Watcher normal/tardio
+        if g_start > now_utc:
+            try:
+                scheduler.add_job(
+                    watch_game_until_end_job,
+                    trigger=DateTrigger(run_date=g_start),
+                    args=[g.id],
+                    id=f"watch_{g.id}",
+                    replace_existing=True,
+                )
+            except Exception:
+                logger.exception("Falha ao agendar watcher do jogo id=%s", g.id)
+        else:
+            limit_late = g_start + timedelta(minutes=LATE_WATCH_WINDOW_MIN)
+            if now_utc < limit_late:
+                try:
+                    asyncio.create_task(watch_game_until_end_job(g.id))
+                    atraso = int((now_utc - g_start).total_seconds() // 60)
+                    logger.info("▶️ Watcher iniciado imediatamente (id=%s, atraso=%d min).", g.id, atraso)
+                except Exception:
+                    logger.exception("Falha ao iniciar watcher imediato id=%s", g.id)
+            else:
+                atraso = int((now_utc - g_start).total_seconds() // 60)
+                logger.info("⏹️ Watcher não criado: jogo iniciou há %d min (> %d) id=%s.",
+                            atraso, LATE_WATCH_WINDOW_MIN, g.id)
+    except Exception:
+        logger.exception("Falha no agendamento do jogo id=%s", g.id)
 
 async def morning_scan_and_publish():
     logger.info("🌅 Iniciando varredura matinal...")
@@ -579,7 +707,6 @@ async def morning_scan_and_publish():
 
     # Resumo usa snapshots leves (dict) para evitar DetachedInstanceError
     chosen_view: List[Dict[str, Any]] = []
-    # Guardamos o Game também para envio imediato do sinal, se precisar
     chosen_db: List[Game] = []
 
     def _send_summary_safe(text: str) -> None:
@@ -653,7 +780,29 @@ async def morning_scan_and_publish():
                     will, pick, pprob, pev, reason = decide_bet(
                         ev.odds_home, ev.odds_draw, ev.odds_away, ev.competition, (ev.team_home, ev.team_away)
                     )
+
+                    # Se não virou pick, avaliar WATCHLIST
                     if not will:
+                        MIN_EV = float(os.getenv("MIN_EV", "0.01"))
+                        now_utc = datetime.now(pytz.UTC)
+                        lead_ok = (start_utc - now_utc) >= timedelta(minutes=WATCHLIST_MIN_LEAD_MIN)
+                        near_cut = (pev >= (MIN_EV - WATCHLIST_DELTA)) and (pev < MIN_EV)
+                        prob_ok = pprob >= float(os.getenv("MIN_PROB", "0.25"))
+                        if lead_ok and near_cut and prob_ok and not getattr(ev, "is_live", False):
+                            added = wl_add(session, ev.ext_id, url, start_utc)
+                            if added:
+                                logger.info("👀 Adicionado à WATCHLIST: %s vs %s | EV=%.3f | prob=%.3f | start=%s",
+                                            ev.team_home, ev.team_away, pev, pprob, start_utc.isoformat())
+                                # mensagem de watchlist
+                                tg_send_message(
+                                    fmt_watch_add(
+                                        ev,
+                                        start_utc.astimezone(ZONE),
+                                        pev,
+                                        pprob
+                                    )
+                                )
+                        # como não é pick, seguimos pro próximo
                         logger.info(
                             "DESCARTADO: %s vs %s | motivo=%s | odds=(%.2f,%.2f,%.2f) | prob=%.1f%% | EV=%.1f%% | início='%s' | url=%s",
                             ev.team_home, ev.team_away, reason,
@@ -677,7 +826,6 @@ async def morning_scan_and_publish():
                         g.pick_ev = pev
                         g.pick_reason = reason
                         g.will_bet = will
-                        # status pela badge
                         g.status = "live" if getattr(ev, "is_live", False) else (g.status or "scheduled")
                         session.commit()
                     else:
@@ -763,68 +911,7 @@ async def morning_scan_and_publish():
                         logger.exception("Falha ao enviar sinal imediato do jogo id=%s", g.id)
 
                     # ---- Agendamentos (tudo em UTC aware)
-                    try:
-                        now_utc = datetime.now(pytz.UTC)
-
-                        # Lembrete T-15
-                        reminder_at = (g_start - timedelta(minutes=START_ALERT_MIN))
-                        if reminder_at > now_utc:
-                            try:
-                                scheduler.add_job(
-                                    send_reminder_job,
-                                    trigger=DateTrigger(run_date=reminder_at),
-                                    args=[g.id],
-                                    id=f"rem_{g.id}",
-                                    replace_existing=True,
-                                )
-                            except Exception:
-                                logger.exception("Falha ao agendar lembrete do jogo id=%s", g.id)
-                        else:
-                            delta_min = int((now_utc - reminder_at).total_seconds() // 60)
-                            logger.info("⏩ Lembrete não agendado (horário já passou) id=%s (dif=%d min)", g.id, delta_min)
-
-                        # Alerta “começa já já” se entre T-15 e o apito inicial
-                        if (now_utc >= reminder_at) and (now_utc < g_start):
-                            try:
-                                local_kick = g_start.astimezone(ZONE).strftime('%H:%M')
-                                tg_send_message(
-                                    f"🚨 <b>Começa já já</b> ({local_kick})\n"
-                                    f"{g.team_home} vs {g.team_away}\n"
-                                    f"Pick: <b>{g.pick.upper()}</b>",
-                                    parse_mode="HTML"
-                                )
-                            except Exception:
-                                logger.exception("Falha ao enviar alerta 'começa agora' id=%s", g.id)
-
-                        # Watcher normal (futuro) ou tardio (até X min após início)
-                        if g_start > now_utc:
-                            try:
-                                scheduler.add_job(
-                                    watch_game_until_end_job,
-                                    trigger=DateTrigger(run_date=g_start),
-                                    args=[g.id],
-                                    id=f"watch_{g.id}",
-                                    replace_existing=True,
-                                )
-                            except Exception:
-                                logger.exception("Falha ao agendar watcher do jogo id=%s", g.id)
-                        else:
-                            limit_late = g_start + timedelta(minutes=LATE_WATCH_WINDOW_MIN)
-                            if now_utc < limit_late:
-                                # Inicia watcher imediatamente (sem scheduler)
-                                try:
-                                    asyncio.create_task(watch_game_until_end_job(g.id))
-                                    atraso = int((now_utc - g_start).total_seconds() // 60)
-                                    logger.info("▶️ Watcher iniciado imediatamente (id=%s, atraso=%d min).", g.id, atraso)
-                                except Exception:
-                                    logger.exception("Falha ao iniciar watcher imediato id=%s", g.id)
-                            else:
-                                atraso = int((now_utc - g_start).total_seconds() // 60)
-                                logger.info("⏹️ Watcher não criado: jogo iniciou há %d min (> %d) id=%s.",
-                                            atraso, LATE_WATCH_WINDOW_MIN, g.id)
-
-                    except Exception:
-                        logger.exception("Falha no fluxo de agendamento para jogo id=%s", g.id)
+                    await _schedule_all_for_game(g)
 
                 except Exception:
                     session.rollback()
@@ -843,7 +930,108 @@ async def morning_scan_and_publish():
     logger.info("🧾 Varredura concluída — analisados=%d | selecionados=%d | salvos=%d",
                 analyzed_total, len(chosen_view), stored_total)
 
+# ================================
+# Watchlist: rechecagem periódica
+# ================================
+async def rescan_watchlist_job():
+    logger.info("🔄 Rechecando WATCHLIST…")
+    now_utc = datetime.now(pytz.UTC)
+    with SessionLocal() as session:
+        wl = wl_load(session)
+        items = wl.get("items", [])
+        if not items:
+            logger.info("WATCHLIST vazia.")
+            return
 
+        # 1) agrupar por link para rebaixar custos
+        by_link: Dict[str, List[Dict[str, str]]] = {}
+        for it in items:
+            by_link.setdefault(it["link"], []).append(it)
+
+        # 2) para cada link, buscar eventos e indexar por ext_id
+        page_cache: Dict[str, Dict[str, Any]] = {}
+        for link, its in by_link.items():
+            try:
+                evs = await fetch_events_from_link(link, SCRAPE_BACKEND if SCRAPE_BACKEND in ("requests","playwright") else "requests")
+            except Exception:
+                evs = []
+            page_cache[link] = {e.ext_id: e for e in evs}
+
+        # 3) iterar itens; remover passados; promover se cruzou corte
+        MIN_EV = float(os.getenv("MIN_EV", "0.01"))
+        MIN_PROB = float(os.getenv("MIN_PROB", "0.25"))
+        upgraded: List[str] = []
+        removed_expired = 0
+
+        for it in list(items):
+            ext_id = it["ext_id"]; link = it["link"]
+            start_utc = to_aware_utc(datetime.fromisoformat(it["start_time"]))
+            # expirado?
+            if start_utc <= now_utc:
+                removed_expired += wl_remove(session, lambda x, eid=ext_id, st=it["start_time"]: x["ext_id"]==eid and x["start_time"]==st)
+                continue
+
+            page = page_cache.get(link, {})
+            ev = page.get(ext_id)
+            if not ev:
+                # evento sumiu da página; pode ser mudança de mercado — mantemos por enquanto
+                continue
+
+            # recalcular decisão
+            will, pick, pprob, pev, reason = decide_bet(ev.odds_home, ev.odds_draw, ev.odds_away, ev.competition, (ev.team_home, ev.team_away))
+            if will and (pprob >= MIN_PROB) and (pev >= MIN_EV):
+                # promover a pick
+                g = session.query(Game).filter_by(ext_id=ext_id, start_time=start_utc).one_or_none()
+                if g:
+                    # atualizar odds/valores e marcar will_bet
+                    g.odds_home = ev.odds_home
+                    g.odds_draw = ev.odds_draw
+                    g.odds_away = ev.odds_away
+                    g.pick = pick
+                    g.pick_prob = pprob
+                    g.pick_ev = pev
+                    g.will_bet = True
+                    g.pick_reason = "Upgrade watchlist"
+                    session.commit()
+                else:
+                    g = Game(
+                        ext_id=ext_id,
+                        source_link=link,
+                        competition=ev.competition,
+                        team_home=ev.team_home,
+                        team_away=ev.team_away,
+                        start_time=start_utc,
+                        odds_home=ev.odds_home,
+                        odds_draw=ev.odds_draw,
+                        odds_away=ev.odds_away,
+                        pick=pick,
+                        pick_prob=pprob,
+                        pick_ev=pev,
+                        will_bet=True,
+                        pick_reason="Upgrade watchlist",
+                        status="scheduled",
+                    )
+                    session.add(g); session.commit(); session.refresh(g)
+
+                # mensagem & agendamentos
+                try:
+                    tg_send_message(fmt_watch_upgrade(g))
+                    asyncio.create_task(_schedule_all_for_game(g))
+                except Exception:
+                    logger.exception("Falha ao notificar upgrade watchlist id=%s", g.id)
+
+                # remover esse item da watchlist
+                wl_remove(session, lambda x, eid=ext_id, st=it["start_time"]: x["ext_id"]==eid and x["start_time"]==st)
+                upgraded.append(ext_id)
+
+        if removed_expired:
+            logger.info("🧹 WATCHLIST: %d itens expirados removidos.", removed_expired)
+        if upgraded:
+            logger.info("⬆️ WATCHLIST: promovidos %d itens: %s", len(upgraded), ", ".join(upgraded))
+
+# ================================
+# Jobs auxiliares
+# ================================
 async def send_reminder_job(game_id: int):
     with SessionLocal() as s:
         g = s.get(Game, game_id)
@@ -909,14 +1097,22 @@ async def maybe_send_daily_wrapup():
                         total, hits, acc, gacc)
 
 def setup_scheduler():
+    # Varredura diária
     scheduler.add_job(
         morning_scan_and_publish,
         trigger=CronTrigger(hour=MORNING_HOUR, minute=0),
         id="morning_scan",
         replace_existing=True,
     )
+    # Rechecagem da watchlist
+    scheduler.add_job(
+        rescan_watchlist_job,
+        trigger=IntervalTrigger(minutes=WATCHLIST_RESCAN_MIN),
+        id="watchlist_rescan",
+        replace_existing=True,
+    )
     scheduler.start()
-    logger.info("✅ Scheduler ON — rotina diária às %02d:00 (%s).", MORNING_HOUR, APP_TZ)
+    logger.info("✅ Scheduler ON — rotina diária às %02d:00 (%s) + watchlist ~%dmin.", MORNING_HOUR, APP_TZ, WATCHLIST_RESCAN_MIN)
 
 # ================================
 # Runner
