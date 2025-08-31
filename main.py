@@ -1,26 +1,47 @@
-# main.py
 """
-BetNacional Auto Analyst — com logs para PM2
---------------------------------------------
-- Varre páginas da BetNacional (links .bet.br/events/...), extrai jogos do dia,
-  decide apostas, agenda lembretes e monitora resultados.
-- Envia mensagens para Telegram e grava assertividade no banco.
+BetNacional Auto Analyst
+------------------------
+Roda 24/7 em um VPS (Ubuntu) analisando jogos em links da BetNacional,
+envia palpites para um canal do Telegram, dispara lembretes a -15min,
+acompanha o status dos jogos e calcula assertividade.
 
-LOGS:
-- Mostra qual página está sendo varrida, quantos jogos encontrou por link,
-  total analisado e selecionado, além de agendamentos e resultados.
-- Ative LOG_VERBOSE=true no .env para logar cada jogo analisado (palpite/EV).
+⚠️ Observações importantes
+- Este arquivo é auto-contido e focado em orquestração. O módulo de
+  análise de probabilidade (EV/Kelly etc.) foi simplificado. Você pode
+  plugar seu `SmartProbabilityAnalyzer` aqui (ver TODO marcados).
+- A BetNacional pode exigir login e/ou renderização JS. Para isso, há
+  um modo Playwright opcional. Se suas páginas funcionarem só com
+  requests+BeautifulSoup, deixe `SCRAPE_BACKEND="requests"`.
+- Para enviar mensagens no Telegram, crie um bot com @BotFather, adicione
+  o bot como admin do canal, e preencha TOKEN/CHAT_ID no .env.
 
-Backends de scraping:
-- requests (páginas estáticas)
-- playwright (páginas dinâmicas carregadas via JS)  -> exige: pip install playwright && playwright install
+Dependências sugeridas (requirements.txt):
+    APScheduler==3.10.4
+    SQLAlchemy==2.0.32
+    python-dotenv==1.0.1
+    requests==2.32.3
+    beautifulsoup4==4.12.3
+    pytz==2025.1
+    rich==13.7.1
+    # Opcional para páginas dinâmicas:
+    playwright==1.47.0
+    # Depois: playwright install
+
+Como rodar como serviço (resumo):
+1) python3 -m venv venv && source venv/bin/activate
+2) pip install -r requirements.txt
+3) playwright install  # se for usar backend playwright
+4) crie um arquivo .env (ver .env.example ao fim desse arquivo)
+5) systemd unit (ver exemplo ao fim) -> sudo systemctl enable --now betauto
 """
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import random
 import signal
+import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
@@ -33,6 +54,7 @@ from apscheduler.triggers.date import DateTrigger
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from rich.console import Console
+from rich.table import Table
 from sqlalchemy import (
     JSON,
     Boolean,
@@ -47,7 +69,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import declarative_base, sessionmaker
 
-# Playwright opcional
+# Opcional: Playwright para páginas dinâmicas
 try:
     from playwright.async_api import async_playwright
     HAS_PLAYWRIGHT = True
@@ -55,56 +77,34 @@ except Exception:
     HAS_PLAYWRIGHT = False
 
 # ================================
-# Configuração / ENV
+# Configuração
 # ================================
 load_dotenv()
 console = Console()
 
 TZ = os.getenv("APP_TZ", "America/Fortaleza")
 ZONE = pytz.timezone(TZ)
-MORNING_HOUR = int(os.getenv("MORNING_HOUR", "6"))  # 06:00 horário local
+MORNING_HOUR = int(os.getenv("MORNING_HOUR", "6"))  # 06:00 horário de Fortaleza
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")  # ex: @meu_canal ou id numérico
 
 DB_URL = os.getenv("DB_URL", "sqlite:///betauto.sqlite3")
-SCRAPE_BACKEND = os.getenv("SCRAPE_BACKEND", "requests").lower()
+SCRAPE_BACKEND = os.getenv("SCRAPE_BACKEND", "requests").lower()  # "requests" ou "playwright"
 REQUESTS_TIMEOUT = float(os.getenv("REQUESTS_TIMEOUT", "20"))
 USER_AGENT = os.getenv(
     "USER_AGENT",
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36",
 )
 
-LOG_VERBOSE = os.getenv("LOG_VERBOSE", "false").strip().lower() in ("1", "true", "yes", "y")
-
-# Links via .env
-ENV_LINKS = [s.strip() for s in os.getenv("BETNACIONAL_LINKS", "").split(",") if s.strip()]
-
-# Fallback interno com seus links oficiais (events/1/0/*)
-BETTING_LINKS = {
-    "UEFA Champions League": "https://betnacional.bet.br/events/1/0/7",
-    "Espanha - LaLiga": "https://betnacional.bet.br/events/1/0/8",
-    "Inglaterra - Premier League": "https://betnacional.bet.br/events/1/0/17",
-    "Brasil - Paulista": "https://betnacional.bet.br/events/1/0/15644",
-    "França - Ligue 1": "https://betnacional.bet.br/events/1/0/34",
-    "Itália - Série A": "https://betnacional.bet.br/events/1/0/23",
-    "Alemanha - Bundesliga": "https://betnacional.bet.br/events/1/0/38",
-    "Brasil - Série A": "https://betnacional.bet.br/events/1/0/325",
-    "Brasil - Série B": "https://betnacional.bet.br/events/1/0/390",
-    "Brasil - Série C": "https://betnacional.bet.br/events/1/0/1281",
-    "Argentina - Série A": "https://betnacional.bet.br/events/1/0/30106",
-    "Argentina - Série B": "https://betnacional.bet.br/events/1/0/703",
-    "Estados Unidos - Major League Soccer": "https://betnacional.bet.br/events/1/0/242",
-}
-DEFAULT_LINKS = list(BETTING_LINKS.values())
-
-LINKS = ENV_LINKS if ENV_LINKS else DEFAULT_LINKS
+# Links da BetNacional (um por linha no .env, separado por vírgula)
+LINKS = [s.strip() for s in os.getenv("BETNACIONAL_LINKS", "").split(",") if s.strip()]
 
 if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
     console.print("[red]⚠️ Configure TELEGRAM_TOKEN e TELEGRAM_CHAT_ID no .env[/red]")
 
 if not LINKS:
-    console.print("[yellow]⚠️ Sem links — o scanner matinal não encontrará jogos[/yellow]")
+    console.print("[yellow]⚠️ Sem links em BETNACIONAL_LINKS — o scanner matinal não encontrará jogos[/yellow]")
 
 # ================================
 # DB / Modelos
@@ -116,23 +116,23 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 class Game(Base):
     __tablename__ = "games"
     id = Column(Integer, primary_key=True)
-    ext_id = Column(String, index=True)
+    ext_id = Column(String, index=True)          # identificador extraído do site (se existir)
     source_link = Column(Text)
     competition = Column(String)
     team_home = Column(String)
     team_away = Column(String)
-    start_time = Column(DateTime, index=True)    # timezone-aware UTC
+    start_time = Column(DateTime, index=True)    # timezone-aware em UTC
     odds_home = Column(Float)
     odds_draw = Column(Float)
     odds_away = Column(Float)
-    pick = Column(String)                        # home|draw|away
+    pick = Column(String)                        # "home" | "draw" | "away"
     pick_reason = Column(Text)
-    pick_prob = Column(Float)
-    pick_ev = Column(Float)
-    will_bet = Column(Boolean, default=False)
-    status = Column(String, default="scheduled") # scheduled|live|ended
+    pick_prob = Column(Float)                    # probabilidade estimada do pick
+    pick_ev = Column(Float)                      # EV estimado
+    will_bet = Column(Boolean, default=False)    # recomendado apostar?
+    status = Column(String, default="scheduled")# scheduled|live|ended
     outcome = Column(String, nullable=True)      # home|draw|away
-    hit = Column(Boolean, nullable=True)
+    hit = Column(Boolean, nullable=True)         # True/False
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, onupdate=func.now())
 
@@ -147,12 +147,18 @@ Base.metadata.create_all(engine)
 # ================================
 # Utils de Tempo
 # ================================
+
 def now_utc() -> datetime:
     return datetime.now(tz=pytz.UTC)
+
+def local_today(dt_tz=ZONE) -> datetime:
+    d = datetime.now(dt_tz).replace(hour=0, minute=0, second=0, microsecond=0)
+    return d
 
 # ================================
 # Telegram
 # ================================
+
 TELEGRAM_API = "https://api.telegram.org/bot{token}/{method}"
 
 def tg_send_message(text: str, parse_mode: str = "Markdown") -> None:
@@ -174,13 +180,14 @@ def tg_send_message(text: str, parse_mode: str = "Markdown") -> None:
         console.print(f"[red]Erro Telegram: {e}[/red]")
 
 # ================================
-# Scraper (requests / playwright)
+# Scraper (requests ou playwright)
 # ================================
+
 HEADERS = {"User-Agent": USER_AGENT}
 
 async def fetch_page_playwright(url: str) -> str:
     if not HAS_PLAYWRIGHT:
-        raise RuntimeError("Playwright não instalado. Rode: pip install playwright && playwright install")
+        raise RuntimeError("Playwright não instalado. Instale e rode 'playwright install'.")
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         page = await browser.new_page()
@@ -195,8 +202,13 @@ def fetch_page_requests(url: str) -> str:
     return resp.text
 
 async def fetch_events_from_link(link: str) -> List[Dict[str, Any]]:
-    """Extrai eventos de um link. Adapte os seletores ao HTML real da BetNacional."""
-    console.log(f"🔎 Varredura iniciada para [bold]{link}[/bold] — backend={SCRAPE_BACKEND}")
+    """Extrai eventos de um link.
+    Retorna uma lista de dicts com chaves mínimas:
+    - competition, team_home, team_away
+    - start_time_local (string), odds_home, odds_draw, odds_away
+    - ext_id (opcional)
+    TODO: Ajustar parsing específico da BetNacional.
+    """
     try:
         html: str
         if SCRAPE_BACKEND == "playwright":
@@ -204,40 +216,34 @@ async def fetch_events_from_link(link: str) -> List[Dict[str, Any]]:
         else:
             html = fetch_page_requests(link)
     except Exception as e:
-        console.log(f"[red]Erro ao buscar {link}: {e}[/red]")
+        console.print(f"[red]Erro ao buscar {link}: {e}[/red]")
         return []
 
     soup = BeautifulSoup(html, "html.parser")
 
-    # TODO: Ajustar os seletores conforme a página real
+    # TODO: Este parsing é fictício; adapte aos seletores reais do site.
     events: List[Dict[str, Any]] = []
     for card in soup.select(".event-card"):
-        comp_el = card.select_one(".competition")
-        comp = comp_el.get_text(strip=True) if comp_el else ""
-
+        comp = (card.select_one(".competition") or {}).get_text(strip=True) if card.select_one(".competition") else ""
         teams = card.select(".team-name")
         if len(teams) < 2:
             continue
         t_home = teams[0].get_text(strip=True)
         t_away = teams[1].get_text(strip=True)
-
-        start_el = card.select_one(".start-time")
-        start_str = start_el.get_text(strip=True) if start_el else ""
-
+        start_str = (card.select_one(".start-time") or {}).get_text(strip=True) if card.select_one(".start-time") else ""
+        # Odds
         def _num(sel: str) -> Optional[float]:
             el = card.select_one(sel)
             if not el:
                 return None
             raw = el.get_text(strip=True).replace(",", ".")
             try:
-                return float("".join(ch for ch in raw if ch.isdigit() or ch == "."))  # simples
-            except Exception:
+                return float("".join(ch for ch in raw if ch.isdigit() or ch in "."))
+            except:
                 return None
-
         o_home = _num(".odd-home")
         o_draw = _num(".odd-draw")
         o_away = _num(".odd-away")
-
         events.append({
             "ext_id": card.get("data-event-id"),
             "competition": comp,
@@ -248,21 +254,23 @@ async def fetch_events_from_link(link: str) -> List[Dict[str, Any]]:
             "odds_draw": o_draw,
             "odds_away": o_away,
         })
-
-    console.log(f"🧮 [{link}] → eventos extraídos: [bold]{len(events)}[/bold]")
     return events
 
 # ================================
-# Conversão de horário (exemplo)
+# Conversões / Normalização
 # ================================
+
 def parse_local_datetime(s: str) -> Optional[datetime]:
-    """Converte string tipo '16:00 31/08/2025' ou '31/08 16:00' (fuso Brasília) para UTC."""
+    """Converte string de horário do site (no fuso de Brasília) para datetime UTC.
+    Ajuste o parser conforme o formato real.
+    Exemplo esperado: "16:00 31/08/2025" ou "31/08 16:00".
+    """
     if not s:
         return None
     for fmt in ("%H:%M %d/%m/%Y", "%d/%m %H:%M", "%d/%m/%y %H:%M"):
         try:
             dt_local = datetime.strptime(s, fmt)
-            # se não tem ano, usa ano atual
+            # Se o formato não tiver ano, assume ano atual
             if "%Y" not in fmt and "%y" not in fmt:
                 now_local = datetime.now(ZONE)
                 dt_local = dt_local.replace(year=now_local.year)
@@ -273,11 +281,15 @@ def parse_local_datetime(s: str) -> Optional[datetime]:
     return None
 
 # ================================
-# Regra simples de decisão (EV)
+# Regra de decisão (simplificada)
 # ================================
+
 def decide_bet(odds_home: Optional[float], odds_draw: Optional[float], odds_away: Optional[float],
                competition: str, teams: Tuple[str, str]) -> Tuple[bool, str, float, float, str]:
-    """Retorna (will_bet, pick, pick_prob, pick_ev, reason). Substitua por seu analisador avançado se quiser."""
+    """Devolve (will_bet, pick, pick_prob, pick_ev, reason).
+    Regra simples: calcula prob implícita, normaliza e escolhe o melhor EV.
+    ⚠️ Substitua por seu SmartProbabilityAnalyzer para mais precisão (TODO).
+    """
     try:
         odds = [odds_home or 0, odds_draw or 0, odds_away or 0]
         if any(o < 1.01 for o in odds):
@@ -290,15 +302,16 @@ def decide_bet(odds_home: Optional[float], odds_draw: Optional[float], odds_away
         evs = [(p*o - 1.0) for p, o in zip(true, odds)]
         idx = max(range(3), key=lambda i: evs[i])
         PICKS = ["home", "draw", "away"]
-        if evs[idx] < 0.02:  # limiar conservador de EV
+        if evs[idx] < 0.02:  # limiar conservador
             return False, "", float(true[idx]), float(evs[idx]), "EV insuficiente"
-        return True, PICKS[idx], float(true[idx]), float(evs[idx]), "EV positivo"
+        return True, PICKS[idx], float(true[idx]), float(evs[idx]), "EV positivo (regra simples)"
     except Exception as e:
         return False, "", 0.0, 0.0, f"Erro na decisão: {e}"
 
 # ================================
-# Assertividade global
+# Persistência de assertividade
 # ================================
+
 def get_global_accuracy(session) -> float:
     total = session.query(Game).filter(Game.hit.isnot(None)).count()
     if total == 0:
@@ -307,8 +320,9 @@ def get_global_accuracy(session) -> float:
     return hits / total
 
 # ================================
-# Mensagens Telegram
+# Mensagens formatadas
 # ================================
+
 def fmt_morning_summary(date_local: datetime, analyzed: int, chosen: List[Game]) -> str:
     dstr = date_local.strftime("%d/%m/%Y")
     lines = [
@@ -321,9 +335,14 @@ def fmt_morning_summary(date_local: datetime, analyzed: int, chosen: List[Game])
         hhmm = local_t.strftime("%H:%M")
         comp = g.competition or "—"
         jogo = f"{g.team_home} vs {g.team_away}"
-        pick_str = {"home": g.team_home, "draw": "Empate", "away": g.team_away}.get(g.pick, "—")
+        pick_str = {
+            "home": g.team_home,
+            "draw": "Empate",
+            "away": g.team_away,
+        }.get(g.pick, "—")
         lines.append(f"{hhmm} | {comp} | {jogo} | Apostar em *{pick_str}*")
     lines.append("")
+    # taxa atual
     with SessionLocal() as s:
         acc = get_global_accuracy(s) * 100
     lines.append(f"Taxa de assertividade atual: *{acc:.1f}%*")
@@ -347,36 +366,38 @@ def fmt_result(g: Game) -> str:
     )
 
 # ================================
-# Tarefas
+# Workflow principal
 # ================================
+
 async def morning_scan_and_publish():
-    console.log(f"🌅 Iniciando varredura matinal — backend={SCRAPE_BACKEND} — links={len(LINKS)}")
-    analyzed_total = 0
+    """Executa às 06:00 (horário de Fortaleza):
+    - percorre LINKS
+    - extrai eventos do dia
+    - decide apostas
+    - salva no DB
+    - agenda lembretes e watchers
+    - envia resumo no Telegram
+    """
+    console.print("[cyan]🌅 Iniciando varredura matinal...[/cyan]")
+    analyzed = 0
     chosen: List[Game] = []
 
     with SessionLocal() as session:
         for link in LINKS:
             events = await fetch_events_from_link(link)
-            analyzed_total += len(events)
-
+            analyzed += len(events)
             for ev in events:
                 start_utc = parse_local_datetime(ev.get("start_time_local", ""))
                 if not start_utc:
-                    if LOG_VERBOSE:
-                        console.log(f"[yellow]Descartado (sem horário válido): {ev.get('team_home','?')} vs {ev.get('team_away','?')}[/yellow]")
                     continue
-
-                # Filtra jogos do dia no fuso local
-                if start_utc.astimezone(ZONE).date() != datetime.now(ZONE).date():
-                    if LOG_VERBOSE:
-                        console.log(f"[dim]Fora do dia corrente: {ev.get('team_home','?')} vs {ev.get('team_away','?')}[/dim]")
+                # Apenas jogos do dia (no timezone local)
+                day_local = start_utc.astimezone(ZONE).date()
+                if day_local != datetime.now(ZONE).date():
                     continue
-
                 will, pick, pprob, pev, reason = decide_bet(
                     ev.get("odds_home"), ev.get("odds_draw"), ev.get("odds_away"),
                     ev.get("competition", ""), (ev.get("team_home", ""), ev.get("team_away", ""))
                 )
-
                 game = Game(
                     ext_id=ev.get("ext_id"),
                     source_link=link,
@@ -396,13 +417,6 @@ async def morning_scan_and_publish():
                 session.add(game)
                 session.commit()
 
-                if LOG_VERBOSE:
-                    lt = start_utc.astimezone(ZONE).strftime("%H:%M")
-                    console.log(
-                        f"📄 {lt} | {game.competition or '—'} | {game.team_home} vs {game.team_away} "
-                        f"| will_bet={will} pick={pick or '—'} ev={pev:.3f} prob={pprob:.3f} ({reason})"
-                    )
-
                 if will:
                     chosen.append(game)
                     # Agenda lembrete -15min
@@ -414,13 +428,7 @@ async def morning_scan_and_publish():
                         id=f"reminder_{game.id}",
                         replace_existing=True,
                     )
-                    console.log(
-                        f"⏰ Lembrete agendado (-15min) para jogo #{game.id} — "
-                        f"{game.team_home} vs {game.team_away} | "
-                        f"início local: {game.start_time.astimezone(ZONE).strftime('%H:%M')}"
-                    )
-
-                    # Agenda watcher do resultado (início no pontapé)
+                    # Agenda watcher de resultado (começa no horário do jogo)
                     start_at = game.start_time
                     scheduler.add_job(
                         watch_game_until_end_job,
@@ -429,19 +437,9 @@ async def morning_scan_and_publish():
                         id=f"watch_{game.id}",
                         replace_existing=True,
                     )
-                    console.log(
-                        f"🛰️ Watcher agendado para jogo #{game.id} às "
-                        f"{game.start_time.astimezone(ZONE).strftime('%H:%M')} (hora local)"
-                    )
-
-        # Resumo de varredura
-        console.log(
-            f"🧾 Varredura concluída — analisados={analyzed_total} | selecionados={len(chosen)}"
-        )
 
         # Envia resumo da manhã
-        from_zone_now = datetime.now(ZONE)
-        summary = fmt_morning_summary(from_zone_now, analyzed_total, chosen)
+        summary = fmt_morning_summary(datetime.now(ZONE), analyzed, chosen)
         tg_send_message(summary)
 
 async def send_reminder_job(game_id: int):
@@ -449,25 +447,30 @@ async def send_reminder_job(game_id: int):
         g = s.get(Game, game_id)
         if not g or not g.will_bet:
             return
-        console.log(f"🔔 Enviando lembrete para jogo #{game_id} — {g.team_home} vs {g.team_away}")
         tg_send_message(fmt_reminder(g))
 
 async def watch_game_until_end_job(game_id: int):
+    """Monitora o jogo até finalizar e publica resultado.
+    A implementação de status/resultados precisa de scraping específico
+    da página do evento. Abaixo, um polling fictício para demonstrar fluxo.
+    """
     with SessionLocal() as s:
         g = s.get(Game, game_id)
         if not g:
             return
-    console.log(f"👀 Monitorando jogo #{game_id} — {g.team_home} vs {g.team_away}")
 
-    # POLLING EXEMPLO (substitua pelo scraping de status real)
+    console.print(f"[blue]👀 Monitorando jogo {g.team_home} vs {g.team_away}[/blue]")
+
+    # Polling fake: aguarda 2h e marca como ended com outcome aleatório.
+    # TODO: Substituir por scraper da página de resultados da BetNacional.
     kickoff = g.start_time
     end_eta = kickoff + timedelta(hours=2)
     while now_utc() < end_eta:
-        await asyncio.sleep(30)
-        # Aqui você checaria a página do evento para saber se terminou
+        await asyncio.sleep(30)  # ajuste o intervalo de polling real
+        # Aqui você checaria o status da página e quebraria quando finalizado
 
-    # Simulação de resultado
-    outcome = random.choice(["home", "draw", "away"])
+    # Simular resultado aleatório (substitua pelo real)
+    outcome = random.choice(["home", "draw", "away"])  # TODO real
     hit = (outcome == g.pick)
 
     with SessionLocal() as s:
@@ -477,16 +480,16 @@ async def watch_game_until_end_job(game_id: int):
             g.outcome = outcome
             g.hit = hit
             s.commit()
-            console.log(f"🏁 Finalizado jogo #{game_id} — outcome={outcome} | hit={hit}")
             tg_send_message(fmt_result(g))
 
+    # Checa se todos os jogos do dia finalizaram para enviar recap do dia
     await maybe_send_daily_wrapup()
 
 async def maybe_send_daily_wrapup():
-    today_local = datetime.now(ZONE).date()
+    today = datetime.now(ZONE).date()
     with SessionLocal() as s:
-        day_start = ZONE.localize(datetime(today_local.year, today_local.month, today_local.day, 0, 0)).astimezone(pytz.UTC)
-        day_end = ZONE.localize(datetime(today_local.year, today_local.month, today_local.day, 23, 59)).astimezone(pytz.UTC)
+        day_start = ZONE.localize(datetime(today.year, today.month, today.day, 0, 0)).astimezone(pytz.UTC)
+        day_end = ZONE.localize(datetime(today.year, today.month, today.day, 23, 59)).astimezone(pytz.UTC)
         todays_picks = (
             s.query(Game)
             .filter(Game.start_time >= day_start, Game.start_time <= day_end, Game.will_bet.is_(True))
@@ -498,25 +501,23 @@ async def maybe_send_daily_wrapup():
         if len(finished) == len(todays_picks):
             hits = sum(1 for g in finished if g.hit)
             total = len(finished)
-            acc = (hits / total * 100) if total else 0.0
+            acc = (hits/total*100) if total else 0.0
             gacc = get_global_accuracy(s) * 100
-            console.log(
-                f"📊 Wrap-up do dia — palpites={total} | acertos={hits} | "
-                f"assertividade_dia={acc:.1f}% | assertividade_geral={gacc:.1f}%"
-            )
             lines = [
-                f"📊 *Resumo do dia* ({today_local.strftime('%d/%m/%Y')})",
+                f"📊 *Resumo do dia* ({today.strftime('%d/%m/%Y')})",
                 f"Palpites dados: *{total}* | Acertos: *{hits}* | Assertividade do dia: *{acc:.1f}%*",
                 f"Assertividade geral do script: *{gacc:.1f}%*",
             ]
             tg_send_message("\n".join(lines))
 
 # ================================
-# Scheduler
+# Scheduler / Runner
 # ================================
+
 scheduler = AsyncIOScheduler(timezone=str(ZONE))
 
 def setup_scheduler():
+    # Tarefa diária às 06:00 (horário de Fortaleza)
     scheduler.add_job(
         morning_scan_and_publish,
         trigger=CronTrigger(hour=MORNING_HOUR, minute=0),
@@ -526,29 +527,23 @@ def setup_scheduler():
     scheduler.start()
     console.print(f"[green]✅ Scheduler iniciado. Rotina diária às {MORNING_HOUR:02d}:00 ({TZ}).[/green]")
 
-# ================================
-# Runner
-# ================================
 async def main():
-    console.log(f"🟢 Bot iniciando… TZ={TZ} backend={SCRAPE_BACKEND} verbose={LOG_VERBOSE}")
     setup_scheduler()
-    # roda uma varredura já no boot
+    # Opcional: rodar o scan imediatamente no boot
     await morning_scan_and_publish()
 
-    # aguarda sinais
+    # Aguardar para sempre, com shutdown elegante
     loop = asyncio.get_running_loop()
     stop = asyncio.Event()
 
     def _sig(*_):
-        console.print("[yellow]Sinal de parada recebido. Encerrando…[/yellow]")
+        console.print("[yellow]Recebido sinal de parada. Encerrando...[/yellow]")
         stop.set()
-
     for sgn in (signal.SIGINT, signal.SIGTERM):
         try:
             loop.add_signal_handler(sgn, _sig)
         except NotImplementedError:
             pass
-
     await stop.wait()
 
 if __name__ == "__main__":
@@ -556,3 +551,46 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         pass
+
+# ================================
+# .env.example (copie para .env)
+# ================================
+"""
+APP_TZ=America/Fortaleza
+MORNING_HOUR=6
+DB_URL=sqlite:///betauto.sqlite3
+
+# Telegram
+TELEGRAM_TOKEN=123456:ABC-DEF...
+TELEGRAM_CHAT_ID=@seu_canal
+
+# Scraping
+SCRAPE_BACKEND=requests  # ou playwright
+REQUESTS_TIMEOUT=20
+USER_AGENT=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36
+
+# Links da BetNacional (separe por vírgula). Exemplos fictícios:
+BETNACIONAL_LINKS=https://www.betnacional.com/competicao/serie-a,https://www.betnacional.com/competicao/copa-do-brasil
+"""
+
+# ================================
+# systemd unit (exemplo): /etc/systemd/system/betauto.service
+# ================================
+"""
+[Unit]
+Description=BetNacional Auto Analyst
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/betauto
+ExecStart=/home/ubuntu/betauto/venv/bin/python /home/ubuntu/betauto/betnacional_auto_analyst.py
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
+"""
