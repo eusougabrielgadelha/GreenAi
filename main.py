@@ -234,9 +234,9 @@ class EventRow:
 
 def try_parse_events(html: str, url: str):
     """
-    Lê a lista de eventos da página de 'odds' do Betnacional (HTML já renderizado).
-    Retorna uma lista de objetos com: ext_id, competition, team_home, team_away,
-    start_local_str, odds_home, odds_draw, odds_away.
+    Parser adaptado ao HTML do Betnacional (com data-testid='odd-<id>_1_<col>_').
+    Retorna uma lista de NS(ext_id, source_link, competition, team_home, team_away,
+                           start_local_str, odds_home, odds_draw, odds_away)
     """
     soup = BeautifulSoup(html, "html.parser")
     cards = soup.select('[data-testid="preMatchOdds"]')
@@ -245,13 +245,11 @@ def try_parse_events(html: str, url: str):
     def num_from_text(txt: str):
         if not txt:
             return None
-        # normaliza (site usa ponto decimal)
         txt = txt.strip().replace(",", ".")
         m = re.search(r"\d+(?:\.\d+)?", txt)
         return float(m.group(0)) if m else None
 
     for card in cards:
-        # --- id externo / link ---
         a = card.select_one('a[href*="/event/"]')
         if not a:
             continue
@@ -259,29 +257,21 @@ def try_parse_events(html: str, url: str):
         m = re.search(r"/event/\d+/\d+/(\d+)", href)
         ext_id = m.group(1) if m else ""
 
-        # --- nomes dos times (desktop: 'A x B'; mobile: 2 spans) ---
         title = a.get_text(" ", strip=True)
         team_home, team_away = "", ""
         if " x " in title:
             team_home, team_away = [p.strip() for p in title.split(" x ", 1)]
         else:
-            # mobile
             names = [s.get_text(strip=True) for s in a.select("span.text-ellipsis")]
             if len(names) >= 2:
                 team_home, team_away = names[0], names[1]
 
-        # --- hora local (ex: 13:45) ---
         t = card.select_one(".text-text-light-secondary")
         start_local_str = t.get_text(strip=True) if t else ""
 
-        # --- odds (células por data-testid) ---
-        odd_home = odd_draw = odd_away = None
-
         def pick_cell(i: int):
-            # padrão principal do site novo
             if ext_id:
-                sel = f"[data-testid='odd-{ext_id}_1_{i}_']"
-                c = card.select_one(sel)
+                c = card.select_one(f"[data-testid='odd-{ext_id}_1_{i}_']")
                 if c:
                     return num_from_text(c.get_text(" ", strip=True))
             return None
@@ -290,28 +280,22 @@ def try_parse_events(html: str, url: str):
         odd_draw = pick_cell(2)
         odd_away = pick_cell(3)
 
-        # Fallback: se por algum motivo não achou por ext_id, pega as 3 primeiras
-        # células de odd dentro do grid e ordena pelo índice _1_(\d)_
         if odd_home is None or odd_draw is None or odd_away is None:
             cells = card.select("[data-testid^='odd-'][data-testid$='_']")
-            # se tivermos ext_id, filtramos só as do evento
             if ext_id:
                 cells = [c for c in cells if c.get("data-testid", "").startswith(f"odd-{ext_id}_1_")]
-
             def col_index(c):
                 mm = re.search(r"_1_(\d)_", c.get("data-testid", ""))
                 return int(mm.group(1)) if mm else 99
-
             cells = sorted(cells, key=col_index)
             vals = [num_from_text(c.get_text(" ", strip=True)) for c in cells[:3]]
             if len(vals) >= 3:
                 odd_home, odd_draw, odd_away = vals
 
-        # monta objeto esperado pelo restante do fluxo
         evs.append(NS(
             ext_id=ext_id,
             source_link=url,
-            competition="",  # se precisar, puxe de um cabeçalho de liga da página
+            competition="",  # se precisar, complemente
             team_home=team_home,
             team_away=team_away,
             start_local_str=start_local_str,
@@ -322,34 +306,55 @@ def try_parse_events(html: str, url: str):
 
     return evs
 
-async def fetch_events_from_link(url: str, backend: str) -> List[EventRow]:
-    """Busca HTML e parseia eventos. Loga backend usado e contagem."""
-    html = ""
-    used = backend
+async def fetch_events_from_link(url: str, backend: str):
+    """
+    Baixa a página (via requests ou playwright) e parseia os eventos.
+    """
+    backend_sel = backend
+    if backend_sel == "auto":
+        backend_sel = "playwright"  # escolha padrão
+
+    logger.info("🔎 Varredura iniciada para %s — backend=%s", url, backend_sel)
+
     try:
-        if backend == "playwright":
-            html = await fetch_playwright(url)
+        if backend_sel == "playwright":
+            html = await _fetch_with_playwright(url)
+            # IMPORTANTE: passar a url aqui
+            evs = try_parse_events(html, url)
         else:
-            html = fetch_requests(url)
+            # requests
+            r = requests.get(url, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
+            r.raise_for_status()
+            # IMPORTANTE: passar a url aqui
+            evs = try_parse_events(r.text, url)
+
+        logger.info("🧮  → eventos extraídos: %d", len(evs))
+        return evs
+
     except Exception as e:
-        logger.warning("Falha no fetch (%s) %s: %s", backend, url, e)
-        html = ""
+        logger.warning("Falha ao buscar %s com %s: %s", url, backend_sel, e)
+        return []
 
-    events = try_parse_events(html) if html else []
-
-    # Fallback para 'auto'
-    if backend == "auto" and not events:
-        if HAS_PLAYWRIGHT:
-            try:
-                used = "playwright"
-                html = await fetch_playwright(url)
-                events = try_parse_events(html)
-            except Exception as e:
-                logger.warning("Fallback playwright falhou em %s: %s", url, e)
-
-    logger.info("🔎 Varredura iniciada para %s — backend=%s", url, used)
-    logger.info("🧮  → eventos extraídos: %d", len(events))
-    return events
+async def _fetch_with_playwright(url: str) -> str:
+    """
+    Renderiza a página com Playwright e retorna o HTML.
+    """
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        context = await browser.new_context(
+            user_agent="Mozilla/5.0",
+            locale="pt-BR",
+        )
+        page = await context.new_page()
+        try:
+            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            # espera a grade de odds aparecer (tem no HTML enviado)
+            await page.wait_for_selector('[data-testid="preMatchOdds"]', timeout=15000)
+            html = await page.content()
+            return html
+        finally:
+            await context.close()
+            await browser.close()
 
 # ================================
 # Regras simples de decisão
