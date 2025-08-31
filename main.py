@@ -183,34 +183,42 @@ def num_from_text(s: str) -> Optional[float]:
         return None
 
 def parse_local_datetime(s: str) -> Optional[datetime]:
-    """Tenta diversos formatos usuais. Retorna UTC."""
     if not s:
         return None
     s = s.strip()
+
+    # 1) tentar ISO-8601 (com Z ou offset)
+    try:
+        s_iso = s.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(s_iso)
+        if dt.tzinfo is None:
+            dt_local = ZONE.localize(dt)
+            return dt_local.astimezone(pytz.UTC)
+        return dt.astimezone(pytz.UTC)
+    except Exception:
+        pass
+
+    # 2) seus formatos legados
     fmts = [
-        "%H:%M %d/%m/%Y",
-        "%H:%M %d/%m/%y",
-        "%d/%m/%Y %H:%M",
-        "%d/%m/%y %H:%M",
-        "%d/%m %H:%M",
-        "%H:%M",
+        "%H:%M %d/%m/%Y", "%H:%M %d/%m/%y",
+        "%d/%m/%Y %H:%M", "%d/%m/%y %H:%M",
+        "%d/%m %H:%M", "%H:%M",
     ]
     for fmt in fmts:
         try:
             dt = datetime.strptime(s, fmt)
-            # Sem ano? assume ano atual
             if "%Y" not in fmt and "%y" not in fmt:
                 nowl = datetime.now(ZONE)
                 dt = dt.replace(year=nowl.year)
-            # Só hora? assume hoje
             if fmt == "%H:%M":
                 nowl = datetime.now(ZONE)
                 dt = dt.replace(day=nowl.day, month=nowl.month, year=nowl.year)
             dt_local = ZONE.localize(dt)
             return dt_local.astimezone(pytz.UTC)
         except Exception:
-            pass
+            continue
     return None
+
 
 @dataclass
 class EventRow:
@@ -354,24 +362,100 @@ async def fetch_events_from_link(url: str, backend: str) -> List[EventRow]:
 # ================================
 # Regras simples de decisão
 # ================================
-def decide_bet(odds_home: Optional[float], odds_draw: Optional[float], odds_away: Optional[float],
-               competition: str, teams: Tuple[str, str]) -> Tuple[bool, str, float, float, str]:
-    """Decisão simplificada (troque pelo seu analisador inteligente se quiser)."""
-    try:
-        odds = [odds_home or 0, odds_draw or 0, odds_away or 0]
-        if any(o < 1.01 for o in odds):
-            return False, "", 0.0, 0.0, "Odds insuficientes"
-        imp = [1.0/o for o in odds]
-        tot = sum(imp)
-        true = [p/tot for p in imp] if tot > 0 else [0, 0, 0]
-        evs = [(p*o - 1.0) for p, o in zip(true, odds)]
-        idx = max(range(3), key=lambda i: evs[i])
-        if evs[idx] < 0.02:
-            return False, "", true[idx], evs[idx], "EV baixo"
-        pick = ["home", "draw", "away"][idx]
-        return True, pick, true[idx], evs[idx], "EV positivo (regra simples)"
-    except Exception as e:
-        return False, "", 0.0, 0.0, f"erro: {e}"
+#def decide_bet(odds_home: Optional[float], odds_draw: Optional[float], odds_away: Optional[float],
+#               competition: str, teams: Tuple[str, str]) -> Tuple[bool, str, float, float, str]:
+#    """Decisão simplificada (troque pelo seu analisador inteligente se quiser)."""
+#    try:
+#        odds = [odds_home or 0, odds_draw or 0, odds_away or 0]
+#        if any(o < 1.01 for o in odds):
+#            return False, "", 0.0, 0.0, "Odds insuficientes"
+#        imp = [1.0/o for o in odds]
+#        tot = sum(imp)
+#        true = [p/tot for p in imp] if tot > 0 else [0, 0, 0]
+#        evs = [(p*o - 1.0) for p, o in zip(true, odds)]
+#        idx = max(range(3), key=lambda i: evs[i])
+#        if evs[idx] < 0.02:
+#            return False, "", true[idx], evs[idx], "EV baixo"
+#        pick = ["home", "draw", "away"][idx]
+#        return True, pick, true[idx], evs[idx], "EV positivo (regra simples)"
+#    except Exception as e:
+#        return False, "", 0.0, 0.0, f"erro: {e}"
+
+# --- regra simples de decisão ---
+def decide_bet(odds_home, odds_draw, odds_away, competition, teams):
+    """
+    Retorna:
+      will (bool), pick ('home'|'draw'|'away' ou ''), pprob(float), pev(float), reason(str)
+    """
+    # filtra odds válidas
+    avail = [(name, o) for name, o in zip(["home","draw","away"], [odds_home, odds_draw, odds_away]) if o and o >= 1.01]
+    if len(avail) < 2:
+        return False, "", 0.0, 0.0, "Odds insuficientes (menos de 2 mercados)"
+
+    # normaliza apenas nas disponíveis
+    inv = [(n, 1.0/o) for n, o in avail]
+    tot = sum(v for _, v in inv)
+    true = {n: v/tot for n, v in inv}
+
+    # EV por mercado disponível
+    ev = {n: true[n]*o - 1.0 for n, o in avail}
+
+    # melhor mercado
+    pick, best_ev = max(ev.items(), key=lambda x: x[1])
+
+    # regra mínima de seleção
+    if best_ev < 0.02:
+        return False, "", true[pick], best_ev, "EV baixo (<2%)"
+
+    return True, pick, true[pick], best_ev, "EV positivo"
+
+# -------------------------------------------------------------------------
+# Dentro de morning_scan_and_publish(), no loop dos eventos (evs):
+# -------------------------------------------------------------------------
+
+for ev in evs:
+    # ... (seu parsing de times, odds, datas etc. antes)
+    will, pick, pprob, pev, reason = decide_bet(
+        ev.odds_home, ev.odds_draw, ev.odds_away, ev.competition, (ev.team_home, ev.team_away)
+    )
+
+    # LOGA e pula os não-selecionados (ou remova o 'continue' se quiser salvar mesmo assim)
+    if not will:
+        logger.debug(
+            "DESCARTADO: %s vs %s | motivo=%s | odds=(%.2f,%.2f,%.2f) | prob=%.1f%% | EV=%.1f%% | data_raw='%s'",
+            ev.team_home, ev.team_away, reason,
+            (ev.odds_home or 0), (ev.odds_draw or 0), (ev.odds_away or 0),
+            pprob*100, pev*100, ev.start_local_str
+        )
+        continue
+
+    # Se passou, cria o Game e adiciona à lista de selecionados
+    g = Game(
+        ext_id=ev.ext_id,
+        source_link=url,
+        competition=ev.competition,
+        team_home=ev.team_home,
+        team_away=ev.team_away,
+        start_time=start_utc,  # certifique-se que start_utc foi calculado antes
+        odds_home=ev.odds_home,
+        odds_draw=ev.odds_draw,
+        odds_away=ev.odds_away,
+        pick=pick,
+        pick_prob=pprob,
+        pick_ev=pev,
+        will_bet=will,
+        pick_reason=reason
+    )
+    selected.append(g)
+
+    # log bonitinho do selecionado
+    logger.info(
+        "✅ SELECIONADO: %s vs %s | pick=%s | prob=%.1f%% | EV=%.1f%% | odds=(%.2f,%.2f,%.2f) | início=%s",
+        ev.team_home, ev.team_away, pick, pprob*100, pev*100,
+        (ev.odds_home or 0), (ev.odds_draw or 0), (ev.odds_away or 0),
+        ev.start_local_str
+    )
+
 
 # ================================
 # Links monitorados (do seu pedido)
