@@ -384,78 +384,46 @@ async def fetch_events_from_link(url: str, backend: str) -> List[EventRow]:
 # --- regra simples de decisão ---
 def decide_bet(odds_home, odds_draw, odds_away, competition, teams):
     """
+    Decide se vale selecionar o jogo.
     Retorna:
       will (bool), pick ('home'|'draw'|'away' ou ''), pprob(float), pev(float), reason(str)
     """
-    # filtra odds válidas
-    avail = [(name, o) for name, o in zip(["home","draw","away"], [odds_home, odds_draw, odds_away]) if o and o >= 1.01]
+    # configurações mínimas
+    MIN_ODD = 1.01
+    MIN_EV = 0.02          # 2%
+    MIN_PROB = 0.25        # 25%
+
+    # odds válidas
+    names = ("home", "draw", "away")
+    odds = (
+        float(odds_home or 0.0),
+        float(odds_draw or 0.0),
+        float(odds_away or 0.0),
+    )
+    avail = [(n, o) for n, o in zip(names, odds) if o >= MIN_ODD]
     if len(avail) < 2:
         return False, "", 0.0, 0.0, "Odds insuficientes (menos de 2 mercados)"
 
-    # normaliza apenas nas disponíveis
-    inv = [(n, 1.0/o) for n, o in avail]
+    # probabilidades implícitas normalizadas (remove a margem do book)
+    inv = [(n, 1.0 / o) for n, o in avail]
     tot = sum(v for _, v in inv)
-    true = {n: v/tot for n, v in inv}
+    if not tot or not (tot > 0):
+        return False, "", 0.0, 0.0, "Probabilidades inválidas"
 
-    # EV por mercado disponível
-    ev = {n: true[n]*o - 1.0 for n, o in avail}
+    true = {n: v / tot for n, v in inv}                 # probs verdadeiras somam 1
+    ev_map = {n: true[n] * o - 1.0 for n, o in avail}   # EV por mercado
 
-    # melhor mercado
-    pick, best_ev = max(ev.items(), key=lambda x: x[1])
+    # melhor mercado disponível
+    pick, best_ev = max(ev_map.items(), key=lambda x: x[1])
+    pprob = true[pick]
 
-    # regra mínima de seleção
-    if best_ev < 0.02:
-        return False, "", true[pick], best_ev, "EV baixo (<2%)"
+    # regras mínimas
+    if best_ev < MIN_EV:
+        return False, "", pprob, best_ev, f"EV baixo (<{int(MIN_EV*100)}%)"
+    if pprob < MIN_PROB:
+        return False, "", pprob, best_ev, f"Probabilidade baixa (<{int(MIN_PROB*100)}%)"
 
-    return True, pick, true[pick], best_ev, "EV positivo"
-
-# -------------------------------------------------------------------------
-# Dentro de morning_scan_and_publish(), no loop dos eventos (evs):
-# -------------------------------------------------------------------------
-
-for ev in evs:
-    # ... (seu parsing de times, odds, datas etc. antes)
-    will, pick, pprob, pev, reason = decide_bet(
-        ev.odds_home, ev.odds_draw, ev.odds_away, ev.competition, (ev.team_home, ev.team_away)
-    )
-
-    # LOGA e pula os não-selecionados (ou remova o 'continue' se quiser salvar mesmo assim)
-    if not will:
-        logger.debug(
-            "DESCARTADO: %s vs %s | motivo=%s | odds=(%.2f,%.2f,%.2f) | prob=%.1f%% | EV=%.1f%% | data_raw='%s'",
-            ev.team_home, ev.team_away, reason,
-            (ev.odds_home or 0), (ev.odds_draw or 0), (ev.odds_away or 0),
-            pprob*100, pev*100, ev.start_local_str
-        )
-        continue
-
-    # Se passou, cria o Game e adiciona à lista de selecionados
-    g = Game(
-        ext_id=ev.ext_id,
-        source_link=url,
-        competition=ev.competition,
-        team_home=ev.team_home,
-        team_away=ev.team_away,
-        start_time=start_utc,  # certifique-se que start_utc foi calculado antes
-        odds_home=ev.odds_home,
-        odds_draw=ev.odds_draw,
-        odds_away=ev.odds_away,
-        pick=pick,
-        pick_prob=pprob,
-        pick_ev=pev,
-        will_bet=will,
-        pick_reason=reason
-    )
-    selected.append(g)
-
-    # log bonitinho do selecionado
-    logger.info(
-        "✅ SELECIONADO: %s vs %s | pick=%s | prob=%.1f%% | EV=%.1f%% | odds=(%.2f,%.2f,%.2f) | início=%s",
-        ev.team_home, ev.team_away, pick, pprob*100, pev*100,
-        (ev.odds_home or 0), (ev.odds_draw or 0), (ev.odds_away or 0),
-        ev.start_local_str
-    )
-
+    return True, pick, pprob, best_ev, "EV positivo"
 
 # ================================
 # Links monitorados (do seu pedido)
@@ -583,56 +551,152 @@ app = BetAuto()
 async def morning_scan_and_publish():
     logger.info("🌅 Iniciando varredura matinal...")
     analyzed_total = 0
+    stored_total = 0
     chosen: List[Game] = []
 
-    backend = SCRAPE_BACKEND
-    if backend not in ("requests", "playwright", "auto"):
-        backend = "requests"
+    # helper local para enviar msg ao Telegram sem estourar parse de markdown
+    def _send_summary_safe(text: str) -> None:
+        try:
+            # tenta sem parse mode (evita erro: "can't parse entities")
+            tg_send_message(text, parse_mode=None)  # se sua função aceitar
+        except TypeError:
+            # assinatura não aceita parse_mode -> tenta simples
+            try:
+                tg_send_message(text)
+            except Exception:
+                logger.exception("Falha ao enviar resumo ao Telegram (fallback simples).")
+        except Exception:
+            logger.exception("Falha ao enviar resumo ao Telegram.")
+
+    # resolve backend
+    backend_cfg = SCRAPE_BACKEND if SCRAPE_BACKEND in ("requests", "playwright", "auto") else "requests"
+
+    now_local = datetime.now(ZONE).date()
 
     with SessionLocal() as session:
         for url in app.all_links():
-            evs = await fetch_events_from_link(url, backend)
+            evs = []
+            active_backend = "requests" if backend_cfg in ("requests", "auto") else "playwright"
+
+            # 1) tentativa com backend ativo
+            try:
+                logger.info("🔎 Varredura iniciada para %s — backend=%s", url, active_backend)
+                evs = await fetch_events_from_link(url, active_backend)
+            except Exception as e:
+                logger.warning("Falha ao buscar %s com %s: %s", url, active_backend, e)
+
+            # 2) fallback: se 'auto' e não achou nada em requests, tenta playwright
+            if backend_cfg == "auto" and (not evs):
+                try:
+                    logger.info("🔁 Fallback para playwright em %s", url)
+                    evs = await fetch_events_from_link(url, "playwright")
+                    active_backend = "playwright"
+                except Exception as e:
+                    logger.warning("Fallback playwright também falhou em %s: %s", url, e)
+
+            logger.info("🧮  → eventos extraídos: %d", len(evs))
             analyzed_total += len(evs)
 
             for ev in evs:
-                start_utc = parse_local_datetime(ev.start_local_str)
-                if not start_utc:
-                    continue
-                # somente jogos do dia local
-                if start_utc.astimezone(ZONE).date() != datetime.now(ZONE).date():
-                    continue
+                try:
+                    start_utc = parse_local_datetime(ev.start_local_str)
+                    if not start_utc:
+                        logger.debug("Ignorado: data inválida para %s vs %s | raw='%s'",
+                                     getattr(ev, "team_home", "?"), getattr(ev, "team_away", "?"),
+                                     getattr(ev, "start_local_str", ""))
+                        continue
 
-                will, pick, pprob, pev, reason = decide_bet(
-                    ev.odds_home, ev.odds_draw, ev.odds_away, ev.competition, (ev.team_home, ev.team_away)
-                )
+                    # somente jogos do dia local configurado
+                    if start_utc.astimezone(ZONE).date() != now_local:
+                        continue
 
-                g = Game(
-                    ext_id=ev.ext_id, source_link=url, competition=ev.competition,
-                    team_home=ev.team_home, team_away=ev.team_away,
-                    start_time=start_utc, odds_home=ev.odds_home, odds_draw=ev.odds_draw, odds_away=ev.odds_away,
-                    pick=pick, pick_prob=pprob, pick_ev=pev, will_bet=will, pick_reason=reason
-                )
-                session.add(g)
-                session.commit()
+                    # decide pick
+                    will, pick, pprob, pev, reason = decide_bet(
+                        ev.odds_home, ev.odds_draw, ev.odds_away, ev.competition, (ev.team_home, ev.team_away)
+                    )
 
-                if will:
+                    # loga descartados e segue o loop
+                    if not will:
+                        logger.debug(
+                            "DESCARTADO: %s vs %s | motivo=%s | odds=(%.2f,%.2f,%.2f) | prob=%.1f%% | EV=%.1f%% | início='%s' | url=%s",
+                            ev.team_home, ev.team_away, reason,
+                            float(ev.odds_home or 0), float(ev.odds_draw or 0), float(ev.odds_away or 0),
+                            pprob * 100, pev * 100, ev.start_local_str, url
+                        )
+                        continue
+
+                    # selecionado -> persiste
+                    g = Game(
+                        ext_id=ev.ext_id,
+                        source_link=url,
+                        competition=ev.competition,
+                        team_home=ev.team_home,
+                        team_away=ev.team_away,
+                        start_time=start_utc,  # UTC
+                        odds_home=ev.odds_home,
+                        odds_draw=ev.odds_draw,
+                        odds_away=ev.odds_away,
+                        pick=pick,
+                        pick_prob=pprob,
+                        pick_ev=pev,
+                        will_bet=will,
+                        pick_reason=reason,
+                    )
+                    session.add(g)
+                    session.commit()
+                    stored_total += 1
                     chosen.append(g)
-                    # lembrete -15min
-                    reminder_at = (g.start_time - timedelta(minutes=15)).astimezone(pytz.UTC)
-                    scheduler.add_job(
-                        send_reminder_job, trigger=DateTrigger(run_date=reminder_at),
-                        args=[g.id], id=f"rem_{g.id}", replace_existing=True
-                    )
-                    # watcher (simples; substitua por checagem real de placar)
-                    scheduler.add_job(
-                        watch_game_until_end_job, trigger=DateTrigger(run_date=g.start_time),
-                        args=[g.id], id=f"watch_{g.id}", replace_existing=True
+
+                    logger.info(
+                        "✅ SELECIONADO: %s vs %s | pick=%s | prob=%.1f%% | EV=%.1f%% | odds=(%.2f,%.2f,%.2f) | início=%s | url=%s",
+                        ev.team_home, ev.team_away, pick, pprob * 100, pev * 100,
+                        float(ev.odds_home or 0), float(ev.odds_draw or 0), float(ev.odds_away or 0),
+                        ev.start_local_str, url
                     )
 
-    # resumo
+                    # agenda lembrete -15min
+                    try:
+                        reminder_at = (g.start_time - timedelta(minutes=15)).astimezone(pytz.UTC)
+                        scheduler.add_job(
+                            send_reminder_job,
+                            trigger=DateTrigger(run_date=reminder_at),
+                            args=[g.id],
+                            id=f"rem_{g.id}",
+                            replace_existing=True,
+                        )
+                    except Exception:
+                        logger.exception("Falha ao agendar lembrete do jogo id=%s", g.id)
+
+                    # agenda watcher simples na hora do início (substituir por placar real se houver)
+                    try:
+                        scheduler.add_job(
+                            watch_game_until_end_job,
+                            trigger=DateTrigger(run_date=g.start_time),
+                            args=[g.id],
+                            id=f"watch_{g.id}",
+                            replace_existing=True,
+                        )
+                    except Exception:
+                        logger.exception("Falha ao agendar watcher do jogo id=%s", g.id)
+
+                except Exception:
+                    session.rollback()
+                    logger.exception(
+                        "Erro ao processar evento %s vs %s (url=%s)",
+                        getattr(ev, "team_home", "?"),
+                        getattr(ev, "team_away", "?"),
+                        url,
+                    )
+
+            # gentileza com o site
+            await asyncio.sleep(0.2)
+
+    # resumo e envio
     msg = fmt_morning_summary(datetime.now(ZONE), analyzed_total, chosen)
-    tg_send_message(msg)
-    logger.info("🧾 Varredura concluída — analisados=%d | selecionados=%d", analyzed_total, len(chosen))
+    _send_summary_safe(msg)
+
+    logger.info("🧾 Varredura concluída — analisados=%d | selecionados=%d | salvos=%d",
+                analyzed_total, len(chosen), stored_total)
 
 async def send_reminder_job(game_id: int):
     with SessionLocal() as s:
