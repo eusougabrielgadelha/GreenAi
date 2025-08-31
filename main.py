@@ -506,11 +506,27 @@ def fmt_pick_now(g: Game) -> str:
 scheduler = AsyncIOScheduler(timezone=APP_TZ)
 app = BetAuto()
 
+# --- Config extra por .env ---
+START_ALERT_MIN = int(os.getenv("START_ALERT_MIN", "15"))           # janela para alerta "começa agora"
+LATE_WATCH_WINDOW_MIN = int(os.getenv("LATE_WATCH_WINDOW_MIN", "130"))  # watcher tardio (até 2h10 após o início)
+
+# --- Helper: garantir sempre datetime aware em UTC ---
+def to_aware_utc(dt: datetime | None) -> datetime | None:
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return pytz.UTC.localize(dt)
+    return dt.astimezone(pytz.UTC)
+
+
 async def morning_scan_and_publish():
     logger.info("🌅 Iniciando varredura matinal...")
     stored_total = 0
     analyzed_total = 0
-    chosen: List[Game] = []
+
+    # Usaremos chosen_view (objetos leves) para evitar DetachedInstanceError no resumo
+    chosen_view = []
+    chosen_db = []  # ainda guardamos os Games para enviar o sinal imediato
 
     def _send_summary_safe(text: str) -> None:
         try:
@@ -529,7 +545,7 @@ async def morning_scan_and_publish():
             logger.exception("Falha ao enviar resumo ao Telegram (fallback simples).")
 
     backend_cfg = SCRAPE_BACKEND if SCRAPE_BACKEND in ("requests", "playwright", "auto") else "requests"
-    now_local = datetime.now(ZONE).date()
+    now_local_date = datetime.now(ZONE).date()
 
     with SessionLocal() as session:
         for url in app.all_links():
@@ -553,14 +569,18 @@ async def morning_scan_and_publish():
 
             for ev in evs:
                 try:
-                    start_utc = parse_local_datetime(ev.start_local_str)
+                    start_utc = parse_local_datetime(ev.start_local_str)  # espera-se aware em UTC
                     if not start_utc:
                         logger.info("Ignorado: data inválida | %s vs %s | raw='%s'",
                                     getattr(ev, "team_home", "?"), getattr(ev, "team_away", "?"),
                                     getattr(ev, "start_local_str", ""))
                         continue
 
-                    if start_utc.astimezone(ZONE).date() != now_local:
+                    # normaliza (por via das dúvidas)
+                    start_utc = to_aware_utc(start_utc)
+
+                    # filtra somente jogos do dia local
+                    if start_utc.astimezone(ZONE).date() != now_local_date:
                         continue
 
                     will, pick, pprob, pev, reason = decide_bet(
@@ -616,7 +636,7 @@ async def morning_scan_and_publish():
                             session.commit()
                         except IntegrityError:
                             session.rollback()
-                            # em caso de corrida, reconsulta e atualiza
+                            # corrida: reconsulta e atualiza
                             g = session.query(Game).filter_by(ext_id=ev.ext_id, start_time=start_utc).one_or_none()
                             if g:
                                 g.source_link = url
@@ -636,7 +656,31 @@ async def morning_scan_and_publish():
                                 raise
 
                     stored_total += 1
-                    chosen.append(g)
+
+                    # refresh e construir snapshot leve para resumo
+                    session.refresh(g)
+                    start_utc_db = to_aware_utc(g.start_time)
+                    chosen_db.append(g)
+                    chosen_view.append(NS(
+                        id=g.id,
+                        ext_id=g.ext_id,
+                        source_link=g.source_link,
+                        competition=g.competition,
+                        team_home=g.team_home,
+                        team_away=g.team_away,
+                        start_time=start_utc_db,
+                        odds_home=g.odds_home,
+                        odds_draw=g.odds_draw,
+                        odds_away=g.odds_away,
+                        pick=g.pick,
+                        pick_prob=g.pick_prob,
+                        pick_ev=g.pick_ev,
+                        pick_reason=g.pick_reason,
+                        will_bet=g.will_bet,
+                        status=g.status,
+                        outcome=g.outcome,
+                        hit=g.hit,
+                    ))
 
                     logger.info(
                         "✅ SELECIONADO: %s vs %s | pick=%s | prob=%.1f%% | EV=%.1f%% | odds=(%.2f,%.2f,%.2f) | início=%s | url=%s",
@@ -651,38 +695,71 @@ async def morning_scan_and_publish():
                     except Exception:
                         logger.exception("Falha ao enviar sinal imediato do jogo id=%s", g.id)
 
-                    # Lembrete 15min antes (só se futuro)
+                    # --------- Agenda / Ações por janela de tempo ---------
                     try:
                         now_utc = datetime.now(pytz.UTC)
-                        reminder_at = (g.start_time - timedelta(minutes=15)).astimezone(pytz.UTC)
-                        if reminder_at > now_utc:
-                            scheduler.add_job(
-                                send_reminder_job,
-                                trigger=DateTrigger(run_date=reminder_at),
-                                args=[g.id],
-                                id=f"rem_{g.id}",
-                                replace_existing=True,
-                            )
-                        else:
-                            logger.info("⏩ Lembrete não agendado (horário já passou) id=%s", g.id)
-                    except Exception:
-                        logger.exception("Falha ao agendar lembrete do jogo id=%s", g.id)
+                        g_start = start_utc_db  # já aware UTC
 
-                    # Watcher na hora do jogo (só se futuro)
-                    try:
-                        now_utc = datetime.now(pytz.UTC)
-                        if g.start_time > now_utc:
-                            scheduler.add_job(
-                                watch_game_until_end_job,
-                                trigger=DateTrigger(run_date=g.start_time),
-                                args=[g.id],
-                                id=f"watch_{g.id}",
-                                replace_existing=True,
-                            )
+                        # (1) Lembrete T-15 (se futuro); caso contrário, será coberto por "começa agora"
+                        reminder_at = (g_start - timedelta(minutes=15))
+                        if reminder_at > now_utc:
+                            try:
+                                scheduler.add_job(
+                                    send_reminder_job,
+                                    trigger=DateTrigger(run_date=reminder_at),
+                                    args=[g.id],
+                                    id=f"rem_{g.id}",
+                                    replace_existing=True,
+                                )
+                            except Exception:
+                                logger.exception("Falha ao agendar lembrete do jogo id=%s", g.id)
                         else:
-                            logger.info("⏩ Watcher não agendado (horário já passou) id=%s", g.id)
+                            delta_min = int((now_utc - reminder_at).total_seconds() // 60)
+                            logger.info("⏩ Lembrete não agendado (horário já passou) id=%s (dif=%d min)", g.id, delta_min)
+
+                        # (2) Alerta “começa agora”: se já passamos do T-15 mas ainda não chegou o início
+                        if (now_utc >= reminder_at) and (now_utc < g_start):
+                            try:
+                                local_kick = g_start.astimezone(ZONE).strftime('%H:%M')
+                                tg_send_message(
+                                    f"🚨 <b>Começa já já</b> ({local_kick})\n"
+                                    f"{g.team_home} vs {g.team_away}\n"
+                                    f"Pick: <b>{g.pick.upper()}</b>",
+                                    parse_mode="HTML"
+                                )
+                            except Exception:
+                                logger.exception("Falha ao enviar alerta 'começa agora' id=%s", g.id)
+
+                        # (3) Watcher: normal (se futuro) | tardio (se começou há pouco) | não criar (muito tarde)
+                        if g_start > now_utc:
+                            try:
+                                scheduler.add_job(
+                                    watch_game_until_end_job,
+                                    trigger=DateTrigger(run_date=g_start),
+                                    args=[g.id],
+                                    id=f"watch_{g.id}",
+                                    replace_existing=True,
+                                )
+                            except Exception:
+                                logger.exception("Falha ao agendar watcher do jogo id=%s", g.id)
+                        else:
+                            # jogo já começou
+                            limit_late = g_start + timedelta(minutes=LATE_WATCH_WINDOW_MIN)
+                            if now_utc < limit_late:
+                                # roda watcher imediatamente (sem scheduler)
+                                try:
+                                    asyncio.create_task(watch_game_until_end_job(g.id))
+                                    atrasado = int((now_utc - g_start).total_seconds() // 60)
+                                    logger.info("▶️ Watcher iniciado imediatamente (id=%s, atraso=%d min).", g.id, atrasado)
+                                except Exception:
+                                    logger.exception("Falha ao iniciar watcher imediato id=%s", g.id)
+                            else:
+                                atraso = int((now_utc - g_start).total_seconds() // 60)
+                                logger.info("⏹️ Watcher não criado: jogo iniciou há %d min (> %d) id=%s.",
+                                            atraso, LATE_WATCH_WINDOW_MIN, g.id)
+
                     except Exception:
-                        logger.exception("Falha ao agendar watcher do jogo id=%s", g.id)
+                        logger.exception("Falha no fluxo de agendamento para jogo id=%s", g.id)
 
                 except Exception:
                     session.rollback()
@@ -693,12 +770,13 @@ async def morning_scan_and_publish():
                         url,
                     )
 
-            await asyncio.sleep(0.2)
+            await asyncio.sleep(0.2)  # respiro entre páginas
 
-    msg = fmt_morning_summary(datetime.now(ZONE), analyzed_total, chosen)
+    # usa chosen_view (objetos leves) para evitar DetachedInstanceError
+    msg = fmt_morning_summary(datetime.now(ZONE), analyzed_total, chosen_view)
     _send_summary_safe(msg)
     logger.info("🧾 Varredura concluída — analisados=%d | selecionados=%d | salvos=%d",
-                analyzed_total, len(chosen), stored_total)
+                analyzed_total, len(chosen_view), stored_total)
 
 async def send_reminder_job(game_id: int):
     with SessionLocal() as s:
