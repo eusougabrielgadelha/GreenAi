@@ -524,9 +524,10 @@ async def morning_scan_and_publish():
     stored_total = 0
     analyzed_total = 0
 
-    # Usaremos chosen_view (objetos leves) para evitar DetachedInstanceError no resumo
-    chosen_view = []
-    chosen_db = []  # ainda guardamos os Games para enviar o sinal imediato
+    # Resumo usa snapshots leves (dict) para evitar DetachedInstanceError
+    chosen_view: List[Dict[str, Any]] = []
+    # Guardamos o Game também para envio imediato do sinal, se precisar
+    chosen_db: List[Game] = []
 
     def _send_summary_safe(text: str) -> None:
         try:
@@ -545,19 +546,22 @@ async def morning_scan_and_publish():
             logger.exception("Falha ao enviar resumo ao Telegram (fallback simples).")
 
     backend_cfg = SCRAPE_BACKEND if SCRAPE_BACKEND in ("requests", "playwright", "auto") else "requests"
-    now_local_date = datetime.now(ZONE).date()
+    analysis_date_local = datetime.now(ZONE).date()
+    logger.info("📅 Dia analisado (timezone %s): %s", ZONE, analysis_date_local.isoformat())
 
     with SessionLocal() as session:
         for url in app.all_links():
-            evs = []
+            evs: List[Any] = []
             active_backend = "requests" if backend_cfg in ("requests", "auto") else "playwright"
 
+            # 1) tentativa principal
             try:
                 evs = await fetch_events_from_link(url, active_backend)
             except Exception as e:
                 logger.warning("Falha ao buscar %s com %s: %s", url, active_backend, e)
 
-            if backend_cfg == "auto" and (not evs):
+            # 2) fallback automático
+            if backend_cfg == "auto" and not evs:
                 try:
                     logger.info("🔁 Fallback para playwright em %s", url)
                     evs = await fetch_events_from_link(url, "playwright")
@@ -569,24 +573,33 @@ async def morning_scan_and_publish():
 
             for ev in evs:
                 try:
-                    start_utc = parse_local_datetime(ev.start_local_str)  # espera-se aware em UTC
+                    # ---- horário do evento -> UTC aware
+                    start_utc = parse_local_datetime(getattr(ev, "start_local_str", ""))
                     if not start_utc:
                         logger.info("Ignorado: data inválida | %s vs %s | raw='%s'",
-                                    getattr(ev, "team_home", "?"), getattr(ev, "team_away", "?"),
+                                    getattr(ev, "team_home", "?"),
+                                    getattr(ev, "team_away", "?"),
                                     getattr(ev, "start_local_str", ""))
                         continue
 
-                    # normaliza (por via das dúvidas)
+                    # normaliza qualquer datetime para UTC aware
                     start_utc = to_aware_utc(start_utc)
 
-                    # filtra somente jogos do dia local
-                    if start_utc.astimezone(ZONE).date() != now_local_date:
+                    # ---- filtra SOMENTE jogos do dia analisado (timezone local do app)
+                    event_date_local = start_utc.astimezone(ZONE).date()
+                    if event_date_local != analysis_date_local:
+                        logger.info("⏭️ Fora do dia analisado | %s vs %s | início='%s' (dia=%s) | url=%s",
+                                    getattr(ev, "team_home", "?"),
+                                    getattr(ev, "team_away", "?"),
+                                    getattr(ev, "start_local_str", ""),
+                                    event_date_local.isoformat(),
+                                    url)
                         continue
 
+                    # ---- decisão de aposta
                     will, pick, pprob, pev, reason = decide_bet(
                         ev.odds_home, ev.odds_draw, ev.odds_away, ev.competition, (ev.team_home, ev.team_away)
                     )
-
                     if not will:
                         logger.info(
                             "DESCARTADO: %s vs %s | motivo=%s | odds=(%.2f,%.2f,%.2f) | prob=%.1f%% | EV=%.1f%% | início='%s' | url=%s",
@@ -596,24 +609,22 @@ async def morning_scan_and_publish():
                         )
                         continue
 
-                    # ---------- UPSERT (evita UNIQUE constraint) ----------
-                    existing = session.query(Game).filter_by(ext_id=ev.ext_id, start_time=start_utc).one_or_none()
-                    if existing:
-                        # atualiza
-                        existing.source_link = url
-                        existing.competition = ev.competition or existing.competition
-                        existing.team_home = ev.team_home or existing.team_home
-                        existing.team_away = ev.team_away or existing.team_away
-                        existing.odds_home = ev.odds_home
-                        existing.odds_draw = ev.odds_draw
-                        existing.odds_away = ev.odds_away
-                        existing.pick = pick
-                        existing.pick_prob = pprob
-                        existing.pick_ev = pev
-                        existing.pick_reason = reason
-                        existing.will_bet = will
+                    # ---- UPSERT (evita UNIQUE constraint em ext_id+start_time)
+                    g = session.query(Game).filter_by(ext_id=ev.ext_id, start_time=start_utc).one_or_none()
+                    if g:
+                        g.source_link = url
+                        g.competition = ev.competition or g.competition
+                        g.team_home = ev.team_home or g.team_home
+                        g.team_away = ev.team_away or g.team_away
+                        g.odds_home = ev.odds_home
+                        g.odds_draw = ev.odds_draw
+                        g.odds_away = ev.odds_away
+                        g.pick = pick
+                        g.pick_prob = pprob
+                        g.pick_ev = pev
+                        g.pick_reason = reason
+                        g.will_bet = will
                         session.commit()
-                        g = existing
                     else:
                         g = Game(
                             ext_id=ev.ext_id,
@@ -621,7 +632,7 @@ async def morning_scan_and_publish():
                             competition=ev.competition,
                             team_home=ev.team_home,
                             team_away=ev.team_away,
-                            start_time=start_utc,
+                            start_time=start_utc,  # UTC aware
                             odds_home=ev.odds_home,
                             odds_draw=ev.odds_draw,
                             odds_away=ev.odds_away,
@@ -636,7 +647,6 @@ async def morning_scan_and_publish():
                             session.commit()
                         except IntegrityError:
                             session.rollback()
-                            # corrida: reconsulta e atualiza
                             g = session.query(Game).filter_by(ext_id=ev.ext_id, start_time=start_utc).one_or_none()
                             if g:
                                 g.source_link = url
@@ -656,31 +666,31 @@ async def morning_scan_and_publish():
                                 raise
 
                     stored_total += 1
+                    session.refresh(g)  # garante id e campos atualizados
 
-                    # refresh e construir snapshot leve para resumo
-                    session.refresh(g)
-                    start_utc_db = to_aware_utc(g.start_time)
+                    # Snapshot leve para resumo
                     chosen_db.append(g)
-                    chosen_view.append(NS(
-                        id=g.id,
-                        ext_id=g.ext_id,
-                        source_link=g.source_link,
-                        competition=g.competition,
-                        team_home=g.team_home,
-                        team_away=g.team_away,
-                        start_time=start_utc_db,
-                        odds_home=g.odds_home,
-                        odds_draw=g.odds_draw,
-                        odds_away=g.odds_away,
-                        pick=g.pick,
-                        pick_prob=g.pick_prob,
-                        pick_ev=g.pick_ev,
-                        pick_reason=g.pick_reason,
-                        will_bet=g.will_bet,
-                        status=g.status,
-                        outcome=g.outcome,
-                        hit=g.hit,
-                    ))
+                    g_start = to_aware_utc(g.start_time)
+                    chosen_view.append({
+                        "id": g.id,
+                        "ext_id": g.ext_id,
+                        "source_link": g.source_link,
+                        "competition": g.competition,
+                        "team_home": g.team_home,
+                        "team_away": g.team_away,
+                        "start_time": g_start,
+                        "odds_home": float(g.odds_home or 0.0),
+                        "odds_draw": float(g.odds_draw or 0.0),
+                        "odds_away": float(g.odds_away or 0.0),
+                        "pick": g.pick,
+                        "pick_prob": float(g.pick_prob or 0.0),
+                        "pick_ev": float(g.pick_ev or 0.0),
+                        "pick_reason": g.pick_reason,
+                        "will_bet": bool(g.will_bet),
+                        "status": g.status,
+                        "outcome": g.outcome,
+                        "hit": g.hit,
+                    })
 
                     logger.info(
                         "✅ SELECIONADO: %s vs %s | pick=%s | prob=%.1f%% | EV=%.1f%% | odds=(%.2f,%.2f,%.2f) | início=%s | url=%s",
@@ -689,19 +699,18 @@ async def morning_scan_and_publish():
                         ev.start_local_str, url
                     )
 
-                    # Envio imediato do sinal
+                    # ---- Envio imediato do sinal
                     try:
                         tg_send_message(fmt_pick_now(g))
                     except Exception:
                         logger.exception("Falha ao enviar sinal imediato do jogo id=%s", g.id)
 
-                    # --------- Agenda / Ações por janela de tempo ---------
+                    # ---- Agendamentos (tudo em UTC aware)
                     try:
                         now_utc = datetime.now(pytz.UTC)
-                        g_start = start_utc_db  # já aware UTC
 
-                        # (1) Lembrete T-15 (se futuro); caso contrário, será coberto por "começa agora"
-                        reminder_at = (g_start - timedelta(minutes=15))
+                        # Lembrete T-15
+                        reminder_at = (g_start - timedelta(minutes=START_ALERT_MIN))
                         if reminder_at > now_utc:
                             try:
                                 scheduler.add_job(
@@ -717,7 +726,7 @@ async def morning_scan_and_publish():
                             delta_min = int((now_utc - reminder_at).total_seconds() // 60)
                             logger.info("⏩ Lembrete não agendado (horário já passou) id=%s (dif=%d min)", g.id, delta_min)
 
-                        # (2) Alerta “começa agora”: se já passamos do T-15 mas ainda não chegou o início
+                        # Alerta “começa já já” se entre T-15 e o apito inicial
                         if (now_utc >= reminder_at) and (now_utc < g_start):
                             try:
                                 local_kick = g_start.astimezone(ZONE).strftime('%H:%M')
@@ -730,7 +739,7 @@ async def morning_scan_and_publish():
                             except Exception:
                                 logger.exception("Falha ao enviar alerta 'começa agora' id=%s", g.id)
 
-                        # (3) Watcher: normal (se futuro) | tardio (se começou há pouco) | não criar (muito tarde)
+                        # Watcher normal (futuro) ou tardio (até X min após início)
                         if g_start > now_utc:
                             try:
                                 scheduler.add_job(
@@ -743,14 +752,13 @@ async def morning_scan_and_publish():
                             except Exception:
                                 logger.exception("Falha ao agendar watcher do jogo id=%s", g.id)
                         else:
-                            # jogo já começou
                             limit_late = g_start + timedelta(minutes=LATE_WATCH_WINDOW_MIN)
                             if now_utc < limit_late:
-                                # roda watcher imediatamente (sem scheduler)
+                                # Inicia watcher imediatamente (sem scheduler) — evita comparar naive/aware
                                 try:
                                     asyncio.create_task(watch_game_until_end_job(g.id))
-                                    atrasado = int((now_utc - g_start).total_seconds() // 60)
-                                    logger.info("▶️ Watcher iniciado imediatamente (id=%s, atraso=%d min).", g.id, atrasado)
+                                    atraso = int((now_utc - g_start).total_seconds() // 60)
+                                    logger.info("▶️ Watcher iniciado imediatamente (id=%s, atraso=%d min).", g.id, atraso)
                                 except Exception:
                                     logger.exception("Falha ao iniciar watcher imediato id=%s", g.id)
                             else:
@@ -772,11 +780,12 @@ async def morning_scan_and_publish():
 
             await asyncio.sleep(0.2)  # respiro entre páginas
 
-    # usa chosen_view (objetos leves) para evitar DetachedInstanceError
+    # Resumo só com os jogos de hoje (já filtrados)
     msg = fmt_morning_summary(datetime.now(ZONE), analyzed_total, chosen_view)
     _send_summary_safe(msg)
     logger.info("🧾 Varredura concluída — analisados=%d | selecionados=%d | salvos=%d",
                 analyzed_total, len(chosen_view), stored_total)
+
 
 async def send_reminder_job(game_id: int):
     with SessionLocal() as s:
