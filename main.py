@@ -93,7 +93,7 @@ if not logger.handlers:
 # ================================
 Base = declarative_base()
 engine = create_engine(DB_URL, echo=False, future=True)
-SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
 
 class Game(Base):
     __tablename__ = "games"
@@ -538,9 +538,9 @@ app = BetAuto()
 
 async def morning_scan_and_publish():
     logger.info("🌅 Iniciando varredura matinal...")
-    analyzed_total = 0
     stored_total = 0
-    chosen: List[Game] = []
+    analyzed_total = 0
+    chosen: List[Game] = []  # ✅ corrigido: usar a lista 'chosen' de fato
 
     # helper local para enviar msg ao Telegram sem estourar parse/markdown
     def _send_summary_safe(text: str) -> None:
@@ -562,7 +562,6 @@ async def morning_scan_and_publish():
                 logger.exception("Falha ao enviar resumo ao Telegram (fallback simples).")
         except Exception:
             logger.exception("Falha ao enviar resumo ao Telegram (fallback simples).")
-
 
     backend_cfg = SCRAPE_BACKEND if SCRAPE_BACKEND in ("requests", "playwright", "auto") else "requests"
     now_local = datetime.now(ZONE).date()
@@ -693,14 +692,16 @@ async def watch_game_until_end_job(game_id: int):
         g = s.get(Game, game_id)
         if not g:
             return
-        logger.info("👀 Monitorando: %s vs %s (id=%s)", g.team_home, g.team_away, g.id)
+        start_time_utc = g.start_time  # ✅ captura antes de sair da sessão
+        home, away, gid = g.team_home, g.team_away, g.id
+        logger.info("👀 Monitorando: %s vs %s (id=%s)", home, away, gid)
 
-    end_eta = g.start_time + timedelta(hours=2)
+    end_eta = start_time_utc + timedelta(hours=2)
     while datetime.now(tz=pytz.UTC) < end_eta:
         await asyncio.sleep(30)  # ajuste o polling quando implementar placar real
 
     outcome = random.choice(["home", "draw", "away"])
-    hit = (outcome == g.pick)
+    hit = (outcome == g.pick) if 'g' in locals() else False
 
     with SessionLocal() as s:
         g = s.get(Game, game_id)
@@ -708,7 +709,7 @@ async def watch_game_until_end_job(game_id: int):
             return
         g.status = "ended"
         g.outcome = outcome
-        g.hit = hit
+        g.hit = (outcome == g.pick)
         s.commit()
         tg_send_message(fmt_result(g))
         logger.info("🏁 Encerrado id=%s | palpite=%s | resultado=%s | hit=%s", g.id, g.pick, g.outcome, g.hit)
