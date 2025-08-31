@@ -373,7 +373,8 @@ def decide_bet(odds_home, odds_draw, odds_away, competition, teams):
     FAV_PROB_MIN = float(os.getenv("FAV_PROB_MIN", "0.70"))
     FAV_GAP_MIN = float(os.getenv("FAV_GAP_MIN", "0.18"))
     EV_TOL = float(os.getenv("EV_TOL", "-0.03"))
-    FAV_IGNORE_EV = os.getenv("FAV_IGNORE_EV", "off").lower() == "on"  # permite favorito mesmo com EV < 0
+    # por padrão aceitamos favorito com EV negativo leve, como você pediu
+    FAV_IGNORE_EV = os.getenv("FAV_IGNORE_EV", "on").lower() == "on"  # on por padrão
 
     names = ("home", "draw", "away")
     odds = (float(odds_home or 0.0), float(odds_draw or 0.0), float(odds_away or 0.0))
@@ -486,6 +487,17 @@ def fmt_result(g: Game) -> str:
         f"🏁 {h('Finalizado')} — {g.team_home} vs {g.team_away}\n"
         f"Palpite: {g.pick} | Resultado: {g.outcome or '—'}\n"
         f"{status} | EV estimado: {g.pick_ev*100:.1f}%"
+    )
+
+def fmt_pick_now(g: Game) -> str:
+    """Mensagem imediata por pick selecionado."""
+    hhmm = g.start_time.astimezone(ZONE).strftime("%H:%M")
+    side = {"home": g.team_home, "draw": "Empate", "away": g.team_away}.get(g.pick, "—")
+    return (
+        f"🎯 {h('Sinal de Aposta')} ({hhmm})\n"
+        f"{g.team_home} vs {g.team_away}\n"
+        f"Pick: {h(side)} — Prob: {g.pick_prob*100:.1f}% | EV: {g.pick_ev*100:.1f}%\n"
+        f"Odds: {g.odds_home:.2f}/{g.odds_draw:.2f}/{g.odds_away:.2f}"
     )
 
 # ================================
@@ -633,28 +645,42 @@ async def morning_scan_and_publish():
                         ev.start_local_str, url
                     )
 
-                    # Lembrete 15min antes
+                    # Envio imediato do sinal
                     try:
+                        tg_send_message(fmt_pick_now(g))
+                    except Exception:
+                        logger.exception("Falha ao enviar sinal imediato do jogo id=%s", g.id)
+
+                    # Lembrete 15min antes (só se futuro)
+                    try:
+                        now_utc = datetime.now(pytz.UTC)
                         reminder_at = (g.start_time - timedelta(minutes=15)).astimezone(pytz.UTC)
-                        scheduler.add_job(
-                            send_reminder_job,
-                            trigger=DateTrigger(run_date=reminder_at),
-                            args=[g.id],
-                            id=f"rem_{g.id}",
-                            replace_existing=True,
-                        )
+                        if reminder_at > now_utc:
+                            scheduler.add_job(
+                                send_reminder_job,
+                                trigger=DateTrigger(run_date=reminder_at),
+                                args=[g.id],
+                                id=f"rem_{g.id}",
+                                replace_existing=True,
+                            )
+                        else:
+                            logger.info("⏩ Lembrete não agendado (horário já passou) id=%s", g.id)
                     except Exception:
                         logger.exception("Falha ao agendar lembrete do jogo id=%s", g.id)
 
-                    # Watcher na hora do jogo
+                    # Watcher na hora do jogo (só se futuro)
                     try:
-                        scheduler.add_job(
-                            watch_game_until_end_job,
-                            trigger=DateTrigger(run_date=g.start_time),
-                            args=[g.id],
-                            id=f"watch_{g.id}",
-                            replace_existing=True,
-                        )
+                        now_utc = datetime.now(pytz.UTC)
+                        if g.start_time > now_utc:
+                            scheduler.add_job(
+                                watch_game_until_end_job,
+                                trigger=DateTrigger(run_date=g.start_time),
+                                args=[g.id],
+                                id=f"watch_{g.id}",
+                                replace_existing=True,
+                            )
+                        else:
+                            logger.info("⏩ Watcher não agendado (horário já passou) id=%s", g.id)
                     except Exception:
                         logger.exception("Falha ao agendar watcher do jogo id=%s", g.id)
 
