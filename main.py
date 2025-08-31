@@ -417,8 +417,8 @@ def decide_bet(odds_home, odds_draw, odds_away, competition, teams):
     pprob = true[pick]
 
     # regras mínimas
-    if best_ev < MIN_EV:
-        return False, "", pprob, best_ev, f"EV baixo (<{int(MIN_EV*100)}%)"
+    if best_ev < EV_MIN:
+    return False, "", true[pick], best_ev, f"EV baixo (<{int(EV_MIN*100)}%)"
     if pprob < MIN_PROB:
         return False, "", pprob, best_ev, f"Probabilidade baixa (<{int(MIN_PROB*100)}%)"
 
