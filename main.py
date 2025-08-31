@@ -24,11 +24,11 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
 from types import SimpleNamespace as NS
 
-
 from sqlalchemy import (
-    create_engine, Column, Integer, String, Float, Text, DateTime, Boolean, JSON, func
+    create_engine, Column, Integer, String, Float, Text, DateTime, Boolean, JSON, func, UniqueConstraint
 )
 from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy.exc import IntegrityError
 
 # ================================
 # Playwright (opcional)
@@ -118,6 +118,10 @@ class Game(Base):
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, onupdate=func.now())
 
+    __table_args__ = (
+        UniqueConstraint("ext_id", "start_time", name="uq_game_extid_start"),
+    )
+
 class Stat(Base):
     __tablename__ = "stats"
     id = Column(Integer, primary_key=True)
@@ -201,7 +205,7 @@ def parse_local_datetime(s: str) -> Optional[datetime]:
     except Exception:
         pass
 
-    # 2) seus formatos legados
+    # 2) formatos legados
     fmts = [
         "%H:%M %d/%m/%Y", "%H:%M %d/%m/%y",
         "%d/%m/%Y %H:%M", "%d/%m/%y %H:%M",
@@ -244,7 +248,7 @@ def try_parse_events(html: str, url: str):
     cards = soup.select('[data-testid="preMatchOdds"]')
     evs = []
 
-    def num_from_text(txt: str):
+    def _num(txt: str):
         if not txt:
             return None
         txt = txt.strip().replace(",", ".")
@@ -275,7 +279,7 @@ def try_parse_events(html: str, url: str):
             if ext_id:
                 c = card.select_one(f"[data-testid='odd-{ext_id}_1_{i}_']")
                 if c:
-                    return num_from_text(c.get_text(" ", strip=True))
+                    return _num(c.get_text(" ", strip=True))
             return None
 
         odd_home = pick_cell(1)
@@ -290,7 +294,7 @@ def try_parse_events(html: str, url: str):
                 mm = re.search(r"_1_(\d)_", c.get("data-testid", ""))
                 return int(mm.group(1)) if mm else 99
             cells = sorted(cells, key=col_index)
-            vals = [num_from_text(c.get_text(" ", strip=True)) for c in cells[:3]]
+            vals = [_num(c.get_text(" ", strip=True)) for c in cells[:3]]
             if len(vals) >= 3:
                 odd_home, odd_draw, odd_away = vals
 
@@ -321,13 +325,10 @@ async def fetch_events_from_link(url: str, backend: str):
     try:
         if backend_sel == "playwright":
             html = await _fetch_with_playwright(url)
-            # IMPORTANTE: passar a url aqui
             evs = try_parse_events(html, url)
         else:
-            # requests
             r = requests.get(url, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
             r.raise_for_status()
-            # IMPORTANTE: passar a url aqui
             evs = try_parse_events(r.text, url)
 
         logger.info("🧮  → eventos extraídos: %d", len(evs))
@@ -341,6 +342,8 @@ async def _fetch_with_playwright(url: str) -> str:
     """
     Renderiza a página com Playwright e retorna o HTML.
     """
+    if not HAS_PLAYWRIGHT:
+        raise RuntimeError("Playwright não disponível no ambiente.")
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context(
@@ -350,7 +353,6 @@ async def _fetch_with_playwright(url: str) -> str:
         page = await context.new_page()
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            # espera a grade de odds aparecer (tem no HTML enviado)
             await page.wait_for_selector('[data-testid="preMatchOdds"]', timeout=15000)
             html = await page.content()
             return html
@@ -362,7 +364,6 @@ async def _fetch_with_playwright(url: str) -> str:
 # Regras simples de decisão
 # ================================
 
-# --- regra simples de decisão ---
 def decide_bet(odds_home, odds_draw, odds_away, competition, teams):
     # parâmetros ajustáveis
     MIN_ODD = 1.01
@@ -385,7 +386,7 @@ def decide_bet(odds_home, odds_draw, odds_away, competition, teams):
     if tot <= 0:
         return False, "", 0.0, 0.0, "Probabilidades inválidas"
 
-    true = {n: v / tot for n, v in inv}                 # prob. implícitas normalizadas (com vigorish distribuído)
+    true = {n: v / tot for n, v in inv}                 # prob. implícitas normalizadas
     odd_map = dict(avail)
     ev_map = {n: true[n] * odd_map[n] - 1.0 for n in true}
 
@@ -411,73 +412,30 @@ def decide_bet(odds_home, odds_draw, odds_away, competition, teams):
     reason = f"EV baixo (<{int(MIN_EV*100)}%)" if best_ev < MIN_EV else f"Probabilidade baixa (<{int(MIN_PROB*100)}%)"
     return False, "", pprob_ev, best_ev, reason
 
-
-
 # ================================
-# Links monitorados (do seu pedido)
+# Links monitorados
 # ================================
 class BetAuto:
     def __init__(self):
         self.betting_links = {
-            "UEFA Champions League": {
-                "pais": "Europa", "campeonato": "UEFA Champions League",
-                "link": "https://betnacional.bet.br/events/1/0/7"
-            },
-            "Espanha - LaLiga": {
-                "pais": "Espanha", "campeonato": "LaLiga",
-                "link": "https://betnacional.bet.br/events/1/0/8"
-            },
-            "Inglaterra - Premier League": {
-                "pais": "Inglaterra", "campeonato": "Premier League",
-                "link": "https://betnacional.bet.br/events/1/0/17"
-            },
-            "Brasil - Paulista": {
-                "pais": "Brasil", "campeonato": "Paulista",
-                "link": "https://betnacional.bet.br/events/1/0/15644"
-            },
-            "França - Ligue 1": {
-                "pais": "França", "campeonato": "Ligue 1",
-                "link": "https://betnacional.bet.br/events/1/0/34"
-            },
-            "Itália - Série A": {
-                "pais": "Itália", "campeonato": "Série A",
-                "link": "https://betnacional.bet.br/events/1/0/23"
-            },
-            "Alemanha - Bundesliga": {
-                "pais": "Alemanha", "campeonato": "Bundesliga",
-                "link": "https://betnacional.bet.br/events/1/0/38"
-            },
-            "Brasil - Série A": {
-                "pais": "Brasil", "campeonato": "Brasileirão Série A",
-                "link": "https://betnacional.bet.br/events/1/0/325"
-            },
-            "Brasil - Série B": {
-                "pais": "Brasil", "campeonato": "Brasileirão Série B",
-                "link": "https://betnacional.bet.br/events/1/0/390"
-            },
-            "Brasil - Série C": {
-                "pais": "Brasil", "campeonato": "Brasileirão Série C",
-                "link": "https://betnacional.bet.br/events/1/0/1281"
-            },
-            "Argentina - Série A": {
-                "pais": "Argentina", "campeonato": "Argentina Série A",
-                "link": "https://betnacional.bet.br/events/1/0/30106"
-            },
-            "Argentina - Série B": {
-                "pais": "Argentina", "campeonato": "Argentina Série B",
-                "link": "https://betnacional.bet.br/events/1/0/703"
-            },
-            "Estados Unidos - Major League Soccer": {
-                "pais": "Estados Unidos", "campeonato": "Major League Soccer",
-                "link": "https://betnacional.bet.br/events/1/0/242"
-            },
+            "UEFA Champions League": {"pais": "Europa", "campeonato": "UEFA Champions League", "link": "https://betnacional.bet.br/events/1/0/7"},
+            "Espanha - LaLiga": {"pais": "Espanha", "campeonato": "LaLiga", "link": "https://betnacional.bet.br/events/1/0/8"},
+            "Inglaterra - Premier League": {"pais": "Inglaterra", "campeonato": "Premier League", "link": "https://betnacional.bet.br/events/1/0/17"},
+            "Brasil - Paulista": {"pais": "Brasil", "campeonato": "Paulista", "link": "https://betnacional.bet.br/events/1/0/15644"},
+            "França - Ligue 1": {"pais": "França", "campeonato": "Ligue 1", "link": "https://betnacional.bet.br/events/1/0/34"},
+            "Itália - Série A": {"pais": "Itália", "campeonato": "Série A", "link": "https://betnacional.bet.br/events/1/0/23"},
+            "Alemanha - Bundesliga": {"pais": "Alemanha", "campeonato": "Bundesliga", "link": "https://betnacional.bet.br/events/1/0/38"},
+            "Brasil - Série A": {"pais": "Brasil", "campeonato": "Brasileirão Série A", "link": "https://betnacional.bet.br/events/1/0/325"},
+            "Brasil - Série B": {"pais": "Brasil", "campeonato": "Brasileirão Série B", "link": "https://betnacional.bet.br/events/1/0/390"},
+            "Brasil - Série C": {"pais": "Brasil", "campeonato": "Brasileirão Série C", "link": "https://betnacional.bet.br/events/1/0/1281"},
+            "Argentina - Série A": {"pais": "Argentina", "campeonato": "Argentina Série A", "link": "https://betnacional.bet.br/events/1/0/30106"},
+            "Argentina - Série B": {"pais": "Argentina", "campeonato": "Argentina Série B", "link": "https://betnacional.bet.br/events/1/0/703"},
+            "Estados Unidos - Major League Soccer": {"pais": "Estados Unidos", "campeonato": "Major League Soccer", "link": "https://betnacional.bet.br/events/1/0/242"},
         }
 
     def all_links(self) -> List[str]:
         base = [cfg["link"] for cfg in self.betting_links.values() if "link" in cfg]
-        # complementa com .env se houver
         base.extend(EXTRA_LINKS)
-        # dedup preservando ordem
         seen, out = set(), []
         for u in base:
             if u not in seen:
@@ -540,22 +498,17 @@ async def morning_scan_and_publish():
     logger.info("🌅 Iniciando varredura matinal...")
     stored_total = 0
     analyzed_total = 0
-    chosen: List[Game] = []  # ✅ corrigido: usar a lista 'chosen' de fato
+    chosen: List[Game] = []
 
-    # helper local para enviar msg ao Telegram sem estourar parse/markdown
     def _send_summary_safe(text: str) -> None:
-        # 1) tenta com HTML
         try:
             tg_send_message(text, parse_mode="HTML")
             return
         except Exception:
             logger.exception("Falha com HTML; tentando sem parse_mode…")
-
-        # 2) fallback: sem parse_mode (a função deve omitir a chave se None)
         try:
             tg_send_message(text, parse_mode=None)
         except TypeError:
-            # caso a assinatura não tenha parse_mode
             try:
                 tg_send_message(text)
             except Exception:
@@ -611,34 +564,76 @@ async def morning_scan_and_publish():
                         )
                         continue
 
-                    g = Game(
-                        ext_id=ev.ext_id,
-                        source_link=url,
-                        competition=ev.competition,
-                        team_home=ev.team_home,
-                        team_away=ev.team_away,
-                        start_time=start_utc,
-                        odds_home=ev.odds_home,
-                        odds_draw=ev.odds_draw,
-                        odds_away=ev.odds_away,
-                        pick=pick,
-                        pick_prob=pprob,
-                        pick_ev=pev,
-                        will_bet=will,
-                        pick_reason=reason,
-                    )
-                    session.add(g)
-                    session.commit()
+                    # ---------- UPSERT (evita UNIQUE constraint) ----------
+                    existing = session.query(Game).filter_by(ext_id=ev.ext_id, start_time=start_utc).one_or_none()
+                    if existing:
+                        # atualiza
+                        existing.source_link = url
+                        existing.competition = ev.competition or existing.competition
+                        existing.team_home = ev.team_home or existing.team_home
+                        existing.team_away = ev.team_away or existing.team_away
+                        existing.odds_home = ev.odds_home
+                        existing.odds_draw = ev.odds_draw
+                        existing.odds_away = ev.odds_away
+                        existing.pick = pick
+                        existing.pick_prob = pprob
+                        existing.pick_ev = pev
+                        existing.pick_reason = reason
+                        existing.will_bet = will
+                        session.commit()
+                        g = existing
+                    else:
+                        g = Game(
+                            ext_id=ev.ext_id,
+                            source_link=url,
+                            competition=ev.competition,
+                            team_home=ev.team_home,
+                            team_away=ev.team_away,
+                            start_time=start_utc,
+                            odds_home=ev.odds_home,
+                            odds_draw=ev.odds_draw,
+                            odds_away=ev.odds_away,
+                            pick=pick,
+                            pick_prob=pprob,
+                            pick_ev=pev,
+                            will_bet=will,
+                            pick_reason=reason,
+                        )
+                        session.add(g)
+                        try:
+                            session.commit()
+                        except IntegrityError:
+                            session.rollback()
+                            # em caso de corrida, reconsulta e atualiza
+                            g = session.query(Game).filter_by(ext_id=ev.ext_id, start_time=start_utc).one_or_none()
+                            if g:
+                                g.source_link = url
+                                g.competition = ev.competition or g.competition
+                                g.team_home = ev.team_home or g.team_home
+                                g.team_away = ev.team_away or g.team_away
+                                g.odds_home = ev.odds_home
+                                g.odds_draw = ev.odds_draw
+                                g.odds_away = ev.odds_away
+                                g.pick = pick
+                                g.pick_prob = pprob
+                                g.pick_ev = pev
+                                g.pick_reason = reason
+                                g.will_bet = will
+                                session.commit()
+                            else:
+                                raise
+
                     stored_total += 1
                     chosen.append(g)
 
                     logger.info(
                         "✅ SELECIONADO: %s vs %s | pick=%s | prob=%.1f%% | EV=%.1f%% | odds=(%.2f,%.2f,%.2f) | início=%s | url=%s",
-                        ev.team_home, ev.team_away, pick, pprob * 100, pev * 100,
-                        float(ev.odds_home or 0), float(ev.odds_draw or 0), float(ev.odds_away or 0),
+                        g.team_home, g.team_away, g.pick, g.pick_prob * 100, g.pick_ev * 100,
+                        float(g.odds_home or 0), float(g.odds_draw or 0), float(g.odds_away or 0),
                         ev.start_local_str, url
                     )
 
+                    # Lembrete 15min antes
                     try:
                         reminder_at = (g.start_time - timedelta(minutes=15)).astimezone(pytz.UTC)
                         scheduler.add_job(
@@ -651,6 +646,7 @@ async def morning_scan_and_publish():
                     except Exception:
                         logger.exception("Falha ao agendar lembrete do jogo id=%s", g.id)
 
+                    # Watcher na hora do jogo
                     try:
                         scheduler.add_job(
                             watch_game_until_end_job,
@@ -692,16 +688,15 @@ async def watch_game_until_end_job(game_id: int):
         g = s.get(Game, game_id)
         if not g:
             return
-        start_time_utc = g.start_time  # ✅ captura antes de sair da sessão
+        start_time_utc = g.start_time
         home, away, gid = g.team_home, g.team_away, g.id
         logger.info("👀 Monitorando: %s vs %s (id=%s)", home, away, gid)
 
     end_eta = start_time_utc + timedelta(hours=2)
     while datetime.now(tz=pytz.UTC) < end_eta:
-        await asyncio.sleep(30)  # ajuste o polling quando implementar placar real
+        await asyncio.sleep(30)
 
     outcome = random.choice(["home", "draw", "away"])
-    hit = (outcome == g.pick) if 'g' in locals() else False
 
     with SessionLocal() as s:
         g = s.get(Game, game_id)
