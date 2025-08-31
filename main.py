@@ -22,6 +22,8 @@ from dotenv import load_dotenv
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
+from types import SimpleNamespace as NS
+
 
 from sqlalchemy import (
     create_engine, Column, Integer, String, Float, Text, DateTime, Boolean, JSON, func
