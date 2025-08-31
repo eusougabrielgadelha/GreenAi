@@ -28,6 +28,7 @@ from sqlalchemy import (
     create_engine, Column, Integer, String, Float, Text, DateTime, Boolean, JSON, func, UniqueConstraint
 )
 from sqlalchemy.orm import declarative_base, sessionmaker
+    # noqa: E402
 from sqlalchemy.exc import IntegrityError
 
 # ================================
@@ -238,11 +239,42 @@ class EventRow:
     odds_away: Optional[float]
     ext_id: Optional[str] = None
 
+# --- util: converte "13 setembro", "Hoje" etc. para data local (yyyy-mm-dd)
+_PT_MONTHS = {
+    "janeiro": 1, "fevereiro": 2, "março": 3, "marco": 3, "abril": 4, "maio": 5, "junho": 6,
+    "julho": 7, "agosto": 8, "setembro": 9, "outubro": 10, "novembro": 11, "dezembro": 12,
+}
+def _date_from_header_text(txt: str) -> Optional[datetime]:
+    t = (txt or "").strip().lower()
+    if not t:
+        return None
+    if "hoje" in t:
+        nowl = datetime.now(ZONE)
+        return nowl.replace(hour=0, minute=0, second=0, microsecond=0)
+    # opcional: amanhã/ontem (se a casa usar)
+    if "amanhã" in t or "amanha" in t:
+        nowl = datetime.now(ZONE) + timedelta(days=1)
+        return nowl.replace(hour=0, minute=0, second=0, microsecond=0)
+    if "ontem" in t:
+        nowl = datetime.now(ZONE) - timedelta(days=1)
+        return nowl.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    m = re.search(r"(\d{1,2})\s+([a-zç]+)", t)
+    if m:
+        day = int(m.group(1))
+        mon_name = m.group(2)
+        mon = _PT_MONTHS.get(mon_name, None)
+        if mon:
+            nowl = datetime.now(ZONE)
+            dt = nowl.replace(month=mon, day=day, hour=0, minute=0, second=0, microsecond=0)
+            return dt
+    return None
+
 def try_parse_events(html: str, url: str):
     """
     Parser adaptado ao HTML do Betnacional (com data-testid='odd-<id>_1_<col>_').
-    Retorna uma lista de NS(ext_id, source_link, competition, team_home, team_away,
-                           start_local_str, odds_home, odds_draw, odds_away)
+    Agora identifica o cabeçalho de data (“Hoje”, “13 setembro”, etc.) anterior a cada card
+    e compõe o start_local_str com data completa, evitando “pegar” jogos de outras datas como se fossem de hoje.
     """
     soup = BeautifulSoup(html, "html.parser")
     cards = soup.select('[data-testid="preMatchOdds"]')
@@ -256,6 +288,15 @@ def try_parse_events(html: str, url: str):
         return float(m.group(0)) if m else None
 
     for card in cards:
+        # 1) identificar cabeçalho de data mais próximo acima
+        hdr = card.find_previous(
+            "div",
+            class_=lambda c: c and "text-odds-subheader-text" in c
+        )
+        header_text = hdr.get_text(strip=True) if hdr else ""
+        header_date = _date_from_header_text(header_text)  # datetime local com 00:00
+
+        # 2) extrair identificadores e nomes
         a = card.select_one('a[href*="/event/"]')
         if not a:
             continue
@@ -272,9 +313,18 @@ def try_parse_events(html: str, url: str):
             if len(names) >= 2:
                 team_home, team_away = names[0], names[1]
 
+        # 3) hora local (ex.: 20:30). Se houver cabeçalho de data, montamos "HH:MM dd/mm/YYYY"
         t = card.select_one(".text-text-light-secondary")
-        start_local_str = t.get_text(strip=True) if t else ""
+        hour_local = t.get_text(strip=True) if t else ""
+        start_local_str = hour_local
 
+        if hour_local and header_date:
+            dd = f"{header_date.day:02d}"
+            mm = f"{header_date.month:02d}"
+            yyyy = header_date.year
+            start_local_str = f"{hour_local} {dd}/{mm}/{yyyy}"
+
+        # 4) odds
         def pick_cell(i: int):
             if ext_id:
                 c = card.select_one(f"[data-testid='odd-{ext_id}_1_{i}_']")
@@ -304,7 +354,7 @@ def try_parse_events(html: str, url: str):
             competition="",  # se precisar, complemente
             team_home=team_home,
             team_away=team_away,
-            start_local_str=start_local_str,
+            start_local_str=start_local_str,  # agora com a data correta para o card
             odds_home=odd_home,
             odds_draw=odd_draw,
             odds_away=odd_away,
@@ -363,7 +413,6 @@ async def _fetch_with_playwright(url: str) -> str:
 # ================================
 # Regras simples de decisão
 # ================================
-
 def decide_bet(odds_home, odds_draw, odds_away, competition, teams):
     # parâmetros ajustáveis
     MIN_ODD = 1.01
@@ -373,8 +422,8 @@ def decide_bet(odds_home, odds_draw, odds_away, competition, teams):
     FAV_PROB_MIN = float(os.getenv("FAV_PROB_MIN", "0.70"))
     FAV_GAP_MIN = float(os.getenv("FAV_GAP_MIN", "0.18"))
     EV_TOL = float(os.getenv("EV_TOL", "-0.03"))
-    # por padrão aceitamos favorito com EV negativo leve, como você pediu
-    FAV_IGNORE_EV = os.getenv("FAV_IGNORE_EV", "on").lower() == "on"  # on por padrão
+    # por padrão aceitamos favorito com EV negativo leve
+    FAV_IGNORE_EV = os.getenv("FAV_IGNORE_EV", "on").lower() == "on"
 
     names = ("home", "draw", "away")
     odds = (float(odds_home or 0.0), float(odds_draw or 0.0), float(odds_away or 0.0))
@@ -754,7 +803,7 @@ async def morning_scan_and_publish():
                         else:
                             limit_late = g_start + timedelta(minutes=LATE_WATCH_WINDOW_MIN)
                             if now_utc < limit_late:
-                                # Inicia watcher imediatamente (sem scheduler) — evita comparar naive/aware
+                                # Inicia watcher imediatamente (sem scheduler)
                                 try:
                                     asyncio.create_task(watch_game_until_end_job(g.id))
                                     atraso = int((now_utc - g_start).total_seconds() // 60)
