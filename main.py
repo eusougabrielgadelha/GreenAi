@@ -236,35 +236,33 @@ def try_parse_events(html: str) -> List[EventRow]:
     soup = BeautifulSoup(html, "html.parser")
     events: List[EventRow] = []
 
-    # Mês PT-BR -> número (para compor dd/mm)
     MONTHS = {
         "janeiro": 1, "fevereiro": 2, "março": 3, "marco": 3, "abril": 4,
         "maio": 5, "junho": 6, "julho": 7, "agosto": 8, "setembro": 9,
         "outubro": 10, "novembro": 11, "dezembro": 12
     }
 
-    # Container principal (um por liga). Se não achar, faz um fallback global.
     containers = soup.select("[data-testid^='eventsListByCategory-']")
     if not containers:
         containers = [soup]
 
     for cont in containers:
-        current_label = None  # "Hoje" ou "DD mês"
-        # Percorre os filhos mantendo o rótulo de data ativo
+        current_label = None  # "hoje" ou "dd mês"
         for child in cont.children:
             if not getattr(child, "get", None):
                 continue
 
-            # Cabeçalho de data: "Hoje", "14 setembro", etc.
-            if "text-odds-subheader-text" in (child.get("class") or []):
-                current_label = child.get_text(" ", strip=True).lower()
+            # cabeçalho de data
+            classes = child.get("class") or []
+            if "text-odds-subheader-text" in classes:
+                current_label = (child.get_text(" ", strip=True) or "").strip().lower()
                 continue
 
-            # Um card de jogo
+            # card do jogo
             if child.get("data-testid") == "preMatchOdds":
                 block = child
 
-                # 1) Link e ext_id
+                # link + ext_id
                 a = block.select_one("a[href^='/event/']")
                 if not a:
                     continue
@@ -272,24 +270,20 @@ def try_parse_events(html: str) -> List[EventRow]:
                 m = re.search(r"/event/\d+/\d+/(\d+)", href)
                 ext_id = m.group(1) if m else None
 
-                # 2) Times
+                # times
                 title_text = a.get_text(" ", strip=True)
                 title_text = re.sub(r"\bAo Vivo\b", "", title_text).strip()
                 team_home = team_away = ""
-                # Desktop costuma vir como "A x B"; mobile pode vir uma linha por time
-                seps = [" x ", " X ", " vs ", " VS ", " v "]
-                for sep in seps:
+                for sep in [" x ", " X ", " vs ", " VS ", " v "]:
                     if sep in title_text:
-                        p1, p2 = [p.strip() for p in title_text.split(sep, 1)]
-                        team_home, team_away = p1, p2
+                        team_home, team_away = [p.strip() for p in title_text.split(sep, 1)]
                         break
                 if not team_home:
-                    # fallback mobile: dois spans com nomes
                     names = [s.get_text(strip=True) for s in block.select("a span.text-ellipsis")]
                     if len(names) >= 2:
                         team_home, team_away = names[0], names[1]
 
-                # 3) Hora (ex.: 10:00). Pode estar em qualquer span do header do card
+                # hora (HH:MM) — se não existir, fica vazio
                 start_hhmm = ""
                 for sp in block.select("span"):
                     t = sp.get_text(strip=True)
@@ -297,45 +291,44 @@ def try_parse_events(html: str) -> List[EventRow]:
                         start_hhmm = t
                         break
 
-                # 4) Data: usa o rótulo atual ("Hoje" ou "DD mês") para montar "dd/mm HH:MM"
+                # compõe a data local usando rótulo atual
                 start_local_str = start_hhmm
-                if current_label:
-                    if current_label.startswith("hoje") and start_hhmm:
-                        # Usa dia de hoje
-                        nowl = datetime.now(ZONE)
+                if current_label and start_hhmm:
+                    nowl = datetime.now(ZONE)
+                    lbl = current_label.strip().lower()
+                    if lbl.startswith("hoje"):
                         start_local_str = f"{start_hhmm} {nowl.day:02d}/{nowl.month:02d}/{nowl.year}"
                     else:
-                        mdate = re.match(r"(\d{1,2})\s+([a-zç]+)", current_label, flags=re.I)
-                        if mdate and start_hhmm:
+                        mdate = re.match(r"(\d{1,2})\s+([a-zç]+)", lbl, flags=re.I)
+                        if mdate:
                             d = int(mdate.group(1))
-                            mon_name = mdate.group(2).lower()
-                            mon = MONTHS.get(mon_name)
+                            mon = MONTHS.get(mdate.group(2).lower())
                             if mon:
-                                nowl = datetime.now(ZONE)
                                 start_local_str = f"{start_hhmm} {d:02d}/{mon:02d}/{nowl.year}"
 
-                # 5) Odds (data-testid: odd-<id>_1_1_, odd-<id>_1_2_, odd-<id>_1_3_)
+                # odds 1X2
                 def find_odd(col_code: int) -> Optional[float]:
-                    # primeiro tenta com o id exato; depois, qualquer id
                     el = None
                     if ext_id:
                         el = block.find(attrs={"data-testid": f"odd-{ext_id}_1_{col_code}_"})
                     if not el:
-                        el = block.find(attrs={"data-testid": re.compile(rf"^odd-.*_1_{col_code}_$")})
-                    return num_from_text(el.get_text(strip=True)) if el else None
+                        el = block.find("div", attrs={
+                            "data-testid": re.compile(rf"^odd-\d+_1_{col_code}_$")
+                        })
+                    if not el:
+                        return None
+                    return num_from_text(el.get_text(strip=True))
 
-                # Colunas: 1 = casa, 2 = empate, 3 = fora
                 odd_home = find_odd(1)
                 odd_draw = find_odd(2)
                 odd_away = find_odd(3)
 
-                # 6) Competição (opcional) — tenta subir no header da página
+                # competição (nome do cabeçalho)
                 comp = ""
                 header = soup.find(attrs={"data-testid": "odds-header"})
                 if header:
                     comp = header.get_text(" ", strip=True)
 
-                # Adiciona se tivermos pelo menos times
                 if team_home or team_away:
                     events.append(EventRow(
                         competition=comp,
@@ -344,12 +337,6 @@ def try_parse_events(html: str) -> List[EventRow]:
                         odds_home=odd_home, odds_draw=odd_draw, odds_away=odd_away,
                         ext_id=ext_id
                     ))
-
-    # Fallbacks antigos (JSON-LD e genéricos) – mantidos caso o site mude:
-    if not events:
-        # (… aqui você pode manter seus blocos antigos de JSON-LD e seletores genéricos
-        # se quiser; omiti por brevidade …)
-        pass
 
     return events
 
