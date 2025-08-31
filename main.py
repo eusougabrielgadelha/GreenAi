@@ -127,8 +127,8 @@ Base.metadata.create_all(engine)
 # ================================
 # Telegram
 # ================================
-def tg_send_message(text: str, parse_mode: str = "HTML") -> None:
-    """Usa HTML para evitar erros de escape do Markdown."""
+def tg_send_message(text: str, parse_mode: Optional[str] = "HTML") -> None:
+    """Usa HTML por padrão; omite parse_mode se None para evitar 400."""
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         logger.warning("Telegram não configurado (TOKEN/CHAT_ID ausentes).")
         return
@@ -136,9 +136,11 @@ def tg_send_message(text: str, parse_mode: str = "HTML") -> None:
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
         "text": text,
-        "parse_mode": parse_mode,
         "disable_web_page_preview": True,
     }
+    if parse_mode:  # só inclui quando tem valor válido
+        payload["parse_mode"] = parse_mode
+
     try:
         r = requests.post(url, json=payload, timeout=15)
         if r.status_code != 200:
@@ -147,7 +149,6 @@ def tg_send_message(text: str, parse_mode: str = "HTML") -> None:
         logger.exception("Erro Telegram: %s", e)
 
 def h(b: str) -> str:
-    """HTML bold helper"""
     return f"<b>{b}</b>"
 
 # ================================
@@ -232,7 +233,6 @@ class EventRow:
     ext_id: Optional[str] = None
 
 def try_parse_events(html: str) -> List[EventRow]:
-    """Tenta várias estratégias para extrair jogos."""
     soup = BeautifulSoup(html, "html.parser")
     events: List[EventRow] = []
 
@@ -251,7 +251,6 @@ def try_parse_events(html: str) -> List[EventRow]:
                 comp = d.get("sport") or d.get("eventSeries", {}).get("name") or ""
                 comp = comp or name
                 start = d.get("startDate") or d.get("startTime") or ""
-                # competidores
                 home, away = "", ""
                 ct = d.get("competitor") or d.get("homeTeam")
                 if isinstance(ct, list) and len(ct) >= 2:
@@ -260,7 +259,6 @@ def try_parse_events(html: str) -> List[EventRow]:
                 elif isinstance(ct, dict):
                     home = (ct.get("name") or "").strip()
                     away = (d.get("awayTeam", {}) or {}).get("name", "")
-                # odds (se existirem em offers)
                 o_home = o_draw = o_away = None
                 offers = d.get("offers") or []
                 if isinstance(offers, list):
@@ -282,8 +280,7 @@ def try_parse_events(html: str) -> List[EventRow]:
                     odds_home=o_home, odds_draw=o_draw, odds_away=o_away
                 ))
 
-    # 2) Estrutura comum de cards (ajuste conforme HTML real)
-    #    Procura elementos com times e odds
+    # 2) Cards genéricos
     if not events:
         cards = soup.select("[data-event-id], .event-card, .card-event, .game, .event")
         for c in cards:
@@ -301,26 +298,42 @@ def try_parse_events(html: str) -> List[EventRow]:
             if start_el:
                 start_txt = start_el.get("data-start") or start_el.get_text(strip=True)
 
-            o_home = o_draw = o_away = None
             o_home = num_from_text((c.select_one(".odd-home,.oddCasa,.cotacao-casa") or {}).get_text(strip=True) if c.select_one(".odd-home,.oddCasa,.cotacao-casa") else "")
             o_draw = num_from_text((c.select_one(".odd-draw,.oddEmpate,.cotacao-empate") or {}).get_text(strip=True) if c.select_one(".odd-draw,.oddEmpate,.cotacao-empate") else "")
             o_away = num_from_text((c.select_one(".odd-away,.oddFora,.cotacao-fora") or {}).get_text(strip=True) if c.select_one(".odd-away,.oddFora,.cotacao-fora") else "")
 
+            # 🔻 Fallback: se não achou pelos seletores, tenta capturar 3 odds >=1.01 na ordem
+            if sum(1 for x in (o_home, o_draw, o_away) if x) < 2:
+                # varre todo o texto do card e pega números estilo 1.90, 2,05 etc.
+                card_text = " ".join(list(c.stripped_strings))
+                raw = re.findall(r"\b\d+(?:[.,]\d{1,3})\b", card_text)
+                cand = []
+                for token in raw:
+                    v = num_from_text(token)
+                    if v and v >= 1.01:
+                        cand.append(v)
+                # remove duplicatas mantendo ordem
+                seen = set(); cand = [x for x in cand if (x not in seen and not seen.add(x))]
+                if len(cand) >= 2:
+                    o_home = o_home or cand[0]
+                    o_draw = o_draw or (cand[1] if len(cand) >= 2 else None)
+                    o_away = o_away or (cand[2] if len(cand) >= 3 else None)
+
             ext = c.get("data-event-id") or None
 
-            # Só considera se tiver ao menos equipes e algum horário/odd
             if (t_home or t_away) and (start_txt or o_home or o_draw or o_away):
                 events.append(EventRow(
-                    competition=comp_txt, team_home=t_home, team_away=t_away,
-                    start_local_str=start_txt, odds_home=o_home, odds_draw=o_draw, odds_away=o_away, ext_id=ext
+                    competition=comp_txt,
+                    team_home=t_home, team_away=t_away,
+                    start_local_str=start_txt,
+                    odds_home=o_home, odds_draw=o_draw, odds_away=o_away,
+                    ext_id=ext
                 ))
 
-    # 3) Regex de rescate: pares “X vs Y” + horário HH:MM
+    # 3) Regex de resgate
     if not events:
         text = soup.get_text(" ", strip=True)
-        # Horas
         hours = re.findall(r"\b([0-2]?\d:[0-5]\d)\b", text)
-        # Jogos, ex: "Time A x Time B" ou "Time A vs Time B"
         games = re.findall(r"([A-Za-zÀ-ÿ0-9\.\-\s]{3,})\s+(?:vs|x)\s+([A-Za-zÀ-ÿ0-9\.\-\s]{3,})", text, flags=re.I)
         for i, (home, away) in enumerate(games[: len(hours)]):
             events.append(EventRow(
@@ -329,6 +342,7 @@ def try_parse_events(html: str) -> List[EventRow]:
             ))
 
     return events
+
 
 async def fetch_events_from_link(url: str, backend: str) -> List[EventRow]:
     """Busca HTML e parseia eventos. Loga backend usado e contagem."""
@@ -554,23 +568,29 @@ async def morning_scan_and_publish():
     stored_total = 0
     chosen: List[Game] = []
 
-    # helper local para enviar msg ao Telegram sem estourar parse de markdown
+    # helper local para enviar msg ao Telegram sem estourar parse/markdown
     def _send_summary_safe(text: str) -> None:
+        # 1) tenta com HTML
         try:
-            # tenta sem parse mode (evita erro: "can't parse entities")
-            tg_send_message(text, parse_mode=None)  # se sua função aceitar
+            tg_send_message(text, parse_mode="HTML")
+            return
+        except Exception:
+            logger.exception("Falha com HTML; tentando sem parse_mode…")
+
+        # 2) fallback: sem parse_mode (a função deve omitir a chave se None)
+        try:
+            tg_send_message(text, parse_mode=None)
         except TypeError:
-            # assinatura não aceita parse_mode -> tenta simples
+            # caso a assinatura não tenha parse_mode
             try:
                 tg_send_message(text)
             except Exception:
                 logger.exception("Falha ao enviar resumo ao Telegram (fallback simples).")
         except Exception:
-            logger.exception("Falha ao enviar resumo ao Telegram.")
+            logger.exception("Falha ao enviar resumo ao Telegram (fallback simples).")
 
-    # resolve backend
+
     backend_cfg = SCRAPE_BACKEND if SCRAPE_BACKEND in ("requests", "playwright", "auto") else "requests"
-
     now_local = datetime.now(ZONE).date()
 
     with SessionLocal() as session:
@@ -578,14 +598,11 @@ async def morning_scan_and_publish():
             evs = []
             active_backend = "requests" if backend_cfg in ("requests", "auto") else "playwright"
 
-            # 1) tentativa com backend ativo
             try:
-                logger.info("🔎 Varredura iniciada para %s — backend=%s", url, active_backend)
                 evs = await fetch_events_from_link(url, active_backend)
             except Exception as e:
                 logger.warning("Falha ao buscar %s com %s: %s", url, active_backend, e)
 
-            # 2) fallback: se 'auto' e não achou nada em requests, tenta playwright
             if backend_cfg == "auto" and (not evs):
                 try:
                     logger.info("🔁 Fallback para playwright em %s", url)
@@ -594,30 +611,26 @@ async def morning_scan_and_publish():
                 except Exception as e:
                     logger.warning("Fallback playwright também falhou em %s: %s", url, e)
 
-            logger.info("🧮  → eventos extraídos: %d", len(evs))
             analyzed_total += len(evs)
 
             for ev in evs:
                 try:
                     start_utc = parse_local_datetime(ev.start_local_str)
                     if not start_utc:
-                        logger.debug("Ignorado: data inválida para %s vs %s | raw='%s'",
-                                     getattr(ev, "team_home", "?"), getattr(ev, "team_away", "?"),
-                                     getattr(ev, "start_local_str", ""))
+                        logger.info("Ignorado: data inválida | %s vs %s | raw='%s'",
+                                    getattr(ev, "team_home", "?"), getattr(ev, "team_away", "?"),
+                                    getattr(ev, "start_local_str", ""))
                         continue
 
-                    # somente jogos do dia local configurado
                     if start_utc.astimezone(ZONE).date() != now_local:
                         continue
 
-                    # decide pick
                     will, pick, pprob, pev, reason = decide_bet(
                         ev.odds_home, ev.odds_draw, ev.odds_away, ev.competition, (ev.team_home, ev.team_away)
                     )
 
-                    # loga descartados e segue o loop
                     if not will:
-                        logger.debug(
+                        logger.info(
                             "DESCARTADO: %s vs %s | motivo=%s | odds=(%.2f,%.2f,%.2f) | prob=%.1f%% | EV=%.1f%% | início='%s' | url=%s",
                             ev.team_home, ev.team_away, reason,
                             float(ev.odds_home or 0), float(ev.odds_draw or 0), float(ev.odds_away or 0),
@@ -625,14 +638,13 @@ async def morning_scan_and_publish():
                         )
                         continue
 
-                    # selecionado -> persiste
                     g = Game(
                         ext_id=ev.ext_id,
                         source_link=url,
                         competition=ev.competition,
                         team_home=ev.team_home,
                         team_away=ev.team_away,
-                        start_time=start_utc,  # UTC
+                        start_time=start_utc,
                         odds_home=ev.odds_home,
                         odds_draw=ev.odds_draw,
                         odds_away=ev.odds_away,
@@ -654,7 +666,6 @@ async def morning_scan_and_publish():
                         ev.start_local_str, url
                     )
 
-                    # agenda lembrete -15min
                     try:
                         reminder_at = (g.start_time - timedelta(minutes=15)).astimezone(pytz.UTC)
                         scheduler.add_job(
@@ -667,7 +678,6 @@ async def morning_scan_and_publish():
                     except Exception:
                         logger.exception("Falha ao agendar lembrete do jogo id=%s", g.id)
 
-                    # agenda watcher simples na hora do início (substituir por placar real se houver)
                     try:
                         scheduler.add_job(
                             watch_game_until_end_job,
@@ -688,13 +698,10 @@ async def morning_scan_and_publish():
                         url,
                     )
 
-            # gentileza com o site
             await asyncio.sleep(0.2)
 
-    # resumo e envio
     msg = fmt_morning_summary(datetime.now(ZONE), analyzed_total, chosen)
     _send_summary_safe(msg)
-
     logger.info("🧾 Varredura concluída — analisados=%d | selecionados=%d | salvos=%d",
                 analyzed_total, len(chosen), stored_total)
 
