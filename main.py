@@ -282,99 +282,111 @@ def _num(txt: str):
 def try_parse_events(html: str, url: str):
     """
     Parser adaptado ao HTML do BetNacional.
-    Mantém a lógica original de busca por cartões, mas fortalece a associação de data.
+    Processa a estrutura de cabeçalhos de data seguidos pelos jogos correspondentes.
     """
     soup = BeautifulSoup(html, "html.parser")
-    cards = soup.select('[data-testid="preMatchOdds"]')
     evs = []
-
-    for card in cards:
-        # 1) cabeçalho de data mais próximo acima
-        hdr = card.find_previous("div", class_=lambda c: c and "text-odds-subheader-text" in c)
-        header_text = hdr.get_text(strip=True) if hdr else ""
-        header_date = _date_from_header_text(header_text)  # datetime local com 00:00
-
-        # 2) ext_id + times
-        a = card.select_one('a[href*="/event/"]')
-        if not a:
+    
+    # Encontra todos os elementos do DOM em ordem
+    all_elements = soup.find_all(['div'])
+    
+    current_date_header = None
+    current_date = None
+    
+    for element in all_elements:
+        # Verifica se é um cabeçalho de data
+        if element.get('class') and any('text-odds-subheader-text' in ' '.join(element.get('class', [])) for c in [element.get('class', [])]):
+            header_text = element.get_text(strip=True)
+            current_date_header = header_text
+            current_date = _date_from_header_text(header_text)
+            logger.info(f"📅 Processando jogos de: {header_text} -> {current_date}")
             continue
-        href = a.get("href", "")
-        m = re.search(r"/event/\d+/\d+/(\d+)", href)
-        ext_id = m.group(1) if m else ""
+            
+        # Verifica se é um cartão de jogo
+        if element.get('data-testid') == 'preMatchOdds':
+            if not current_date:
+                logger.warning("Jogo encontrado sem cabeçalho de data precedente")
+                continue
+                
+            # Processa o cartão do jogo
+            # 2) ext_id + times
+            a = element.select_one('a[href*="/event/"]')
+            if not a:
+                continue
+            href = a.get("href", "")
+            m = re.search(r"/event/\d+/\d+/(\d+)", href)
+            ext_id = m.group(1) if m else ""
 
-        # nomes
-        title = a.get_text(" ", strip=True)
-        team_home, team_away = "", ""
-        if " x " in title:
-            team_home, team_away = [p.strip() for p in title.split(" x ", 1)]
-        else:
-            names = [s.get_text(strip=True) for s in a.select("span.text-ellipsis")]
-            if len(names) >= 2:
-                team_home, team_away = names[0], names[1]
-
-        # 3) detectar "Ao Vivo"
-        is_live = False
-        live_badge = a.find(string=lambda t: isinstance(t, str) and "Ao Vivo" in t)
-        if live_badge:
-            is_live = True
-
-        # 4) hora local (pode faltar se "Ao Vivo")
-        t = card.select_one(".text-text-light-secondary")
-        hour_local = t.get_text(strip=True) if t else ""
-        start_local_str = hour_local
-
-        # --- NOVA LÓGICA: Combina a data do cabeçalho com a hora local do jogo ---
-        if hour_local and header_date:
-            # Extrai apenas a parte de hora e minuto do texto (ex: "17:00")
-            hour_match = re.search(r"(\d{1,2}):(\d{2})", hour_local)
-            if hour_match:
-                hour = int(hour_match.group(1))
-                minute = int(hour_match.group(2))
-                # Cria um datetime combinando a data do cabeçalho com a hora do jogo
-                combined_dt = header_date.replace(hour=hour, minute=minute, second=0, microsecond=0)
-                # Formata para o padrão usado pelo parser de data
-                start_local_str = combined_dt.strftime("%H:%M %d/%m/%Y")
+            # nomes
+            title = a.get_text(" ", strip=True)
+            team_home, team_away = "", ""
+            if " x " in title:
+                team_home, team_away = [p.strip() for p in title.split(" x ", 1)]
             else:
-                # Se não conseguir extrair a hora, usa apenas a data do cabeçalho
-                start_local_str = header_date.strftime("%d/%m/%Y")
-        # --- FIM DA NOVA LÓGICA ---
+                names = [s.get_text(strip=True) for s in a.select("span.text-ellipsis")]
+                if len(names) >= 2:
+                    team_home, team_away = names[0], names[1]
 
-        # 5) odds
-        def pick_cell(i: int):
-            if ext_id:
-                c = card.select_one(f"[data-testid='odd-{ext_id}_1_{i}_']")
-                if c:
-                    return _num(c.get_text(" ", strip=True))
-            return None
+            # 3) detectar "Ao Vivo"
+            is_live = False
+            live_badge = a.find(string=lambda t: isinstance(t, str) and "Ao Vivo" in t)
+            if live_badge:
+                is_live = True
 
-        odd_home = pick_cell(1)
-        odd_draw = pick_cell(2)
-        odd_away = pick_cell(3)
+            # 4) hora local
+            t = element.select_one(".text-text-light-secondary")
+            hour_local = t.get_text(strip=True) if t else ""
+            
+            # Combina a data do cabeçalho com a hora do jogo
+            start_local_str = hour_local
+            if hour_local and current_date:
+                hour_match = re.search(r"(\d{1,2}):(\d{2})", hour_local)
+                if hour_match:
+                    hour = int(hour_match.group(1))
+                    minute = int(hour_match.group(2))
+                    # Cria um datetime combinando a data do cabeçalho com a hora do jogo
+                    combined_dt = current_date.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                    start_local_str = combined_dt.strftime("%H:%M %d/%m/%Y")
+                    logger.debug(f"  → {team_home} vs {team_away} às {start_local_str}")
+                else:
+                    start_local_str = current_date.strftime("%d/%m/%Y")
 
-        if odd_home is None or odd_draw is None or odd_away is None:
-            cells = card.select("[data-testid^='odd-'][data-testid$='_']")
-            if ext_id:
-                cells = [c for c in cells if c.get("data-testid", "").startswith(f"odd-{ext_id}_1_")]
-            def col_index(c):
-                mm = re.search(r"_1_(\d)_", c.get("data-testid", ""))
-                return int(mm.group(1)) if mm else 99
-            cells = sorted(cells, key=col_index)
-            vals = [_num(c.get_text(" ", strip=True)) for c in cells[:3]]
-            if len(vals) >= 3:
-                odd_home, odd_draw, odd_away = vals
+            # 5) odds
+            def pick_cell(i: int):
+                if ext_id:
+                    c = element.select_one(f"[data-testid='odd-{ext_id}_1_{i}_']")
+                    if c:
+                        return _num(c.get_text(" ", strip=True))
+                return None
 
-        evs.append(NS(
-            ext_id=ext_id,
-            source_link=url,
-            competition="",
-            team_home=team_home,
-            team_away=team_away,
-            start_local_str=start_local_str,
-            odds_home=odd_home,
-            odds_draw=odd_draw,
-            odds_away=odd_away,
-            is_live=is_live,
-        ))
+            odd_home = pick_cell(1)
+            odd_draw = pick_cell(2)
+            odd_away = pick_cell(3)
+
+            if odd_home is None or odd_draw is None or odd_away is None:
+                cells = element.select("[data-testid^='odd-'][data-testid$='_']")
+                if ext_id:
+                    cells = [c for c in cells if c.get("data-testid", "").startswith(f"odd-{ext_id}_1_")]
+                def col_index(c):
+                    mm = re.search(r"_1_(\d)_", c.get("data-testid", ""))
+                    return int(mm.group(1)) if mm else 99
+                cells = sorted(cells, key=col_index)
+                vals = [_num(c.get_text(" ", strip=True)) for c in cells[:3]]
+                if len(vals) >= 3:
+                    odd_home, odd_draw, odd_away = vals
+
+            evs.append(NS(
+                ext_id=ext_id,
+                source_link=url,
+                competition="",
+                team_home=team_home,
+                team_away=team_away,
+                start_local_str=start_local_str,
+                odds_home=odd_home,
+                odds_draw=odd_draw,
+                odds_away=odd_away,
+                is_live=is_live,
+            ))
 
     logger.info(f"🧮 → eventos extraídos: {len(evs)} | URL: {url}")
     return evs
@@ -577,83 +589,250 @@ def global_accuracy(session) -> float:
     hits = session.query(Game).filter(Game.hit.is_(True)).count()
     return hits / total
 
+def get_weekly_stats(session) -> Dict[str, Any]:
+    """Retorna estatísticas dos últimos 7 dias"""
+    week_ago = datetime.now(pytz.UTC) - timedelta(days=7)
+    games = session.query(Game).filter(
+        Game.start_time >= week_ago,
+        Game.hit.isnot(None)
+    ).all()
+    
+    if not games:
+        return {}
+    
+    hits = sum(1 for g in games if g.hit)
+    total = len(games)
+    return {
+        'total': total,
+        'hits': hits,
+        'win_rate': (hits / total * 100) if total > 0 else 0,
+        'roi': ((hits * 2 - total) / total * 100) if total > 0 else 0
+    }
+
+def get_monthly_stats(session) -> Dict[str, Any]:
+    """Retorna estatísticas do mês atual"""
+    now = datetime.now(ZONE)
+    month_start = ZONE.localize(datetime(now.year, now.month, 1)).astimezone(pytz.UTC)
+    games = session.query(Game).filter(
+        Game.start_time >= month_start,
+        Game.hit.isnot(None)
+    ).all()
+    
+    if not games:
+        return {}
+    
+    hits = sum(1 for g in games if g.hit)
+    total = len(games)
+    return {
+        'total': total,
+        'hits': hits,
+        'win_rate': (hits / total * 100) if total > 0 else 0
+    }
+
 def fmt_morning_summary(date_local: datetime, analyzed: int, chosen: List[Dict[str, Any]]) -> str:
+    """Resumo matinal elegante e organizado"""
     dstr = date_local.strftime("%d/%m/%Y")
-    lines = [
-        f"Hoje, {h(dstr)}, analisei um total de {h(str(analyzed))} jogos.",
-        f"Entendi que existem um total de {h(str(len(chosen)))} jogos eleitos para apostas. São eles:",
-        ""
-    ]
-    for g in chosen:
-        local_t = g["start_time"].astimezone(ZONE).strftime("%H:%M")
-        comp = g.get("competition") or "—"
-        jogo = f"{g.get('team_home')} vs {g.get('team_away')}"
-        pick_map = {"home": g.get('team_home'), "draw": "Empate", "away": g.get('team_away')}
-        pick_str = pick_map.get(g.get("pick"), "—")
-        lines.append(f"{local_t} | {comp} | {jogo} | Apostar em {h(pick_str)}")
-    lines.append("")
+    day_name = ["Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado", "Domingo"][date_local.weekday()]
+    
+    # Cabeçalho
+    msg = f"☀️ <b>BOM DIA!</b>\n"
+    msg += f"<i>{day_name}, {dstr}</i>\n"
+    msg += "━━━━━━━━━━━━━━━━━━━━\n\n"
+    
+    # Estatísticas do dia
+    msg += f"📊 <b>RESUMO DA ANÁLISE</b>\n"
+    msg += f"├ Jogos analisados: <b>{analyzed}</b>\n"
+    msg += f"└ Jogos selecionados: <b>{len(chosen)}</b>\n\n"
+    
+    if chosen:
+        # Agrupa por horário
+        by_time = {}
+        for g in chosen:
+            time_str = g["start_time"].astimezone(ZONE).strftime("%H:%M")
+            if time_str not in by_time:
+                by_time[time_str] = []
+            by_time[time_str].append(g)
+        
+        msg += f"🎯 <b>PICKS DO DIA</b>\n\n"
+        
+        for time_str in sorted(by_time.keys()):
+            games = by_time[time_str]
+            msg += f"🕐 <b>{time_str}h</b>\n"
+            
+            for g in games:
+                pick_map = {"home": g.get('team_home'), "draw": "Empate", "away": g.get('team_away')}
+                pick_str = pick_map.get(g.get("pick"), "—")
+                
+                # Formata com ícones baseados na probabilidade
+                prob = g.get('pick_prob', 0)
+                confidence = "🔥" if prob > 0.6 else "⭐" if prob > 0.4 else "💡"
+                
+                # Calcula a odd correta para o pick
+                pick_odd = 0.0
+                if g.get("pick") == "home":
+                    pick_odd = g.get('odds_home', 0)
+                elif g.get("pick") == "draw":
+                    pick_odd = g.get('odds_draw', 0)
+                elif g.get("pick") == "away":
+                    pick_odd = g.get('odds_away', 0)
+                
+                msg += f"  {confidence} <b>{g.get('team_home')[:20]}</b> vs <b>{g.get('team_away')[:20]}</b>\n"
+                msg += f"     → {pick_str} @ {pick_odd:.2f}\n"
+                msg += f"     → Prob: {prob*100:.0f}% | EV: {g.get('pick_ev')*100:+.1f}%\n\n"
+    else:
+        msg += "ℹ️ <i>Nenhum jogo atende aos critérios hoje.</i>\n\n"
+    
+    # Rodapé com performance
     with SessionLocal() as s:
         acc = global_accuracy(s) * 100
-    lines.append(f"Taxa de assertividade atual: {h(f'{acc:.1f}%')}")
-    return "\n".join(lines)
-
-def fmt_reminder(g: Game) -> str:
-    hhmm = g.start_time.astimezone(ZONE).strftime("%H:%M")
-    pick_str = {"home": g.team_home, "draw": "Empate", "away": g.team_away}.get(g.pick, "—")
-    return (
-        f"⏰ {h('Lembrete')}: {hhmm} vai começar\n"
-        f"{g.competition or 'Jogo'} — {g.team_home} vs {g.team_away}\n"
-        f"Aposta: {h(pick_str)}"
-    )
+        # Pega últimos 7 dias de performance
+        week_stats = get_weekly_stats(s)
+    
+    msg += "━━━━━━━━━━━━━━━━━━━━\n"
+    msg += f"📈 <b>PERFORMANCE</b>\n"
+    msg += f"├ Taxa geral: <b>{acc:.1f}%</b>\n"
+    
+    if week_stats:
+        msg += f"├ Últimos 7 dias: <b>{week_stats['win_rate']:.1f}%</b>\n"
+        msg += f"└ ROI semanal: <b>{week_stats['roi']:+.1f}%</b>\n"
+    
+    # Mensagem motivacional randômica
+    motivational = random.choice([
+        "💪 Disciplina sempre vence a sorte!",
+        "🎯 Foco no processo, não no resultado.",
+        "📚 Conhecimento é a melhor estratégia.",
+        "⚖️ Equilíbrio e paciência são fundamentais.",
+        "🌟 Consistência gera resultados."
+    ])
+    
+    msg += f"\n<i>{motivational}</i>"
+    
+    return msg
 
 def fmt_result(g: Game) -> str:
-    status = "✅ ACERTOU" if g.hit else "❌ ERROU"
-    return (
-        f"🏁 {h('Finalizado')} — {g.team_home} vs {g.team_away}\n"
-        f"Palpite: {g.pick} | Resultado: {g.outcome or '—'}\n"
-        f"{status} | EV estimado: {g.pick_ev*100:.1f}%"
-    )
+    """Resultado do jogo formatado de forma elegante"""
+    if g.hit:
+        emoji = "✅"
+        status = "ACERTOU"
+        color = "green"
+    else:
+        emoji = "❌"
+        status = "ERROU"
+        color = "red"
+    
+    msg = f"{emoji} <b>RESULTADO - {status}</b>\n"
+    msg += "━━━━━━━━━━━━━━━━━━━━\n\n"
+    msg += f"⚽ <b>{g.team_home}</b> vs <b>{g.team_away}</b>\n"
+    
+    # Mapeia resultado para texto legível
+    outcome_map = {"home": g.team_home, "draw": "Empate", "away": g.team_away}
+    pick_map = {"home": g.team_home, "draw": "Empate", "away": g.team_away}
+    
+    msg += f"├ Palpite: <b>{pick_map.get(g.pick, g.pick)}</b>\n"
+    msg += f"├ Resultado: <b>{outcome_map.get(g.outcome, g.outcome or '—')}</b>\n"
+    msg += f"└ EV estimado: {g.pick_ev*100:+.1f}%\n"
+    
+    return msg
 
 def fmt_pick_now(g: Game) -> str:
-    """Mensagem imediata por pick selecionado."""
+    """Formatação elegante para novo pick"""
     hhmm = g.start_time.astimezone(ZONE).strftime("%H:%M")
     side = {"home": g.team_home, "draw": "Empate", "away": g.team_away}.get(g.pick, "—")
-    return (
-        f"🎯 {h('Sinal de Aposta')} ({hhmm})\n"
-        f"{g.team_home} vs {g.team_away}\n"
-        f"Pick: {h(side)} — Prob: {g.pick_prob*100:.1f}% | EV: {g.pick_ev*100:.1f}%\n"
-        f"Odds: {g.odds_home:.2f}/{g.odds_draw:.2f}/{g.odds_away:.2f}"
-    )
+    
+    # Calcula nível de confiança
+    confidence_level = "ALTA" if g.pick_prob > 0.6 else "MÉDIA" if g.pick_prob > 0.4 else "PADRÃO"
+    
+    msg = f"🎯 <b>NOVA OPORTUNIDADE</b>\n"
+    msg += "━━━━━━━━━━━━━━━━━━━━\n\n"
+    
+    msg += f"⚽ <b>JOGO</b>\n"
+    msg += f"<b>{g.team_home}</b> vs <b>{g.team_away}</b>\n"
+    msg += f"🕐 Início: {hhmm}h\n\n"
+    
+    msg += f"💡 <b>ANÁLISE</b>\n"
+    msg += f"├ Aposta: <b>{side}</b>\n"
+    
+    # Calcula a odd correta baseada no pick
+    pick_odd = 0.0
+    if g.pick == "home":
+        pick_odd = g.odds_home
+    elif g.pick == "draw":
+        pick_odd = g.odds_draw
+    elif g.pick == "away":
+        pick_odd = g.odds_away
+        
+    msg += f"├ Odd: <b>{pick_odd:.2f}</b>\n"
+    msg += f"├ Probabilidade: <b>{g.pick_prob*100:.0f}%</b>\n"
+    msg += f"├ Valor esperado: <b>{g.pick_ev*100:+.1f}%</b>\n"
+    msg += f"└ Confiança: <b>{confidence_level}</b>\n"
+    
+    # Adiciona razão se não for genérica
+    if g.pick_reason and g.pick_reason not in ["EV positivo", "Favorito claro"]:
+        msg += f"\n💭 <i>{g.pick_reason}</i>\n"
+    
+    msg += "\n━━━━━━━━━━━━━━━━━━━━"
+    
+    return msg
 
 def fmt_watch_add(ev, ev_date_local: datetime, best_ev: float, pprob: float) -> str:
+    """Formatação elegante para adição à watchlist"""
     hhmm = ev_date_local.strftime("%H:%M")
-    return (
-        f"👀 {h('Watchlist')} ({hhmm})\n"
-        f"{ev.team_home} vs {ev.team_away}\n"
-        f"EV atual: {best_ev*100:.1f}% | Prob (pick): {pprob*100:.1f}%\n"
-        f"Link: {ev.source_link}"
-    )
+    
+    msg = f"👀 <b>ADICIONADO À WATCHLIST</b>\n"
+    msg += "━━━━━━━━━━━━━━━━━━━━\n\n"
+    msg += f"⚽ <b>{ev.team_home}</b> vs <b>{ev.team_away}</b>\n"
+    msg += f"🕐 Início: {hhmm}h\n\n"
+    msg += f"📊 <b>MÉTRICAS ATUAIS</b>\n"
+    msg += f"├ EV: {best_ev*100:.1f}%\n"
+    msg += f"├ Probabilidade: {pprob*100:.0f}%\n"
+    msg += f"└ Status: Monitorando mudanças\n"
+    msg += f"\n<i>Você será notificado se as odds melhorarem!</i>"
+    
+    return msg
 
 def fmt_watch_upgrade(g: Game) -> str:
+    """Formatação elegante para upgrade da watchlist"""
     hhmm = g.start_time.astimezone(ZONE).strftime("%H:%M")
     side = {"home": g.team_home, "draw": "Empate", "away": g.team_away}.get(g.pick, "—")
-    return (
-        f"⬆️ {h('Upgrade da Watchlist → PICK')} ({hhmm})\n"
-        f"{g.team_home} vs {g.team_away}\n"
-        f"Pick: {h(side)} — Prob: {g.pick_prob*100:.1f}% | EV: {g.pick_ev*100:.1f}%"
-    )
+    
+    msg = f"⬆️ <b>UPGRADE - WATCHLIST → PICK</b>\n"
+    msg += "━━━━━━━━━━━━━━━━━━━━\n\n"
+    msg += f"⚽ <b>{g.team_home}</b> vs <b>{g.team_away}</b>\n"
+    msg += f"🕐 Início: {hhmm}h\n\n"
+    msg += f"✨ <b>ODDS MELHORARAM!</b>\n"
+    msg += f"├ Nova aposta: <b>{side}</b>\n"
+    msg += f"├ Probabilidade: <b>{g.pick_prob*100:.0f}%</b>\n"
+    msg += f"└ Valor esperado: <b>{g.pick_ev*100:+.1f}%</b>\n"
+    msg += f"\n💚 <i>Agora atende aos critérios de aposta!</i>"
+    
+    return msg
 
 def fmt_live_bet_opportunity(g: Game, opportunity: Dict[str, Any], stats: Dict[str, Any]) -> str:
-    """Formata a mensagem de oportunidade de aposta ao vivo."""
-    market_display_name = opportunity.get("display_name", "Mercado")
-    return (
-        f"🔥 {h('PALPITE AO VIVO')} 🔥\n"
-        f"{g.team_home} vs {g.team_away}\n"
-        f"Minuto: {stats.get('match_time', '—')} | Placar: {stats.get('score', '—')}\n"
-        f"Mercado: {market_display_name}\n"
-        f"Palpite: {h(opportunity['option'])} @ {opportunity['odd']}\n"
-        f"Motivo: {opportunity['reason']}"
-    )
+    """Formatação elegante para oportunidades ao vivo"""
+    
+    # Define urgência baseada no tempo
+    match_time = stats.get('match_time', '')
+    urgency = "🔥🔥🔥" if any(x in match_time for x in ["85", "86", "87", "88", "89", "90"]) else "🔥"
+    
+    msg = f"{urgency} <b>OPORTUNIDADE AO VIVO</b>\n"
+    msg += "━━━━━━━━━━━━━━━━━━━━\n\n"
+    
+    msg += f"⚽ <b>{g.team_home} vs {g.team_away}</b>\n"
+    msg += f"├ ⏱ {match_time}' | Placar: {stats.get('score', '—')}\n"
+    
+    # Adiciona contexto do jogo se relevante
+    if 'last_event' in stats:
+        msg += f"├ 📝 Último evento: {stats['last_event']}\n"
+    
+    msg += f"\n💰 <b>APOSTA RECOMENDADA</b>\n"
+    msg += f"├ Mercado: <b>{opportunity.get('display_name')}</b>\n"
+    msg += f"├ Seleção: <b>{opportunity['option']}</b>\n"
+    msg += f"├ Odd atual: <b>{opportunity['odd']:.2f}</b>\n"
+    msg += f"└ {opportunity['reason']}\n"
+    
+    msg += "\n⚡ <i>Aja rapidamente - odds ao vivo mudam!</i>"
+    
+    return msg
 
 # ================================
 # Scheduler
