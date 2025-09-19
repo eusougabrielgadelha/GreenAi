@@ -317,13 +317,29 @@ def try_parse_events(html: str, url: str):
 
         # 4) hora local (pode faltar se "Ao Vivo")
         t = card.select_one(".text-text-light-secondary")
+        # --- NOVA LÓGICA: Combina a data do cabeçalho com a hora local do jogo ---
         hour_local = t.get_text(strip=True) if t else ""
-        start_local_str = hour_local
+        start_local_str = ""
+
         if hour_local and header_date:
-            dd = f"{header_date.day:02d}"
-            mm = f"{header_date.month:02d}"
-            yyyy = header_date.year
-            start_local_str = f"{hour_local} {dd}/{mm}/{yyyy}"
+            # Extrai apenas a parte de hora e minuto do texto (ex: "17:00")
+            hour_match = re.search(r"(\d{1,2}):(\d{2})", hour_local)
+            if hour_match:
+                hour = int(hour_match.group(1))
+                minute = int(hour_match.group(2))
+
+                # Cria um datetime combinando a data do cabeçalho com a hora do jogo
+                combined_dt = header_date.replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+                # Formata para o padrão usado pelo parser de data
+                start_local_str = combined_dt.strftime("%H:%M %d/%m/%Y")
+            else:
+                # Se não conseguir extrair a hora, usa apenas a data do cabeçalho
+                start_local_str = header_date.strftime("%d/%m/%Y")
+        elif hour_local:
+            # Se não houver cabeçalho, tenta parsear a hora local diretamente (pode falhar perto da meia-noite)
+            start_local_str = hour_local
+        # --- FIM DA NOVA LÓGICA ---
 
         # 5) odds
         def pick_cell(i: int):
@@ -355,7 +371,7 @@ def try_parse_events(html: str, url: str):
             competition="",
             team_home=team_home,
             team_away=team_away,
-            start_local_str=start_local_str,  # poderá ficar vazio em jogos "Ao Vivo"
+            start_local_str=start_local_str,  # Agora é uma string de data/hora absoluta
             odds_home=odd_home,
             odds_draw=odd_draw,
             odds_away=odd_away,
