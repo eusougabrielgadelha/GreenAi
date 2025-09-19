@@ -824,7 +824,7 @@ def scrape_live_game_data(html: str, ext_id: str) -> Dict[str, Any]:
     return data
 
 # --- NOVA FUNÇÃO: Lógica de Decisão para Palpites Ao Vivo ---
-def decide_live_bet_opportunity(live_ Dict[str, Any], game: Game, last_pick_time: Optional[datetime]) -> Optional[Dict[str, Any]]:
+def decide_live_bet_opportunity(live_data: Dict[str, Any], game: Game, last_pick_time: Optional[datetime]) -> Optional[Dict[str, Any]]:
     """
     Decide se existe uma oportunidade de aposta ao vivo digna de ser enviada.
     Retorna um dicionário com os detalhes do palpite ou None.
