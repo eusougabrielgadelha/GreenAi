@@ -11,6 +11,7 @@ import pytz
 import json
 import logging
 from logging.handlers import RotatingFileHandler
+from urllib.parse import urljoin
 import requests
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
@@ -87,20 +88,21 @@ class Game(Base):
     id = Column(Integer, primary_key=True)
     ext_id = Column(String, index=True)
     source_link = Column(Text)
+    game_url = Column(Text)                          # ← coloque junto dos outros
     competition = Column(String)
     team_home = Column(String)
     team_away = Column(String)
-    start_time = Column(DateTime, index=True)    # UTC
+    start_time = Column(DateTime, index=True)        # UTC
     odds_home = Column(Float)
     odds_draw = Column(Float)
     odds_away = Column(Float)
-    pick = Column(String)                        # home|draw|away
+    pick = Column(String)                            # home|draw|away
     pick_reason = Column(Text)
     pick_prob = Column(Float)
     pick_ev = Column(Float)
     will_bet = Column(Boolean, default=False)
-    status = Column(String, default="scheduled") # scheduled|live|ended
-    outcome = Column(String, nullable=True)      # home|draw|away
+    status = Column(String, default="scheduled")     # scheduled|live|ended
+    outcome = Column(String, nullable=True)          # home|draw|away
     hit = Column(Boolean, nullable=True)
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, onupdate=func.now())
@@ -117,21 +119,51 @@ class Stat(Base):
 class LiveGameTracker(Base):
     __tablename__ = "live_game_trackers"
     id = Column(Integer, primary_key=True)
-    game_id = Column(Integer, nullable=False, index=True)  # Referência ao Game.id
-    ext_id = Column(String, index=True)  # Para facilitar buscas
+    game_id = Column(Integer, nullable=False, index=True)   # referência a Game.id
+    ext_id = Column(String, index=True)
+
     last_analysis_time = Column(DateTime, server_default=func.now())
-    last_pick_sent = Column(DateTime, nullable=True)  # Último palpite enviado
-    last_pick_market = Column(String, nullable=True)  # Mercado do último palpite
-    last_pick_option = Column(String, nullable=True)  # Opção do último palpite
-    current_score = Column(String, nullable=True)  # Ex: "1 - 0"
-    current_minute = Column(String, nullable=True)  # Ex: "45'+2'", "HT", "FT"
+    last_pick_sent = Column(DateTime, nullable=True)        # último palpite enviado
+    last_pick_market = Column(String, nullable=True)
+    last_pick_option = Column(String, nullable=True)
+    last_pick_key = Column(String, nullable=True)           # ex: "btts|Não"
+
+    current_score = Column(String, nullable=True)           # "1 - 0"
+    current_minute = Column(String, nullable=True)          # "45'+2'", "HT", "FT"
+
+    game_url = Column(Text, nullable=True)                  # deep link do evento
+    cooldown_until = Column(DateTime, nullable=True)
+    notifications_sent = Column(Integer, default=0)
+
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, onupdate=func.now())
+
     __table_args__ = (
         UniqueConstraint("game_id", name="uq_live_tracker_game_id"),
     )
 
 Base.metadata.create_all(engine)
+
+# ==== MIGRAÇÃO RÁPIDA (executa no boot) ====
+from sqlalchemy import text
+
+def _safe_add_column(table: str, coldef: str):
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {coldef}"))
+    except Exception:
+        pass  # já existe
+
+# Game: deep link do evento
+_safe_add_column("games", "game_url TEXT")
+
+# LiveGameTracker: campos extras de controle
+_safe_add_column("live_game_trackers", "game_url TEXT")
+_safe_add_column("live_game_trackers", "cooldown_until DATETIME")
+_safe_add_column("live_game_trackers", "notifications_sent INTEGER")
+_safe_add_column("live_game_trackers", "last_pick_key TEXT")
+_safe_add_column("live_game_trackers", "last_pick_sent DATETIME")
+
 
 # ================================
 # Telegram
@@ -304,7 +336,8 @@ def try_parse_events(html: str, url: str):
     
     for element in all_elements:
         # Verifica se é um cabeçalho de data
-        if element.get('class') and any('text-odds-subheader-text' in ' '.join(element.get('class', [])) for c in [element.get('class', [])]):
+        classes = element.get('class', [])
+        if any('text-odds-subheader-text' in cls for cls in classes):
             header_text = element.get_text(strip=True)
             current_date_header = header_text
             current_date = _date_from_header_text(header_text)
@@ -325,6 +358,9 @@ def try_parse_events(html: str, url: str):
             href = a.get("href", "")
             m = re.search(r"/event/\d+/\d+/(\d+)", href)
             ext_id = m.group(1) if m else ""
+
+            # NOVO: URL completo da página do jogo
+            game_url = urljoin(url, href)
 
             # nomes
             title = a.get_text(" ", strip=True)
@@ -387,6 +423,7 @@ def try_parse_events(html: str, url: str):
             evs.append(NS(
                 ext_id=ext_id,
                 source_link=url,
+                game_url=game_url, 
                 competition="",
                 team_home=team_home,
                 team_away=team_away,
@@ -416,7 +453,7 @@ async def fetch_events_from_link(url: str, backend: str):
             if b == "playwright":
                 html = await _fetch_with_playwright(url)
             else:
-                html = fetch_requests(url)
+                html = await _fetch_requests_async(url)
             evs = try_parse_events(html, url)
             if evs:
                 return evs
@@ -520,6 +557,30 @@ def decide_bet(odds_home, odds_draw, odds_away, competition, teams):
     # Se nenhuma estratégia foi acionada, retorna o motivo da falha da estratégia 1.
     reason = f"EV baixo (<{int(MIN_EV*100)}%)" if best_ev < MIN_EV else f"Probabilidade baixa (<{int(MIN_PROB*100)}%)"
     return False, "", pprob_ev, best_ev, reason
+
+def kelly_fraction(p: float, odd: float) -> float:
+    """
+    Kelly puro: f* = (bp - q)/b, onde b=odd-1, q=1-p.
+    Retorna 0 se não houver edge.
+    """
+    if odd is None or odd <= 1.0 or p is None or p <= 0 or p >= 1:
+        return 0.0
+    b = odd - 1.0
+    q = 1.0 - p
+    f = (b * p - q) / b
+    return max(0.0, f)
+
+def suggest_stake_and_return(p: float, odd: float, bankroll: float, kelly_frac: float):
+    """
+    Aplica Kelly fracionado: stake = bankroll * kelly_fraction(p, odd) * kelly_frac
+    Retorna (stake, lucro_potencial)
+    """
+    f_star = kelly_fraction(p, odd)
+    stake = bankroll * f_star * max(0.0, min(1.0, kelly_frac))
+    stake = round(stake, 2)
+    potential_profit = round(stake * (odd - 1.0), 2)
+    return stake, potential_profit
+
 
 # ================================
 # Watchlist helpers (Stat.key='watchlist')
@@ -850,30 +911,31 @@ def fmt_watch_upgrade(g: Game) -> str:
     return msg
 
 def fmt_live_bet_opportunity(g: Game, opportunity: Dict[str, Any], stats: Dict[str, Any]) -> str:
-    """Formatação elegante para oportunidades ao vivo"""
-    
-    # Define urgência baseada no tempo
     match_time = stats.get('match_time', '')
-    urgency = "🔥🔥🔥" if any(x in match_time for x in ["85", "86", "87", "88", "89", "90"]) else "🔥"
-    
-    msg = f"{urgency} <b>OPORTUNIDADE AO VIVO</b>\n"
-    msg += "━━━━━━━━━━━━━━━━━━━━\n\n"
-    
-    msg += f"⚽ <b>{g.team_home} vs {g.team_away}</b>\n"
-    msg += f"├ ⏱ {match_time}' | Placar: {stats.get('score', '—')}\n"
-    
-    # Adiciona contexto do jogo se relevante
+    urgency = "🔥🔥🔥" if any(x in match_time for x in ["85","86","87","88","89","90"]) else "🔥"
+
+    pick_line = f"{opportunity.get('display_name')} • {opportunity['option']} @ {opportunity['odd']:.2f}"
+    stake = opportunity.get("stake", 0.0)
+    profit = opportunity.get("profit", 0.0)
+    est_p = opportunity.get("p_est", 0.0)
+
+    msg = (
+        f"{urgency} <b>OPORTUNIDADE AO VIVO</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"⚽ <b>{g.team_home}</b> vs <b>{g.team_away}</b>\n"
+        f"├ ⏱ {match_time} | Placar: {stats.get('score','—')}\n"
+    )
     if 'last_event' in stats:
         msg += f"├ 📝 Último evento: {stats['last_event']}\n"
-    
-    msg += f"\n💰 <b>APOSTA RECOMENDADA</b>\n"
-    msg += f"├ Mercado: <b>{opportunity.get('display_name')}</b>\n"
-    msg += f"├ Seleção: <b>{opportunity['option']}</b>\n"
-    msg += f"├ Odd atual: <b>{opportunity['odd']:.2f}</b>\n"
-    msg += f"└ {opportunity['reason']}\n"
-    
-    msg += "\n⚡ <i>Aja rapidamente - odds ao vivo mudam!</i>"
-    
+
+    msg += (
+        f"\n💰 <b>APOSTA</b>\n"
+        f"├ {pick_line}\n"
+        f"├ Prob. estimada: <b>{est_p*100:.0f}%</b>\n"
+        f"├ Aporte sugerido: <b>{stake:.2f}</b>\n"
+        f"└ Lucro potencial: <b>{profit:.2f}</b>\n"
+        "\n⚡ <i>Aja rápido — odds ao vivo mudam!</i>"
+    )
     return msg
 
 # ================================
@@ -1072,149 +1134,226 @@ def scrape_live_game_data(html: str, ext_id: str) -> Dict[str, Any]:
     return data
 
 # --- NOVA FUNÇÃO: Lógica de Decisão para Palpites Ao Vivo ---
-def decide_live_bet_opportunity(live_data: Dict[str, Any], game: Game, last_pick_time: Optional[datetime]) -> Optional[Dict[str, Any]]:
+
+def decide_live_bet_opportunity(live_data: Dict[str, Any], game: Game, tracker: LiveGameTracker) -> Optional[Dict[str, Any]]:
     """
-    Decide se existe uma oportunidade de aposta ao vivo digna de ser enviada.
-    Retorna um dicionário com os detalhes do palpite ou None.
+    Retorna uma oportunidade apenas se:
+      - odd >= LIVE_MIN_ODD
+      - 'edge' >= LIVE_MIN_EDGE (acima do break-even)
+      - score agregado >= LIVE_MIN_SCORE
+      - respeita cooldown geral do jogo e cooldown específico para mesma pick
     """
     stats = live_data.get("stats", {})
     markets = live_data.get("markets", {})
-    home_goals = stats.get("home_goals", 0)
-    away_goals = stats.get("away_goals", 0)
-    match_time = stats.get("match_time", "")
+    match_time = stats.get("match_time", "") or ""
 
-    # --- Regra Anti-Spam: Espera pelo menos 5 minutos entre palpites no mesmo jogo ---
-    if last_pick_time:
-        now = datetime.now(pytz.UTC)
-        if (now - last_pick_time).total_seconds() < 300:  # 5 minutos
+    # Cooldown geral do jogo
+    now = datetime.now(pytz.UTC)
+    cooldown_until = tracker.cooldown_until
+    if cooldown_until and now < cooldown_until:
+        return None
+
+    LIVE_MIN_ODD = float(os.getenv("LIVE_MIN_ODD", "1.20"))
+    LIVE_MIN_EDGE = float(os.getenv("LIVE_MIN_EDGE", "0.02"))
+    LIVE_MIN_SCORE = float(os.getenv("LIVE_MIN_SCORE", "0.60"))
+    SAME_PICK_CD_MIN = int(os.getenv("LIVE_SAME_PICK_COOLDOWN_MIN", "20"))
+    COOLDOWN_MIN = int(os.getenv("LIVE_COOLDOWN_MIN", "8"))
+
+    candidates = []
+
+    # ======= REGRA 1: BTTS NÃO 0-0 >= 75'
+    try:
+        home_goals = int(stats.get("home_goals", 0))
+        away_goals = int(stats.get("away_goals", 0))
+    except Exception:
+        home_goals = away_goals = 0
+
+    if home_goals == 0 and away_goals == 0:
+        if any(x in match_time for x in ["75","76","77","78","79","80","81","82","83","84","85","86","87","88","89","90"]):
+            btts = markets.get("btts", {}).get("options", {})
+            odd = float(btts.get("Não", 0.0) or 0.0)
+            if odd >= LIVE_MIN_ODD:
+                # Estimativa: prob acima do breakeven por pequena margem
+                # breakeven = 1/odd, p_est = breakeven + margem (ex.: +3% se muito tarde do jogo)
+                brk = 1.0 / odd
+                bonus = 0.03 if "85" in match_time or "86" in match_time or "87" in match_time or "88" in match_time or "89" in match_time or "90" in match_time else 0.02
+                p_est = min(0.95, brk + bonus)
+                edge = p_est * odd - 1.0
+                # score: tempo (alto) + placar (alto) + edge
+                score = 0.4 + 0.3 + min(0.3, max(0.0, edge))  # 0.7~1.0
+                candidates.append({
+                    "market_key": "btts",
+                    "display_name": "Ambos os Times Marcam",
+                    "option": "Não",
+                    "odd": odd,
+                    "p_est": p_est,
+                    "edge": edge,
+                    "score": score,
+                    "cooldown_minutes": COOLDOWN_MIN
+                })
+
+    # ======= REGRA 2: Resultado Final — time vencendo por 1 gol aos 85+'
+    if abs(home_goals - away_goals) == 1 and any(x in match_time for x in ["85","86","87","88","89","90"]):
+        leader = "Casa" if home_goals > away_goals else "Fora"
+        result_market = markets.get("match_result", {}).get("options", {})
+        odd = float(result_market.get(leader, 0.0) or 0.0)
+        if odd >= LIVE_MIN_ODD:
+            brk = 1.0 / odd
+            p_est = min(0.98, brk + 0.03)  # pequena margem
+            edge = p_est * odd - 1.0
+            score = 0.35 + 0.25 + min(0.4, max(0.0, edge))
+            candidates.append({
+                "market_key": "match_result",
+                "display_name": "Resultado Final",
+                "option": leader,
+                "odd": odd,
+                "p_est": p_est,
+                "edge": edge,
+                "score": score,
+                "cooldown_minutes": max(COOLDOWN_MIN, 12)
+            })
+
+    # (Você pode manter/expandir outras regras daqui, seguindo o mesmo padrão)
+
+    if not candidates:
+        return None
+
+    # Escolhe melhor por score
+    cand = max(candidates, key=lambda c: c["score"])
+
+    # Filtros finais
+    if cand["edge"] < LIVE_MIN_EDGE or cand["score"] < LIVE_MIN_SCORE:
+        return None
+
+    # Dedupe: não repetir mesma pick (mercado+opção) dentro do SAME_PICK_CD_MIN
+    pick_key = f"{cand['market_key']}|{cand['option']}"
+    if tracker.last_pick_key == pick_key and tracker.last_pick_sent:
+        if (now - tracker.last_pick_sent).total_seconds() < SAME_PICK_CD_MIN * 60:
             return None
 
-    # --- Regra 1: "Ambos Marcam - Não" em jogos 0-0 após o minuto 75 ---
-    if home_goals == 0 and away_goals == 0:
-        if any(x in match_time for x in ["75", "76", "77", "78", "79", "80", "81", "82", "83", "84", "85", "86", "87", "88", "89", "90"]):
-            btts_market = markets.get("btts", {}).get("options", {})
-            no_option_odd = btts_market.get("Não", 0.0)
-            if no_option_odd >= 1.4:  # Só considera se a odd for atraente
-                return {
-                    "market_key": "btts",
-                    "option": "Não",
-                    "odd": no_option_odd,
-                    "reason": f"Jogo 0-0 no minuto {match_time}. Alta probabilidade de terminar sem gols.",
-                    "cooldown_minutes": 10,  # Não enviar outro palpite por 10 minutos
-                    "display_name": markets.get("btts", {}).get("display_name", "Ambos os Times Marcam")
-                }
+    # Sugerir stake/retorno
+    bankroll = float(os.getenv("BANKROLL", "1000"))
+    kfrac = float(os.getenv("KELLY_FRACTION", "0.25"))
+    stake, profit = suggest_stake_and_return(cand["p_est"], cand["odd"], bankroll, kfrac)
+    if stake <= 0.0:
+        return None
 
-    # --- Regra 2: "Resultado Final" no time que está ganhando por 1 gol no final do jogo ---
-    if abs(home_goals - away_goals) == 1:
-        if any(x in match_time for x in ["85", "86", "87", "88", "89", "90", "90'+", "90'"]):
-            winner = "Casa" if home_goals > away_goals else "Fora"
-            result_market = markets.get("match_result", {}).get("options", {})
-            winner_odd = result_market.get(winner, 0.0)
-            if winner_odd >= 1.2:
-                return {
-                    "market_key": "match_result",
-                    "option": winner,
-                    "odd": winner_odd,
-                    "reason": f"Time da {winner.lower()} vencendo por 1 gol no minuto {match_time}.",
-                    "cooldown_minutes": 15,  # Cooldown longo, pois o jogo está acabando
-                    "display_name": markets.get("match_result", {}).get("display_name", "Resultado Final")
-                }
+    cand["stake"] = stake
+    cand["profit"] = profit
+    cand["pick_key"] = pick_key
+    return cand
 
-    # --- Regra 3: "Total de Gols - Acima 0.5" no segundo tempo se o jogo está 0-0 no HT ---
-    if home_goals == 0 and away_goals == 0 and "HT" in match_time:
-        total_goals_market = markets.get("total_goals", {}).get("options", {})
-        # Procura por uma opção que indique "Acima 0.5 no 2º Tempo"
-        for opt_name, opt_odd in total_goals_market.items():
-            if "2º Tempo" in opt_name and "Acima 0.5" in opt_name and opt_odd >= 1.3:
-                return {
-                    "market_key": "total_goals",
-                    "option": opt_name,
-                    "odd": opt_odd,
-                    "reason": "Jogo 0-0 no HT. Alta chance de gol no segundo tempo.",
-                    "cooldown_minutes": 5,
-                    "display_name": markets.get("total_goals", {}).get("display_name", "Total de Gols")
-                }
-
-    # --- Regra 4: "Placar Exato" 1-0 ou 0-1 logo após um gol no início do jogo ---
-    if (home_goals + away_goals) == 1 and "5" in match_time:  # Ex: minuto 5, 6, 7
-        correct_score_market = markets.get("correct_score", {}).get("options", {})
-        target_score = "1 - 0" if home_goals == 1 else "0 - 1"
-        score_odd = correct_score_market.get(target_score, 0.0)
-        if score_odd >= 5.0:  # Só vale a pena se a odd for alta
-            return {
-                "market_key": "correct_score",
-                "option": target_score,
-                "odd": score_odd,
-                "reason": f"Gol no minuto {match_time}. Boa chance de terminar {target_score}.",
-                "cooldown_minutes": 20,  # Cooldown longo para placar exato
-                "display_name": markets.get("correct_score", {}).get("display_name", "Placar Exato")
-            }
-
-    # --- Regra 5: "Escanteios - Acima X" se o jogo está muito movimentado ---
-    # Esta regra é mais complexa e requer análise de "Ataque Perigoso". Vamos pular por enquanto.
-
-    return None  # Nenhuma oportunidade encontrada
 
 # --- NOVA FUNÇÃO: Job de Monitoramento Ao Vivo ---
+async def _poll_one_live_game(game_id: int, tracker_id: int, sem: asyncio.Semaphore):
+    async with sem:
+        base = int(os.getenv("LIVE_BASE_POLL_SEC", "25"))
+        jitter = random.randint(0, int(os.getenv("LIVE_POLL_JITTER_SEC", "10")))
+        await asyncio.sleep(random.uniform(0, 1.0))
+
+        try:
+            with SessionLocal() as s:
+                g = s.get(Game, game_id)
+                tr = s.get(LiveGameTracker, tracker_id)
+                if not g or not tr:
+                    return False
+
+                # busque com requests (não bloqueie o loop por muito tempo)
+                html = await _fetch_requests_async(g.game_url or g.source_link)
+                live_data = scrape_live_game_data(html, g.ext_id)
+
+                now = datetime.now(pytz.UTC)
+                tr.current_score = live_data["stats"].get("score")
+                tr.current_minute = live_data["stats"].get("match_time")
+                tr.last_analysis_time = now
+
+                opp = decide_live_bet_opportunity(live_data, g, tr)
+                if opp:
+                    msg = fmt_live_bet_opportunity(g, opp, live_data["stats"])
+                    tg_send_message(msg)
+
+                    tr.last_pick_key = opp["pick_key"]
+                    tr.last_pick_sent = now
+                    cooldown_min = opp.get("cooldown_minutes", int(os.getenv("LIVE_COOLDOWN_MIN","8")))
+                    tr.cooldown_until = now + timedelta(minutes=cooldown_min)
+                    tr.notifications_sent = (tr.notifications_sent or 0) + 1
+
+                s.commit()
+                return True
+        except Exception as e:
+            logger.exception("Erro ao pollar jogo ao vivo id=%s: %s", game_id, e)
+            return False
+        finally:
+            await asyncio.sleep(base + jitter)
+
 async def monitor_live_games_job():
     """
-    Job executado a cada 1 minuto para monitorar todos os jogos ao vivo.
+    Varre jogos com status='live', garante LiveGameTracker para cada um,
+    roda um ciclo de _poll_ concorrente e persiste os updates (placar/minuto,
+    cooldowns, dedupe de picks, etc.).
     """
     logger.info("⚽ Iniciando monitoramento de jogos ao vivo...")
     now_utc = datetime.now(pytz.UTC)
 
     with SessionLocal() as session:
-        # Busca todos os jogos que estão ao vivo (status = 'live')
+        # 1) Carrega jogos ao vivo
         live_games = session.query(Game).filter(Game.status == "live").all()
+        if not live_games:
+            logger.info("⚽ Sem jogos 'live' no momento.")
+            return
 
-        for game in live_games:
-            try:
-                # 1. Busca ou cria o tracker para este jogo
-                tracker = session.query(LiveGameTracker).filter_by(game_id=game.id).one_or_none()
-                if not tracker:
-                    tracker = LiveGameTracker(
-                        game_id=game.id,
-                        ext_id=game.ext_id,
-                        last_analysis_time=now_utc - timedelta(minutes=5)  # Força primeira análise
-                    )
-                    session.add(tracker)
-                    session.commit()
-
-                # 2. Scrapeia os dados atuais da página do jogo
-                html = await _fetch_requests_async(game.source_link)
-                live_data = scrape_live_game_data(html, game.ext_id)
-
-                # Atualiza as estatísticas no tracker
-                tracker.current_score = live_data["stats"].get("score")
-                tracker.current_minute = live_data["stats"].get("match_time")
-                tracker.last_analysis_time = now_utc
-
-                # 3. Aplica a lógica de decisão
-                opportunity = decide_live_bet_opportunity(
-                    live_data,
-                    game,
-                    tracker.last_pick_sent
+        # 2) Garante tracker para cada jogo
+        created = 0
+        for g in live_games:
+            tr = session.query(LiveGameTracker).filter_by(game_id=g.id).one_or_none()
+            if not tr:
+                tr = LiveGameTracker(
+                    game_id=g.id,
+                    ext_id=g.ext_id,
+                    game_url=g.game_url or g.source_link,
+                    last_analysis_time=now_utc - timedelta(minutes=5),
+                    notifications_sent=0,
                 )
+                session.add(tr)
+                created += 1
+        if created:
+            logger.info("🆕 Criados %d LiveGameTracker(s).", created)
+        session.commit()
 
-                # 4. Se houver uma oportunidade, envia o palpite
-                if opportunity:
-                    # Formata a mensagem
-                    message = fmt_live_bet_opportunity(game, opportunity, live_data["stats"])
-                    tg_send_message(message)
+        # 3) Limita concorrência
+        max_conc = int(os.getenv("LIVE_MAX_CONCURRENCY", "8"))
+        sem = asyncio.Semaphore(max_conc)
 
-                    # Atualiza o tracker para evitar spam
-                    tracker.last_pick_sent = now_utc
-                    tracker.last_pick_market = opportunity["market_key"]
-                    tracker.last_pick_option = opportunity["option"]
+        # 4) Mapa jogo->tracker e dispara polls
+        trackers = {
+            t.game_id: t
+            for t in session.query(LiveGameTracker).filter(
+                LiveGameTracker.game_id.in_([g.id for g in live_games])
+            ).all()
+        }
 
-                    logger.info(f"🔥 Palpite ao vivo enviado para jogo {game.id}: {opportunity['option']} @ {opportunity['odd']}")
+        tasks = []
+        for g in live_games:
+            tr = trackers.get(g.id)
+            if not tr:
+                continue
+            tasks.append(_poll_one_live_game(g.id, tr.id, sem))
 
-                session.commit()
+        if not tasks:
+            logger.info("⚽ Nenhum tracker elegível para poll.")
+            return
 
-            except Exception as e:
-                logger.exception(f"Erro ao monitorar jogo ao vivo {game.id} ({game.ext_id}): {e}")
+        # 5) Aguarda um ciclo de todos os polls; erros são coletados
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        fails = sum(1 for r in results if r is False or isinstance(r, Exception))
+        if fails:
+            logger.info("⚠️ Poll concluiu com %d falha(s) entre %d tarefa(s).", fails, len(results))
 
-    logger.info("⚽ Monitoramento de jogos ao vivo concluído.")
+        # 6) Persiste mudanças feitas pelos polls nos trackers
+        session.commit()
+
+    logger.info("✅ Monitoramento de jogos ao vivo concluído.")
+
 
 # --- NOVA FUNÇÃO: Job de Reavaliação Horária ---
 async def hourly_rescan_job():
@@ -1464,6 +1603,7 @@ async def morning_scan_and_publish():
                     g = session.query(Game).filter_by(ext_id=ev.ext_id, start_time=start_utc).one_or_none()
                     if g:
                         g.source_link = url
+                        g.game_url = getattr(ev, "game_url", None) or g.game_url
                         g.competition = ev.competition or g.competition
                         g.team_home = ev.team_home or g.team_home
                         g.team_away = ev.team_away or g.team_away
@@ -1481,10 +1621,11 @@ async def morning_scan_and_publish():
                         g = Game(
                             ext_id=ev.ext_id,
                             source_link=url,
+                            game_url=getattr(ev, "game_url", None),
                             competition=ev.competition,
                             team_home=ev.team_home,
                             team_away=ev.team_away,
-                            start_time=start_utc,  # UTC aware
+                            start_time=start_utc,
                             odds_home=ev.odds_home,
                             odds_draw=ev.odds_draw,
                             odds_away=ev.odds_away,
@@ -1503,6 +1644,7 @@ async def morning_scan_and_publish():
                             g = session.query(Game).filter_by(ext_id=ev.ext_id, start_time=start_utc).one_or_none()
                             if g:
                                 g.source_link = url
+                                g.game_url = getattr(ev, "game_url", None) or g.game_url
                                 g.competition = ev.competition or g.competition
                                 g.team_home = ev.team_home or g.team_home
                                 g.team_away = ev.team_away or g.team_away
@@ -1518,6 +1660,7 @@ async def morning_scan_and_publish():
                                 session.commit()
                             else:
                                 raise
+
 
                     stored_total += 1
                     session.refresh(g)  # garante id e campos atualizados
@@ -1586,71 +1729,71 @@ async def morning_scan_and_publish():
 async def night_scan_for_early_games():
     """Varredura noturna específica para jogos da madrugada (00:00 às 06:00)"""
     logger.info("🌙 Iniciando varredura noturna para jogos da madrugada...")
-    
-    # Define janela de análise: meia-noite até 6h do dia seguinte
+
+    # Janela: meia-noite → 06:00 do dia seguinte (no fuso APP_TZ), tudo convertido para UTC
     tomorrow = datetime.now(ZONE).date() + timedelta(days=1)
     start_window = ZONE.localize(datetime(tomorrow.year, tomorrow.month, tomorrow.day, 0, 0)).astimezone(pytz.UTC)
-    end_window = ZONE.localize(datetime(tomorrow.year, tomorrow.month, tomorrow.day, 6, 0)).astimezone(pytz.UTC)
-    
+    end_window   = ZONE.localize(datetime(tomorrow.year, tomorrow.month, tomorrow.day, 6, 0)).astimezone(pytz.UTC)
+
     stored_total = 0
     analyzed_total = 0
     early_games: List[Dict[str, Any]] = []
-    
+
     backend_cfg = "playwright"
-    
     logger.info(f"📅 Analisando jogos da madrugada de {tomorrow.strftime('%d/%m/%Y')} (00:00 às 06:00)")
-    
+
     with SessionLocal() as session:
         for url in app.all_links():
             evs: List[Any] = []
-            
             try:
                 evs = await fetch_events_from_link(url, backend_cfg)
             except Exception as e:
                 logger.warning("Falha ao buscar %s: %s", url, e)
                 continue
-            
+
             analyzed_total += len(evs)
-            
+
             for ev in evs:
                 try:
-                    # Parse do horário
+                    # Parse e normalização do horário
                     start_utc = parse_local_datetime(getattr(ev, "start_local_str", ""))
                     if not start_utc:
                         continue
-                    
                     start_utc = to_aware_utc(start_utc)
-                    
-                    # FILTRO IMPORTANTE: Apenas jogos entre 00:00 e 06:00 do dia seguinte
+
+                    # Filtro: apenas jogos entre 00:00 e 06:00 do dia seguinte (UTC já convertido)
                     if not (start_window <= start_utc < end_window):
                         continue
-                    
-                    # Decisão de aposta
+
+                    # Decisão
                     will, pick, pprob, pev, reason = decide_bet(
                         ev.odds_home, ev.odds_draw, ev.odds_away, ev.competition, (ev.team_home, ev.team_away)
                     )
-                    
+
                     if not will:
-                        # Avaliar watchlist mesmo na varredura noturna
+                        # Ainda assim, avaliar ADD na watchlist
                         MIN_EV = float(os.getenv("MIN_EV", "-0.02"))
                         now_utc = datetime.now(pytz.UTC)
                         lead_ok = (start_utc - now_utc) >= timedelta(minutes=WATCHLIST_MIN_LEAD_MIN)
                         near_cut = (pev >= (MIN_EV - WATCHLIST_DELTA)) and (pev < MIN_EV)
                         prob_ok = pprob >= float(os.getenv("MIN_PROB", "0.20"))
-                        
+
                         if lead_ok and near_cut and prob_ok and not getattr(ev, "is_live", False):
                             added = wl_add(session, ev.ext_id, url, start_utc)
                             if added:
-                                logger.info("👀 Adicionado à WATCHLIST (madrugada): %s vs %s", 
-                                          ev.team_home, ev.team_away)
+                                logger.info(
+                                    "👀 Adicionado à WATCHLIST (madrugada): %s vs %s | EV=%.3f | prob=%.3f | start=%s",
+                                    ev.team_home, ev.team_away, pev, pprob, start_utc.isoformat()
+                                )
                         continue
-                    
-                    # Salvar no banco (UPSERT)
+
+                    # ---------------------------
+                    # UPSERT seguro (sem acessar g antes de existir) + vírgula após game_url
+                    # ---------------------------
                     g = session.query(Game).filter_by(ext_id=ev.ext_id, start_time=start_utc).one_or_none()
-                    
                     if g:
-                        # Atualiza existente
                         g.source_link = url
+                        g.game_url = getattr(ev, "game_url", None) or g.game_url
                         g.competition = ev.competition or g.competition
                         g.team_home = ev.team_home or g.team_home
                         g.team_away = ev.team_away or g.team_away
@@ -1665,10 +1808,10 @@ async def night_scan_for_early_games():
                         g.status = "scheduled"
                         session.commit()
                     else:
-                        # Cria novo
                         g = Game(
                             ext_id=ev.ext_id,
                             source_link=url,
+                            game_url=getattr(ev, "game_url", None),  # <-- vírgula aqui ✔
                             competition=ev.competition,
                             team_home=ev.team_home,
                             team_away=ev.team_away,
@@ -1688,12 +1831,31 @@ async def night_scan_for_early_games():
                             session.commit()
                         except IntegrityError:
                             session.rollback()
-                            continue
-                    
+                            # corrida: alguém inseriu no meio — atualiza o existente
+                            g = session.query(Game).filter_by(ext_id=ev.ext_id, start_time=start_utc).one_or_none()
+                            if g:
+                                g.source_link = url
+                                g.game_url = getattr(ev, "game_url", None) or g.game_url
+                                g.competition = ev.competition or g.competition
+                                g.team_home = ev.team_home or g.team_home
+                                g.team_away = ev.team_away or g.team_away
+                                g.odds_home = ev.odds_home
+                                g.odds_draw = ev.odds_draw
+                                g.odds_away = ev.odds_away
+                                g.pick = pick
+                                g.pick_prob = pprob
+                                g.pick_ev = pev
+                                g.pick_reason = reason
+                                g.will_bet = will
+                                g.status = "scheduled"
+                                session.commit()
+                            else:
+                                raise
+
                     stored_total += 1
                     session.refresh(g)
-                    
-                    # Adiciona para o resumo
+
+                    # Para o resumo
                     early_games.append({
                         "id": g.id,
                         "team_home": g.team_home,
@@ -1706,37 +1868,40 @@ async def night_scan_for_early_games():
                         "pick_prob": float(g.pick_prob or 0),
                         "pick_ev": float(g.pick_ev or 0),
                     })
-                    
+
                     logger.info(
                         "✅ MADRUGADA: %s vs %s | %s | pick=%s | início=%s",
                         g.team_home, g.team_away,
                         start_utc.astimezone(ZONE).strftime("%H:%M"),
                         g.pick,
-                        ev.start_local_str
+                        getattr(ev, "start_local_str", "?")
                     )
-                    
-                    # Envio individual do pick
+
+                    # Envio do pick + agendamentos
                     try:
                         tg_send_message(fmt_pick_now(g))
                     except Exception:
                         logger.exception("Falha ao enviar pick noturno id=%s", g.id)
-                    
-                    # Agendamentos
+
                     await _schedule_all_for_game(g)
-                    
+
                 except Exception:
                     session.rollback()
-                    logger.exception("Erro ao processar evento noturno %s vs %s",
-                                   getattr(ev, "team_home", "?"),
-                                   getattr(ev, "team_away", "?"))
-    
-    # Envia resumo da varredura noturna
+                    logger.exception(
+                        "Erro ao processar evento noturno %s vs %s (url=%s)",
+                        getattr(ev, "team_home", "?"),
+                        getattr(ev, "team_away", "?"),
+                        url,
+                    )
+
+    # Resumo da varredura noturna
     if early_games:
         msg = format_night_scan_summary(tomorrow, analyzed_total, early_games)
         tg_send_message(msg)
-    
+
     logger.info("🌙 Varredura noturna concluída — analisados=%d | selecionados=%d",
-               analyzed_total, len(early_games))
+                analyzed_total, len(early_games))
+
 
 def format_night_scan_summary(date: datetime, analyzed: int, games: List[Dict[str, Any]]) -> str:
     """Formata o resumo da varredura noturna (00:00–06:00 do dia seguinte, no fuso APP_TZ)."""
@@ -1787,9 +1952,11 @@ async def rescan_watchlist_job():
     """
     Rechecagem periódica da watchlist.
     Força o uso do Playwright para garantir que os jogos sejam carregados corretamente.
+    Promove itens da watchlist a PICK quando cruzam os critérios.
     """
     logger.info("🔄 Rechecando WATCHLIST…")
     now_utc = datetime.now(pytz.UTC)
+
     with SessionLocal() as session:
         wl = wl_load(session)
         items = wl.get("items", [])
@@ -1797,50 +1964,66 @@ async def rescan_watchlist_job():
             logger.info("WATCHLIST vazia.")
             return
 
-        # 1) agrupar por link para rebaixar custos
+        # 1) Agrupa por link para baixar páginas uma vez só
         by_link: Dict[str, List[Dict[str, str]]] = {}
         for it in items:
             by_link.setdefault(it["link"], []).append(it)
 
-        # 2) para cada link, buscar eventos e indexar por ext_id
+        # 2) Para cada link, buscar eventos e indexar por ext_id
         page_cache: Dict[str, Dict[str, Any]] = {}
         for link, its in by_link.items():
             try:
-                # --- ALTERAÇÃO CRÍTICA: Força o uso do Playwright ---
-                evs = await fetch_events_from_link(link, "playwright")
-                # ---------------------------------------------------
-            except Exception:
+                evs = await fetch_events_from_link(link, "playwright")  # força playwright
+            except Exception as e:
+                logger.warning("Falha ao buscar página da watchlist %s: %s", link, e)
                 evs = []
             page_cache[link] = {e.ext_id: e for e in evs}
 
-        # 3) iterar itens; remover passados; promover se cruzou corte
+        # 3) Itera itens; remove passados; promove se cruzou o corte
         MIN_EV = float(os.getenv("MIN_EV", "-0.02"))
         MIN_PROB = float(os.getenv("MIN_PROB", "0.20"))
         upgraded: List[str] = []
         removed_expired = 0
 
+        # Usamos uma cópia para poder remover enquanto iteramos
         for it in list(items):
-            ext_id = it["ext_id"]; link = it["link"]
-            start_utc = to_aware_utc(datetime.fromisoformat(it["start_time"]))
+            ext_id = it["ext_id"]
+            link = it["link"]
+            try:
+                start_utc = to_aware_utc(datetime.fromisoformat(it["start_time"]))
+            except Exception:
+                # Se a data estiver inválida, removemos o item
+                removed_expired += wl_remove(session, lambda x, eid=ext_id: x["ext_id"] == eid)
+                continue
 
             # expirado?
             if start_utc <= now_utc:
-                removed_expired += wl_remove(session, lambda x, eid=ext_id, st=it["start_time"]: x["ext_id"]==eid and x["start_time"]==st)
+                removed_expired += wl_remove(
+                    session,
+                    lambda x, eid=ext_id, st=it["start_time"]: x["ext_id"] == eid and x["start_time"] == st
+                )
                 continue
 
             page = page_cache.get(link, {})
             ev = page.get(ext_id)
             if not ev:
-                # evento sumiu da página; pode ser mudança de mercado — mantemos por enquanto
+                # evento sumiu da página; pode ser mudança de card/rota — mantemos temporariamente
                 continue
 
             # recalcular decisão
-            will, pick, pprob, pev, reason = decide_bet(ev.odds_home, ev.odds_draw, ev.odds_away, ev.competition, (ev.team_home, ev.team_away))
+            will, pick, pprob, pev, reason = decide_bet(
+                ev.odds_home, ev.odds_draw, ev.odds_away, ev.competition, (ev.team_home, ev.team_away)
+            )
+
             if will and (pprob >= MIN_PROB) and (pev >= MIN_EV):
-                # promover a pick
+                # promover a pick (UPSERT seguro)
                 g = session.query(Game).filter_by(ext_id=ext_id, start_time=start_utc).one_or_none()
                 if g:
-                    # atualizar odds/valores e marcar will_bet
+                    g.source_link = link
+                    g.game_url = getattr(ev, "game_url", None) or g.game_url
+                    g.competition = ev.competition or g.competition
+                    g.team_home = ev.team_home or g.team_home
+                    g.team_away = ev.team_away or g.team_away
                     g.odds_home = ev.odds_home
                     g.odds_draw = ev.odds_draw
                     g.odds_away = ev.odds_away
@@ -1849,11 +2032,13 @@ async def rescan_watchlist_job():
                     g.pick_ev = pev
                     g.will_bet = True
                     g.pick_reason = "Upgrade watchlist"
+                    g.status = "scheduled"
                     session.commit()
                 else:
                     g = Game(
                         ext_id=ext_id,
                         source_link=link,
+                        game_url=getattr(ev, "game_url", None),  # <- vírgula corrigida aqui ✔
                         competition=ev.competition,
                         team_home=ev.team_home,
                         team_away=ev.team_away,
@@ -1868,7 +2053,32 @@ async def rescan_watchlist_job():
                         pick_reason="Upgrade watchlist",
                         status="scheduled",
                     )
-                    session.add(g); session.commit(); session.refresh(g)
+                    session.add(g)
+                    try:
+                        session.commit()
+                    except IntegrityError:
+                        # Corrida: alguém inseriu no meio — atualiza o existente
+                        session.rollback()
+                        g = session.query(Game).filter_by(ext_id=ext_id, start_time=start_utc).one_or_none()
+                        if g:
+                            g.source_link = link
+                            g.game_url = getattr(ev, "game_url", None) or g.game_url
+                            g.competition = ev.competition or g.competition
+                            g.team_home = ev.team_home or g.team_home
+                            g.team_away = ev.team_away or g.team_away
+                            g.odds_home = ev.odds_home
+                            g.odds_draw = ev.odds_draw
+                            g.odds_away = ev.odds_away
+                            g.pick = pick
+                            g.pick_prob = pprob
+                            g.pick_ev = pev
+                            g.will_bet = True
+                            g.pick_reason = "Upgrade watchlist"
+                            g.status = "scheduled"
+                            session.commit()
+                        else:
+                            raise
+                session.refresh(g)
 
                 # mensagem & agendamentos
                 try:
@@ -1878,13 +2088,18 @@ async def rescan_watchlist_job():
                     logger.exception("Falha ao notificar upgrade watchlist id=%s", g.id)
 
                 # remover esse item da watchlist
-                wl_remove(session, lambda x, eid=ext_id, st=it["start_time"]: x["ext_id"]==eid and x["start_time"]==st)
+                wl_remove(
+                    session,
+                    lambda x, eid=ext_id, st=it["start_time"]: x["ext_id"] == eid and x["start_time"] == st
+                )
                 upgraded.append(ext_id)
 
         if removed_expired:
             logger.info("🧹 WATCHLIST: %d itens expirados removidos.", removed_expired)
         if upgraded:
             logger.info("⬆️ WATCHLIST: promovidos %d itens: %s", len(upgraded), ", ".join(upgraded))
+        else:
+            logger.info("ℹ️ WATCHLIST: nenhuma promoção nesta passada.")
 
 # ================================
 # Jobs auxiliares
@@ -1978,19 +2193,27 @@ async def maybe_send_daily_wrapup():
                         total, hits, acc, gacc)
 
 def setup_scheduler():
-    # Varredura diária matinal
+    """
+    Registra todos os jobs no AsyncIOScheduler.
+
+    - morning_scan_and_publish(): todo dia às MORNING_HOUR:00 (fuso APP_TZ)
+    - night_scan_for_early_games(): opcional, às NIGHT_SCAN_HOUR:00
+    - rescan_watchlist_job(): a cada WATCHLIST_RESCAN_MIN minutos
+    - hourly_rescan_job(): a cada 1 hora
+    - monitor_live_games_job(): a cada 1 minuto (única entrada; sem duplicar IDs)
+    """
+    # --- Varredura matinal (diária) ---
     scheduler.add_job(
-        monitor_live_games_job,
-        trigger=IntervalTrigger(minutes=3),
-        id="monitor_live_games",
+        morning_scan_and_publish,
+        trigger=CronTrigger(hour=MORNING_HOUR, minute=0),
+        id="morning_scan",
         replace_existing=True,
-        misfire_grace_time=60,
         coalesce=True,
         max_instances=1,
+        misfire_grace_time=300,  # se perder a janela, ainda tolera 5 min
     )
 
-    
-    # NOVO: Varredura noturna (se habilitada)
+    # --- Varredura noturna opcional ---
     if os.getenv("ENABLE_NIGHT_SCAN", "false").lower() == "true":
         night_hour = int(os.getenv("NIGHT_SCAN_HOUR", "22"))
         scheduler.add_job(
@@ -1998,44 +2221,60 @@ def setup_scheduler():
             trigger=CronTrigger(hour=night_hour, minute=0),
             id="night_scan",
             replace_existing=True,
+            coalesce=True,
+            max_instances=1,
+            misfire_grace_time=300,
         )
-        logger.info(f"🌙 Varredura noturna ativada às {night_hour}:00")
-    
-    # Rechecagem da watchlist
+        logger.info("🌙 Varredura noturna ativada às %02d:00.", night_hour)
+
+    # --- Rechecagem periódica da watchlist ---
     scheduler.add_job(
         rescan_watchlist_job,
         trigger=IntervalTrigger(minutes=WATCHLIST_RESCAN_MIN),
         id="watchlist_rescan",
         replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+        misfire_grace_time=60,
     )
-    
-    # Reavaliação horária
+
+    # --- Reavaliação horária dos jogos do dia ---
     scheduler.add_job(
         hourly_rescan_job,
         trigger=IntervalTrigger(hours=1),
         id="hourly_rescan",
         replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+        misfire_grace_time=120,
     )
-    
-    # Monitoramento de jogos ao vivo
+
+    # --- Monitoramento de jogos ao vivo (ÚNICA entrada) ---
     scheduler.add_job(
         monitor_live_games_job,
         trigger=IntervalTrigger(minutes=1),
         id="monitor_live_games",
         replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+        misfire_grace_time=60,
     )
-    
+
+    # Inicia o scheduler
     scheduler.start()
-    
-    # Atualiza mensagem de log
-    base_msg = f"✅ Scheduler ON — varredura matinal às {MORNING_HOUR:02d}:00"
+
+    # Log amigável do que ficou ativo
+    base_msg = f"✅ Scheduler ON — manhã às {MORNING_HOUR:02d}:00 ({APP_TZ})"
     if os.getenv("ENABLE_NIGHT_SCAN", "false").lower() == "true":
         night_hour = int(os.getenv("NIGHT_SCAN_HOUR", "22"))
         base_msg += f" + noturna às {night_hour:02d}:00"
-    base_msg += f" ({APP_TZ}) + watchlist ~{WATCHLIST_RESCAN_MIN}min + reavaliação horária + ao vivo (1min)."
-    
+    base_msg += (
+        f" | watchlist ~{WATCHLIST_RESCAN_MIN}min"
+        f" | reavaliação horária"
+        f" | ao vivo cada 1min"
+    )
     logger.info(base_msg)
-    
+
 # ================================
 # Runner
 # ================================
