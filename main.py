@@ -1511,6 +1511,180 @@ async def morning_scan_and_publish():
                 analyzed_total, len(chosen_view), stored_total)
 
 # ================================
+# Checagem da madrugada
+# ================================
+
+async def night_scan_for_early_games():
+    """Varredura noturna específica para jogos da madrugada (00:00 às 06:00)"""
+    logger.info("🌙 Iniciando varredura noturna para jogos da madrugada...")
+    
+    # Define janela de análise: meia-noite até 6h do dia seguinte
+    tomorrow = datetime.now(ZONE).date() + timedelta(days=1)
+    start_window = ZONE.localize(datetime(tomorrow.year, tomorrow.month, tomorrow.day, 0, 0)).astimezone(pytz.UTC)
+    end_window = ZONE.localize(datetime(tomorrow.year, tomorrow.month, tomorrow.day, 6, 0)).astimezone(pytz.UTC)
+    
+    stored_total = 0
+    analyzed_total = 0
+    early_games: List[Dict[str, Any]] = []
+    
+    backend_cfg = "playwright"
+    
+    logger.info(f"📅 Analisando jogos da madrugada de {tomorrow.strftime('%d/%m/%Y')} (00:00 às 06:00)")
+    
+    with SessionLocal() as session:
+        for url in app.all_links():
+            evs: List[Any] = []
+            
+            try:
+                evs = await fetch_events_from_link(url, backend_cfg)
+            except Exception as e:
+                logger.warning("Falha ao buscar %s: %s", url, e)
+                continue
+            
+            analyzed_total += len(evs)
+            
+            for ev in evs:
+                try:
+                    # Parse do horário
+                    start_utc = parse_local_datetime(getattr(ev, "start_local_str", ""))
+                    if not start_utc:
+                        continue
+                    
+                    start_utc = to_aware_utc(start_utc)
+                    
+                    # FILTRO IMPORTANTE: Apenas jogos entre 00:00 e 06:00 do dia seguinte
+                    if not (start_window <= start_utc < end_window):
+                        continue
+                    
+                    # Decisão de aposta
+                    will, pick, pprob, pev, reason = decide_bet(
+                        ev.odds_home, ev.odds_draw, ev.odds_away, ev.competition, (ev.team_home, ev.team_away)
+                    )
+                    
+                    if not will:
+                        # Avaliar watchlist mesmo na varredura noturna
+                        MIN_EV = float(os.getenv("MIN_EV", "-0.02"))
+                        now_utc = datetime.now(pytz.UTC)
+                        lead_ok = (start_utc - now_utc) >= timedelta(minutes=WATCHLIST_MIN_LEAD_MIN)
+                        near_cut = (pev >= (MIN_EV - WATCHLIST_DELTA)) and (pev < MIN_EV)
+                        prob_ok = pprob >= float(os.getenv("MIN_PROB", "0.20"))
+                        
+                        if lead_ok and near_cut and prob_ok and not getattr(ev, "is_live", False):
+                            added = wl_add(session, ev.ext_id, url, start_utc)
+                            if added:
+                                logger.info("👀 Adicionado à WATCHLIST (madrugada): %s vs %s", 
+                                          ev.team_home, ev.team_away)
+                        continue
+                    
+                    # Salvar no banco (UPSERT)
+                    g = session.query(Game).filter_by(ext_id=ev.ext_id, start_time=start_utc).one_or_none()
+                    
+                    if g:
+                        # Atualiza existente
+                        g.source_link = url
+                        g.competition = ev.competition or g.competition
+                        g.team_home = ev.team_home or g.team_home
+                        g.team_away = ev.team_away or g.team_away
+                        g.odds_home = ev.odds_home
+                        g.odds_draw = ev.odds_draw
+                        g.odds_away = ev.odds_away
+                        g.pick = pick
+                        g.pick_prob = pprob
+                        g.pick_ev = pev
+                        g.pick_reason = reason
+                        g.will_bet = will
+                        g.status = "scheduled"
+                        session.commit()
+                    else:
+                        # Cria novo
+                        g = Game(
+                            ext_id=ev.ext_id,
+                            source_link=url,
+                            competition=ev.competition,
+                            team_home=ev.team_home,
+                            team_away=ev.team_away,
+                            start_time=start_utc,
+                            odds_home=ev.odds_home,
+                            odds_draw=ev.odds_draw,
+                            odds_away=ev.odds_away,
+                            pick=pick,
+                            pick_prob=pprob,
+                            pick_ev=pev,
+                            will_bet=will,
+                            pick_reason=reason,
+                            status="scheduled",
+                        )
+                        session.add(g)
+                        try:
+                            session.commit()
+                        except IntegrityError:
+                            session.rollback()
+                            continue
+                    
+                    stored_total += 1
+                    session.refresh(g)
+                    
+                    # Adiciona para o resumo
+                    early_games.append({
+                        "id": g.id,
+                        "team_home": g.team_home,
+                        "team_away": g.team_away,
+                        "start_time": g.start_time,
+                        "pick": g.pick,
+                        "odds_home": float(g.odds_home or 0),
+                        "odds_draw": float(g.odds_draw or 0),
+                        "odds_away": float(g.odds_away or 0),
+                        "pick_prob": float(g.pick_prob or 0),
+                        "pick_ev": float(g.pick_ev or 0),
+                    })
+                    
+                    logger.info(
+                        "✅ MADRUGADA: %s vs %s | %s | pick=%s | início=%s",
+                        g.team_home, g.team_away,
+                        start_utc.astimezone(ZONE).strftime("%H:%M"),
+                        g.pick,
+                        ev.start_local_str
+                    )
+                    
+                    # Envio individual do pick
+                    try:
+                        tg_send_message(fmt_pick_now(g))
+                    except Exception:
+                        logger.exception("Falha ao enviar pick noturno id=%s", g.id)
+                    
+                    # Agendamentos
+                    await _schedule_all_for_game(g)
+                    
+                except Exception:
+                    session.rollback()
+                    logger.exception("Erro ao processar evento noturno %s vs %s",
+                                   getattr(ev, "team_home", "?"),
+                                   getattr(ev, "team_away", "?"))
+    
+    # Envia resumo da varredura noturna
+    if early_games:
+        msg = format_night_scan_summary(tomorrow, analyzed_total, early_games)
+        tg_send_message(msg)
+    
+    logger.info("🌙 Varredura noturna concluída — analisados=%d | selecionados=%d",
+               analyzed_total, len(early_games))
+
+def format_night_scan_summary(date: datetime, analyzed: int, games: List[Dict[str, Any]]) -> str:
+    """Formata resumo da varredura noturna"""
+    msg = f"🌙 <b>JOGOS DA MADRUGADA</b>\n"
+    msg += f"<i>{date.strftime('%d/%m/%Y')} - 00:00 às 06:00</i>\n"
+    msg += "━━━━━━━━━━━━━━━━━━━━\n\n"
+    
+    msg += f"📊 <b>ANÁLISE NOTURNA</b>\n"
+    msg += f"├ Jogos analisados: <b>{analyzed}</b>\n"
+    msg += f"└ Jogos selecionados: <b>{len(games)}</b>\n\n"
+    
+    if games:
+        msg += f"🎯 <b>PICKS DA MADRUGADA</b>\n\n"
+        
+        for g in so
+
+# ================================
 # Watchlist: rechecagem periódica
 # ================================
 async def rescan_watchlist_job():
@@ -1708,13 +1882,25 @@ async def maybe_send_daily_wrapup():
                         total, hits, acc, gacc)
 
 def setup_scheduler():
-    # Varredura diária
+    # Varredura diária matinal
     scheduler.add_job(
         morning_scan_and_publish,
         trigger=CronTrigger(hour=MORNING_HOUR, minute=0),
         id="morning_scan",
         replace_existing=True,
     )
+    
+    # NOVO: Varredura noturna (se habilitada)
+    if os.getenv("ENABLE_NIGHT_SCAN", "false").lower() == "true":
+        night_hour = int(os.getenv("NIGHT_SCAN_HOUR", "22"))
+        scheduler.add_job(
+            night_scan_for_early_games,
+            trigger=CronTrigger(hour=night_hour, minute=0),
+            id="night_scan",
+            replace_existing=True,
+        )
+        logger.info(f"🌙 Varredura noturna ativada às {night_hour}:00")
+    
     # Rechecagem da watchlist
     scheduler.add_job(
         rescan_watchlist_job,
@@ -1722,6 +1908,7 @@ def setup_scheduler():
         id="watchlist_rescan",
         replace_existing=True,
     )
+    
     # Reavaliação horária
     scheduler.add_job(
         hourly_rescan_job,
@@ -1729,6 +1916,7 @@ def setup_scheduler():
         id="hourly_rescan",
         replace_existing=True,
     )
+    
     # Monitoramento de jogos ao vivo
     scheduler.add_job(
         monitor_live_games_job,
@@ -1736,10 +1924,18 @@ def setup_scheduler():
         id="monitor_live_games",
         replace_existing=True,
     )
+    
     scheduler.start()
-    logger.info("✅ Scheduler ON — rotina diária às %02d:00 (%s) + watchlist ~%dmin + reavaliação horária + monitoramento ao vivo (1min).",
-                MORNING_HOUR, APP_TZ, WATCHLIST_RESCAN_MIN)
-
+    
+    # Atualiza mensagem de log
+    base_msg = f"✅ Scheduler ON — varredura matinal às {MORNING_HOUR:02d}:00"
+    if os.getenv("ENABLE_NIGHT_SCAN", "false").lower() == "true":
+        night_hour = int(os.getenv("NIGHT_SCAN_HOUR", "22"))
+        base_msg += f" + noturna às {night_hour:02d}:00"
+    base_msg += f" ({APP_TZ}) + watchlist ~{WATCHLIST_RESCAN_MIN}min + reavaliação horária + ao vivo (1min)."
+    
+    logger.info(base_msg)
+    
 # ================================
 # Runner
 # ================================
