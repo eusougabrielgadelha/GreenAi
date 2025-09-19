@@ -1085,6 +1085,7 @@ async def _schedule_all_for_game(g: Game):
     except Exception:
         logger.exception("Falha no agendamento do jogo id=%s", g.id)
 
+
 async def morning_scan_and_publish():
     logger.info("🌅 Iniciando varredura matinal...")
     stored_total = 0
@@ -1109,14 +1110,20 @@ async def morning_scan_and_publish():
         except Exception:
             logger.exception("Falha ao enviar resumo ao Telegram (fallback simples).")
 
-    backend_cfg = SCRAPE_BACKEND if SCRAPE_BACKEND in ("requests", "playwright", "auto") else "requests"
+    # --- ALTERAÇÃO CRÍTICA: Força o uso do Playwright ---
+    # O site carrega os jogos via JavaScript. O 'requests' pega apenas o HTML vazio.
+    # Playwright renderiza a página completa, permitindo o scrape dos jogos.
+    backend_cfg = "playwright"
+    # ---------------------------------------------------
+
     analysis_date_local = datetime.now(ZONE).date()
     logger.info("📅 Dia analisado (timezone %s): %s", ZONE, analysis_date_local.isoformat())
 
     with SessionLocal() as session:
         for url in app.all_links():
             evs: List[Any] = []
-            active_backend = "requests" if backend_cfg in ("requests", "auto") else "playwright"
+            # active_backend é ignorado, pois estamos forçando 'playwright' acima
+            active_backend = "playwright"
 
             # 1) tentativa principal
             try:
@@ -1124,8 +1131,8 @@ async def morning_scan_and_publish():
             except Exception as e:
                 logger.warning("Falha ao buscar %s com %s: %s", url, active_backend, e)
 
-            # 2) fallback automático
-            if backend_cfg == "auto" and not evs:
+            # 2) fallback automático (mantido por segurança, mas improvável de ser usado)
+            if not evs:
                 try:
                     logger.info("🔁 Fallback para playwright em %s", url)
                     evs = await fetch_events_from_link(url, "playwright")
@@ -1317,7 +1324,12 @@ async def morning_scan_and_publish():
 # ================================
 # Watchlist: rechecagem periódica
 # ================================
+
 async def rescan_watchlist_job():
+    """
+    Rechecagem periódica da watchlist.
+    Força o uso do Playwright para garantir que os jogos sejam carregados corretamente.
+    """
     logger.info("🔄 Rechecando WATCHLIST…")
     now_utc = datetime.now(pytz.UTC)
     with SessionLocal() as session:
@@ -1336,7 +1348,11 @@ async def rescan_watchlist_job():
         page_cache: Dict[str, Dict[str, Any]] = {}
         for link, its in by_link.items():
             try:
-                evs = await fetch_events_from_link(link, SCRAPE_BACKEND if SCRAPE_BACKEND in ("requests","playwright") else "requests")
+                # --- ALTERAÇÃO CRÍTICA: Força o uso do Playwright ---
+                # O site carrega os jogos via JavaScript. O 'requests' pega apenas o HTML vazio.
+                # Playwright renderiza a página completa, permitindo o scrape dos jogos.
+                evs = await fetch_events_from_link(link, "playwright")
+                # ---------------------------------------------------
             except Exception:
                 evs = []
             page_cache[link] = {e.ext_id: e for e in evs}
