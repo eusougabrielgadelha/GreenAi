@@ -879,7 +879,14 @@ def fmt_live_bet_opportunity(g: Game, opportunity: Dict[str, Any], stats: Dict[s
 # ================================
 # Scheduler
 # ================================
-scheduler = AsyncIOScheduler(timezone=APP_TZ)
+scheduler = AsyncIOScheduler(
+    timezone=APP_TZ,
+    job_defaults={
+        "misfire_grace_time": 60,  # tolera até 60s de atraso
+        "coalesce": True,          # se perder execuções, junta em uma só
+        "max_instances": 1         # evita rodar o mesmo job em paralelo
+    }
+)
 app = BetAuto()
 
 # --- Config extra por .env ---
@@ -1973,11 +1980,15 @@ async def maybe_send_daily_wrapup():
 def setup_scheduler():
     # Varredura diária matinal
     scheduler.add_job(
-        morning_scan_and_publish,
-        trigger=CronTrigger(hour=MORNING_HOUR, minute=0),
-        id="morning_scan",
+        monitor_live_games_job,
+        trigger=IntervalTrigger(minutes=3),
+        id="monitor_live_games",
         replace_existing=True,
+        misfire_grace_time=60,
+        coalesce=True,
+        max_instances=1,
     )
+
     
     # NOVO: Varredura noturna (se habilitada)
     if os.getenv("ENABLE_NIGHT_SCAN", "false").lower() == "true":
