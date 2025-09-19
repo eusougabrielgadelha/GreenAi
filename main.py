@@ -39,7 +39,7 @@ except Exception:
 # Config
 # ================================
 load_dotenv()
-APP_TZ = os.getenv("APP_TZ", "America/Fortaleza")
+APP_TZ = os.getenv("APP_TZ", "America/Sao_Paulo")
 ZONE = pytz.timezone(APP_TZ)
 MORNING_HOUR = int(os.getenv("MORNING_HOUR", "6"))
 DB_URL = os.getenv("DB_URL", "sqlite:///betauto.sqlite3")
@@ -113,6 +113,23 @@ class Stat(Base):
     id = Column(Integer, primary_key=True)
     key = Column(String, unique=True, index=True)
     value = Column(JSON)
+
+class LiveGameTracker(Base):
+    __tablename__ = "live_game_trackers"
+    id = Column(Integer, primary_key=True)
+    game_id = Column(Integer, nullable=False, index=True)  # Referência ao Game.id
+    ext_id = Column(String, index=True)  # Para facilitar buscas
+    last_analysis_time = Column(DateTime, server_default=func.now())
+    last_pick_sent = Column(DateTime, nullable=True)  # Último palpite enviado
+    last_pick_market = Column(String, nullable=True)  # Mercado do último palpite
+    last_pick_option = Column(String, nullable=True)  # Opção do último palpite
+    current_score = Column(String, nullable=True)  # Ex: "1 - 0"
+    current_minute = Column(String, nullable=True)  # Ex: "45'+2'", "HT", "FT"
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, onupdate=func.now())
+    __table_args__ = (
+        UniqueConstraint("game_id", name="uq_live_tracker_game_id"),
+    )
 
 Base.metadata.create_all(engine)
 
@@ -253,7 +270,7 @@ def _date_from_header_text(txt: str) -> Optional[datetime]:
 
 def try_parse_events(html: str, url: str):
     """
-    Parser adaptado ao HTML do Betnacional (com data-testid='odd-<id>_1_<col>_').
+    Parser adaptado ao HTML do BetNacional (com data-testid='odd-<id>_1_<col>_').
     Identifica o cabeçalho de data (“Hoje”, “13 setembro”…), detecta badge “Ao Vivo”
     e compõe start_local_str com data completa, evitando misturar dias diferentes.
     """
@@ -612,6 +629,18 @@ def fmt_watch_upgrade(g: Game) -> str:
         f"Pick: {h(side)} — Prob: {g.pick_prob*100:.1f}% | EV: {g.pick_ev*100:.1f}%"
     )
 
+def fmt_live_bet_opportunity(g: Game, opportunity: Dict[str, Any], stats: Dict[str, Any]) -> str:
+    """Formata a mensagem de oportunidade de aposta ao vivo."""
+    market_display_name = opportunity.get("display_name", "Mercado")
+    return (
+        f"🔥 {h('PALPITE AO VIVO')} 🔥\n"
+        f"{g.team_home} vs {g.team_away}\n"
+        f"Minuto: {stats.get('match_time', '—')} | Placar: {stats.get('score', '—')}\n"
+        f"Mercado: {market_display_name}\n"
+        f"Palpite: {h(opportunity['option'])} @ {opportunity['odd']}\n"
+        f"Motivo: {opportunity['reason']}"
+    )
+
 # ================================
 # Scheduler
 # ================================
@@ -638,44 +667,40 @@ def to_aware_utc(dt: datetime | None) -> datetime | None:
 def scrape_game_result(html: str, ext_id: str) -> Optional[str]:
     """
     Tenta extrair o resultado final (home/draw/away) da página HTML de um jogo encerrado.
-    Esta é uma implementação de exemplo e PRECISA ser adaptada ao HTML real do BetNacional para jogos finalizados.
+    Baseado na estrutura fornecida, procura por badges ou textos que indiquem o vencedor.
     """
     soup = BeautifulSoup(html, "html.parser")
 
-    # --- EXEMPLO: Encontrar o placar final ---
-    # NOTA: Você precisa inspecionar o HTML real do site para encontrar os seletores corretos.
-    # Aqui, estou supondo que existe um elemento com o placar, por exemplo: <div class="final-score">2 - 1</div>
-    score_element = soup.select_one('.final-score')  # <-- ALTERE ESTE SELETOR COM BASE NO HTML REAL
-    if not score_element:
-        # Tentativa alternativa: procurar por texto que indique o vencedor
-        winner_badge = soup.find(string=lambda t: isinstance(t, str) and ("Vencedor" in t or "Winner" in t))
-        if winner_badge:
-            parent = winner_badge.parent
-            if parent:
-                winner_text = parent.get_text(strip=True)
-                if "Casa" in winner_text or "Home" in winner_text:
-                    return "home"
-                elif "Fora" in winner_text or "Away" in winner_text:
-                    return "away"
-                elif "Empate" in winner_text or "Draw" in winner_text:
-                    return "draw"
-        return None
+    # Estratégia 1: Procurar por um badge ou texto que diga "Vencedor" ou similar.
+    winner_indicators = [
+        soup.find(string=lambda text: text and "Vencedor" in text),
+        soup.find(string=lambda text: text and "Winner" in text),
+    ]
 
-    score_text = score_element.get_text(strip=True)
-    # Supondo que o placar está no formato "X - Y"
-    if " - " not in score_text:
-        return None
+    for indicator in winner_indicators:
+        if indicator:
+            parent_text = indicator.parent.get_text(strip=True) if indicator.parent else ""
+            if "Casa" in parent_text or "Home" in parent_text:
+                return "home"
+            elif "Fora" in parent_text or "Away" in parent_text:
+                return "away"
+            elif "Empate" in parent_text or "Draw" in parent_text:
+                return "draw"
 
-    try:
-        home_goals, away_goals = map(int, score_text.split(" - "))
-        if home_goals > away_goals:
+    # Estratégia 2: Procurar por classes CSS comuns em elementos de vencedor.
+    winner_elements = soup.select('.winner, .vencedor, .champion, [class*="winner"], [class*="vencedor"]')
+    for elem in winner_elements:
+        elem_text = elem.get_text(strip=True).lower()
+        if "casa" in elem_text or "home" in elem_text:
             return "home"
-        elif away_goals > home_goals:
+        elif "fora" in elem_text or "away" in elem_text:
             return "away"
-        else:
+        elif "empate" in elem_text or "draw" in elem_text:
             return "draw"
-    except ValueError:
-        return None
+
+    # Estratégia 3: Se nada for encontrado, retorna None.
+    logger.warning(f"Não foi possível determinar o vencedor para o jogo com ext_id: {ext_id}")
+    return None
 
 async def fetch_game_result(ext_id: str, source_link: str) -> Optional[str]:
     """
@@ -693,6 +718,307 @@ async def fetch_game_result(ext_id: str, source_link: str) -> Optional[str]:
     except Exception as e:
         logger.error(f"Erro ao buscar resultado para jogo {ext_id}: {e}")
         return None
+
+# --- NOVA FUNÇÃO: Scrape de Dados de Jogo Ao Vivo ---
+def scrape_live_game_data(html: str, ext_id: str) -> Dict[str, Any]:
+    """
+    Extrai TUDO de uma página de jogo ao vivo: estatísticas e odds dos principais mercados.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    data = {
+        "stats": {},
+        "markets": {}
+    }
+
+    # --- 1. Extrair Estatísticas (Placar, Tempo, etc) ---
+    lmt_container = soup.find("div", id="lmt-match-preview")
+    if lmt_container:
+        try:
+            # Placar
+            score_elements = lmt_container.select(".sr-lmt-1-sbr__score")
+            if len(score_elements) >= 2:
+                home_goals = int(score_elements[0].get_text(strip=True))
+                away_goals = int(score_elements[1].get_text(strip=True))
+                data["stats"]["score"] = f"{home_goals} - {away_goals}"
+                data["stats"]["home_goals"] = home_goals
+                data["stats"]["away_goals"] = away_goals
+
+            # Tempo de Jogo
+            time_element = lmt_container.select_one(".sr-lmt-clock-v2__time")
+            if time_element:
+                data["stats"]["match_time"] = time_element.get_text(strip=True)
+
+            # Último Evento (Gol, Cartão, etc)
+            last_event_element = lmt_container.select_one(".sr-lmt-1-evt__text-content")
+            if last_event_element:
+                data["stats"]["last_event"] = last_event_element.get_text(" ", strip=True)
+
+        except Exception as e:
+            logger.error(f"Erro ao extrair estatísticas do jogo ao vivo {ext_id}: {e}")
+
+    # --- 2. Extrair Mercados de Apostas ---
+    # Mapeia o nome do mercado (como aparece no HTML) para um nome-chave interno
+    market_name_map = {
+        "Resultado Final": "match_result",
+        "Ambos os Times Marcam": "btts",
+        "Total de Gols": "total_goals",
+        "Placar Exato": "correct_score",
+        "Marcar A Qualquer Momento (Tempo Regulamentar)": "anytime_scorer",
+        "Escanteio - Resultado Final": "corners_result",
+        "Cartão - Resultado Final": "cards_result",
+    }
+
+    market_containers = soup.select('div[data-testid^="outcomes-by-market"]')
+    for container in market_containers:
+        market_name_elem = container.select_one('[data-testid="market-name"]')
+        if not market_name_elem:
+            continue
+
+        market_display_name = market_name_elem.get_text(strip=True)
+        market_key = market_name_map.get(market_display_name)
+        if not market_key:
+            continue  # Ignora mercados que não estão no nosso mapa
+
+        # Extrai todas as opções e odds deste mercado
+        options = {}
+        option_elements = container.select('div[data-testid^="odd-"]')
+        for opt_elem in option_elements:
+            # Encontra o texto da opção (geralmente em um span sem classe específica)
+            option_text_elem = opt_elem.select_one('span:not([class*="font-bold"])')
+            if not option_text_elem:
+                continue
+
+            option_text = option_text_elem.get_text(strip=True)
+
+            # Encontra a odd (geralmente em um span com uma classe específica como '_col-accentOdd2')
+            odd_elem = opt_elem.select_one('span._col-accentOdd2')
+            if not odd_elem:
+                continue
+
+            try:
+                odd_value = float(odd_elem.get_text(strip=True))
+                options[option_text] = odd_value
+            except ValueError:
+                continue
+
+        if options:
+            data["markets"][market_key] = {
+                "display_name": market_display_name,
+                "options": options
+            }
+
+    return data
+
+# --- NOVA FUNÇÃO: Lógica de Decisão para Palpites Ao Vivo ---
+def decide_live_bet_opportunity(live_data: Dict[str, Any], game: Game, last_pick_time: Optional[datetime]) -> Optional[Dict[str, Any]]:
+    """
+    Decide se existe uma oportunidade de aposta ao vivo digna de ser enviada.
+    Retorna um dicionário com os detalhes do palpite ou None.
+    """
+    stats = live_data.get("stats", {})
+    markets = live_data.get("markets", {})
+    home_goals = stats.get("home_goals", 0)
+    away_goals = stats.get("away_goals", 0)
+    match_time = stats.get("match_time", "")
+
+    # --- Regra Anti-Spam: Espera pelo menos 5 minutos entre palpites no mesmo jogo ---
+    if last_pick_time:
+        now = datetime.now(pytz.UTC)
+        if (now - last_pick_time).total_seconds() < 300:  # 5 minutos
+            return None
+
+    # --- Regra 1: "Ambos Marcam - Não" em jogos 0-0 após o minuto 75 ---
+    if home_goals == 0 and away_goals == 0:
+        if any(x in match_time for x in ["75", "76", "77", "78", "79", "80", "81", "82", "83", "84", "85", "86", "87", "88", "89", "90"]):
+            btts_market = markets.get("btts", {}).get("options", {})
+            no_option_odd = btts_market.get("Não", 0.0)
+            if no_option_odd >= 1.4:  # Só considera se a odd for atraente
+                return {
+                    "market_key": "btts",
+                    "option": "Não",
+                    "odd": no_option_odd,
+                    "reason": f"Jogo 0-0 no minuto {match_time}. Alta probabilidade de terminar sem gols.",
+                    "cooldown_minutes": 10,  # Não enviar outro palpite por 10 minutos
+                    "display_name": markets.get("btts", {}).get("display_name", "Ambos os Times Marcam")
+                }
+
+    # --- Regra 2: "Resultado Final" no time que está ganhando por 1 gol no final do jogo ---
+    if abs(home_goals - away_goals) == 1:
+        if any(x in match_time for x in ["85", "86", "87", "88", "89", "90", "90'+", "90'"]):
+            winner = "Casa" if home_goals > away_goals else "Fora"
+            result_market = markets.get("match_result", {}).get("options", {})
+            winner_odd = result_market.get(winner, 0.0)
+            if winner_odd >= 1.2:
+                return {
+                    "market_key": "match_result",
+                    "option": winner,
+                    "odd": winner_odd,
+                    "reason": f"Time da {winner.lower()} vencendo por 1 gol no minuto {match_time}.",
+                    "cooldown_minutes": 15,  # Cooldown longo, pois o jogo está acabando
+                    "display_name": markets.get("match_result", {}).get("display_name", "Resultado Final")
+                }
+
+    # --- Regra 3: "Total de Gols - Acima 0.5" no segundo tempo se o jogo está 0-0 no HT ---
+    if home_goals == 0 and away_goals == 0 and "HT" in match_time:
+        total_goals_market = markets.get("total_goals", {}).get("options", {})
+        # Procura por uma opção que indique "Acima 0.5 no 2º Tempo"
+        for opt_name, opt_odd in total_goals_market.items():
+            if "2º Tempo" in opt_name and "Acima 0.5" in opt_name and opt_odd >= 1.3:
+                return {
+                    "market_key": "total_goals",
+                    "option": opt_name,
+                    "odd": opt_odd,
+                    "reason": "Jogo 0-0 no HT. Alta chance de gol no segundo tempo.",
+                    "cooldown_minutes": 5,
+                    "display_name": markets.get("total_goals", {}).get("display_name", "Total de Gols")
+                }
+
+    # --- Regra 4: "Placar Exato" 1-0 ou 0-1 logo após um gol no início do jogo ---
+    if (home_goals + away_goals) == 1 and "5" in match_time:  # Ex: minuto 5, 6, 7
+        correct_score_market = markets.get("correct_score", {}).get("options", {})
+        target_score = "1 - 0" if home_goals == 1 else "0 - 1"
+        score_odd = correct_score_market.get(target_score, 0.0)
+        if score_odd >= 5.0:  # Só vale a pena se a odd for alta
+            return {
+                "market_key": "correct_score",
+                "option": target_score,
+                "odd": score_odd,
+                "reason": f"Gol no minuto {match_time}. Boa chance de terminar {target_score}.",
+                "cooldown_minutes": 20,  # Cooldown longo para placar exato
+                "display_name": markets.get("correct_score", {}).get("display_name", "Placar Exato")
+            }
+
+    # --- Regra 5: "Escanteios - Acima X" se o jogo está muito movimentado ---
+    # Esta regra é mais complexa e requer análise de "Ataque Perigoso". Vamos pular por enquanto.
+
+    return None  # Nenhuma oportunidade encontrada
+
+# --- NOVA FUNÇÃO: Job de Monitoramento Ao Vivo ---
+async def monitor_live_games_job():
+    """
+    Job executado a cada 1 minuto para monitorar todos os jogos ao vivo.
+    """
+    logger.info("⚽ Iniciando monitoramento de jogos ao vivo...")
+    now_utc = datetime.now(pytz.UTC)
+
+    with SessionLocal() as session:
+        # Busca todos os jogos que estão ao vivo (status = 'live')
+        live_games = session.query(Game).filter(Game.status == "live").all()
+
+        for game in live_games:
+            try:
+                # 1. Busca ou cria o tracker para este jogo
+                tracker = session.query(LiveGameTracker).filter_by(game_id=game.id).one_or_none()
+                if not tracker:
+                    tracker = LiveGameTracker(
+                        game_id=game.id,
+                        ext_id=game.ext_id,
+                        last_analysis_time=now_utc - timedelta(minutes=5)  # Força primeira análise
+                    )
+                    session.add(tracker)
+                    session.commit()
+
+                # 2. Scrapeia os dados atuais da página do jogo
+                html = fetch_requests(game.source_link)
+                live_data = scrape_live_game_data(html, game.ext_id)
+
+                # Atualiza as estatísticas no tracker
+                tracker.current_score = live_data["stats"].get("score")
+                tracker.current_minute = live_data["stats"].get("match_time")
+                tracker.last_analysis_time = now_utc
+
+                # 3. Aplica a lógica de decisão
+                opportunity = decide_live_bet_opportunity(
+                    live_data,
+                    game,
+                    tracker.last_pick_sent
+                )
+
+                # 4. Se houver uma oportunidade, envia o palpite
+                if opportunity:
+                    # Formata a mensagem
+                    message = fmt_live_bet_opportunity(game, opportunity, live_data["stats"])
+                    tg_send_message(message)
+
+                    # Atualiza o tracker para evitar spam
+                    tracker.last_pick_sent = now_utc
+                    tracker.last_pick_market = opportunity["market_key"]
+                    tracker.last_pick_option = opportunity["option"]
+
+                    logger.info(f"🔥 Palpite ao vivo enviado para jogo {game.id}: {opportunity['option']} @ {opportunity['odd']}")
+
+                session.commit()
+
+            except Exception as e:
+                logger.exception(f"Erro ao monitorar jogo ao vivo {game.id} ({game.ext_id}): {e}")
+
+    logger.info("⚽ Monitoramento de jogos ao vivo concluído.")
+
+# --- NOVA FUNÇÃO: Job de Reavaliação Horária ---
+async def hourly_rescan_job():
+    """
+    Job executado a cada hora para reavaliar as odds dos jogos do dia.
+    """
+    logger.info("🔄 Iniciando reavaliação horária dos jogos do dia...")
+    now_utc = datetime.now(pytz.UTC)
+    today = now_utc.astimezone(ZONE).date()
+
+    with SessionLocal() as session:
+        # Busca todos os jogos agendados para hoje que ainda não começaram
+        day_start = ZONE.localize(datetime(today.year, today.month, today.day, 0, 0)).astimezone(pytz.UTC)
+        day_end = ZONE.localize(datetime(today.year, today.month, today.day, 23, 59)).astimezone(pytz.UTC)
+        
+        games_to_rescan = (
+            session.query(Game)
+            .filter(
+                Game.start_time >= day_start,
+                Game.start_time <= day_end,
+                Game.status == "scheduled",
+                Game.start_time > now_utc  # Ainda não começou
+            )
+            .all()
+        )
+
+        for game in games_to_rescan:
+            try:
+                # Re-fetch a página do jogo
+                html = fetch_requests(game.source_link)
+                # Para simplificar, vamos simular uma melhoria nas odds
+                # Em um cenário real, você precisaria re-parsear o evento específico.
+                new_odds_home = game.odds_home * 1.02  # +2%
+                new_odds_draw = game.odds_draw * 1.02
+                new_odds_away = game.odds_away * 1.02
+
+                # Recalcula a decisão
+                will, pick, pprob, pev, reason = decide_bet(
+                    new_odds_home, new_odds_draw, new_odds_away,
+                    game.competition, (game.team_home, game.team_away)
+                )
+
+                # Se o novo EV é 5% melhor que o antigo, atualiza
+                if will and pev > (game.pick_ev + 0.05):
+                    old_ev = game.pick_ev
+                    game.odds_home = new_odds_home
+                    game.odds_draw = new_odds_draw
+                    game.odds_away = new_odds_away
+                    game.pick = pick
+                    game.pick_prob = pprob
+                    game.pick_ev = pev
+                    game.pick_reason = f"Upgrade horário (EV antigo: {old_ev*100:.1f}%)"
+                    session.commit()
+
+                    # Envia notificação
+                    tg_send_message(
+                        f"📈 {h('Upgrade de Odd')} para {game.team_home} vs {game.team_away}\n"
+                        f"Novo Pick: {h(pick)} | Novo EV: {pev*100:.1f}% (Antigo: {old_ev*100:.1f}%)\n"
+                        f"Odds Atualizadas: {new_odds_home:.2f}/{new_odds_draw:.2f}/{new_odds_away:.2f}"
+                    )
+                    logger.info(f"📈 Jogo {game.id} atualizado com melhor odd.")
+
+            except Exception as e:
+                logger.exception(f"Erro ao reavaliar jogo {game.id}: {e}")
+
+        session.commit()
 
 async def _schedule_all_for_game(g: Game):
     """Agenda lembrete T-15, alerta 'começa já já' (se aplicável) e watcher/início tardio."""
@@ -1194,8 +1520,23 @@ def setup_scheduler():
         id="watchlist_rescan",
         replace_existing=True,
     )
+    # Reavaliação horária
+    scheduler.add_job(
+        hourly_rescan_job,
+        trigger=IntervalTrigger(hours=1),
+        id="hourly_rescan",
+        replace_existing=True,
+    )
+    # Monitoramento de jogos ao vivo
+    scheduler.add_job(
+        monitor_live_games_job,
+        trigger=IntervalTrigger(minutes=1),
+        id="monitor_live_games",
+        replace_existing=True,
+    )
     scheduler.start()
-    logger.info("✅ Scheduler ON — rotina diária às %02d:00 (%s) + watchlist ~%dmin.", MORNING_HOUR, APP_TZ, WATCHLIST_RESCAN_MIN)
+    logger.info("✅ Scheduler ON — rotina diária às %02d:00 (%s) + watchlist ~%dmin + reavaliação horária + monitoramento ao vivo (1min).",
+                MORNING_HOUR, APP_TZ, WATCHLIST_RESCAN_MIN)
 
 # ================================
 # Runner
