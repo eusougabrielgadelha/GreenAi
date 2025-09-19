@@ -180,6 +180,15 @@ def fetch_requests(url: str) -> str:
     r.raise_for_status()
     return r.text
 
+def _backend_auto() -> str:
+    """Escolhe o backend automaticamente: Playwright quando disponível, senão requests."""
+    return "playwright" if HAS_PLAYWRIGHT else "requests"
+
+async def _fetch_requests_async(url: str) -> str:
+    """Wrapper assíncrono para não travar o loop ao usar requests."""
+    return await asyncio.to_thread(fetch_requests, url)
+
+
 def num_from_text(s: str) -> Optional[float]:
     if not s:
         return None
@@ -394,23 +403,28 @@ def try_parse_events(html: str, url: str):
 async def fetch_events_from_link(url: str, backend: str):
     """
     Baixa a página (via requests ou playwright) e parseia os eventos.
+    Tenta o backend escolhido; se falhar ou vier vazio, tenta o outro.
     """
-    backend_sel = backend
-    if backend_sel == "auto":
-        backend_sel = "playwright"  # escolha padrão
+    def _other(b: str) -> str:
+        return "requests" if b == "playwright" else "playwright"
+
+    backend_sel = backend if backend != "auto" else _backend_auto()
     logger.info("🔎 Varredura iniciada para %s — backend=%s", url, backend_sel)
-    try:
-        if backend_sel == "playwright":
-            html = await _fetch_with_playwright(url)
+
+    for attempt, b in enumerate([backend_sel, _other(backend_sel)]):
+        try:
+            if b == "playwright":
+                html = await _fetch_with_playwright(url)
+            else:
+                html = fetch_requests(url)
             evs = try_parse_events(html, url)
-        else:
-            r = requests.get(url, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
-            r.raise_for_status()
-            evs = try_parse_events(r.text, url)
-        return evs
-    except Exception as e:
-        logger.warning("Falha ao buscar %s com %s: %s", url, backend_sel, e)
-        return []
+            if evs:
+                return evs
+            logger.info("Nenhum evento com backend=%s; tentando fallback…", b)
+        except Exception as e:
+            logger.warning("Falha ao buscar %s com %s (tentativa %d): %s", url, b, attempt+1, e)
+
+    return []
 
 async def _fetch_with_playwright(url: str) -> str:
     """
@@ -774,6 +788,34 @@ def fmt_pick_now(g: Game) -> str:
     
     return msg
 
+def fmt_reminder(g: Game) -> str:
+    """Lembrete T-15 min antes do início do jogo."""
+    import html
+    def esc(s: str) -> str:
+        return html.escape(s or "")
+
+    hhmm = g.start_time.astimezone(ZONE).strftime("%H:%M")
+    side = {"home": g.team_home, "draw": "Empate", "away": g.team_away}.get(g.pick, "—")
+
+    # Odd correta do lado escolhido
+    pick_odd = 0.0
+    if g.pick == "home":
+        pick_odd = g.odds_home or 0.0
+    elif g.pick == "draw":
+        pick_odd = g.odds_draw or 0.0
+    elif g.pick == "away":
+        pick_odd = g.odds_away or 0.0
+
+    return (
+        "🔔 <b>Lembrete</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"⚽ <b>{esc(g.team_home)}</b> vs <b>{esc(g.team_away)}</b>\n"
+        f"🕐 Início: {hhmm}h\n"
+        f"🎯 Pick: <b>{esc(side)}</b> @ {pick_odd:.2f}\n"
+        f"📈 Prob.: <b>{(g.pick_prob or 0)*100:.0f}%</b> | EV: <b>{(g.pick_ev or 0)*100:+.1f}%</b>"
+    )
+
+
 def fmt_watch_add(ev, ev_date_local: datetime, best_ev: float, pprob: float) -> str:
     """Formatação elegante para adição à watchlist"""
     hhmm = ev_date_local.strftime("%H:%M")
@@ -898,14 +940,34 @@ def scrape_game_result(html: str, ext_id: str) -> Optional[str]:
 async def fetch_game_result(ext_id: str, source_link: str) -> Optional[str]:
     """
     Busca a página do jogo e tenta extrair o resultado.
+    Usa backend 'auto' por padrão; respeita SCRAPE_BACKEND se definido corretamente.
     """
     try:
-        # Usa o mesmo backend da varredura matinal
-        backend_sel = SCRAPE_BACKEND if SCRAPE_BACKEND in ("requests", "playwright") else "requests"
+        backend_sel = SCRAPE_BACKEND if SCRAPE_BACKEND in ("requests", "playwright", "auto") else "auto"
+        # Tenta de acordo com backend_sel, com fallback automático
+        order = []
         if backend_sel == "playwright":
-            html = await _fetch_with_playwright(source_link)
-        else:
-            html = fetch_requests(source_link)
+            order = ["playwright", "requests"]
+        elif backend_sel == "requests":
+            order = ["requests", "playwright"]
+        else:  # auto
+            order = ["playwright" if HAS_PLAYWRIGHT else "requests",
+                     "requests" if HAS_PLAYWRIGHT else "playwright"]
+
+        html = ""
+        for b in order:
+            try:
+                if b == "playwright" and HAS_PLAYWRIGHT:
+                    html = await _fetch_with_playwright(source_link)
+                else:
+                    html = await _fetch_requests_async(source_link)
+                if html:
+                    break
+            except Exception as e:
+                logger.warning("fetch_game_result: falha com %s: %s", b, e)
+
+        if not html:
+            return None
 
         return scrape_game_result(html, ext_id)
     except Exception as e:
@@ -1112,7 +1174,7 @@ async def monitor_live_games_job():
                     session.commit()
 
                 # 2. Scrapeia os dados atuais da página do jogo
-                html = fetch_requests(game.source_link)
+                html = await _fetch_requests_async(game.source_link)
                 live_data = scrape_live_game_data(html, game.ext_id)
 
                 # Atualiza as estatísticas no tracker
@@ -1175,7 +1237,7 @@ async def hourly_rescan_job():
         for game in games_to_rescan:
             try:
                 # Re-fetch a página do jogo
-                html = fetch_requests(game.source_link)
+                html = await _fetch_requests_async(game.source_link)
                 # Para simplificar, vamos simular uma melhoria nas odds
                 # Em um cenário real, você precisaria re-parsear o evento específico.
                 new_odds_home = game.odds_home * 1.02  # +2%
@@ -1670,19 +1732,46 @@ async def night_scan_for_early_games():
                analyzed_total, len(early_games))
 
 def format_night_scan_summary(date: datetime, analyzed: int, games: List[Dict[str, Any]]) -> str:
-    """Formata resumo da varredura noturna"""
-    msg = f"🌙 <b>JOGOS DA MADRUGADA</b>\n"
+    """Formata o resumo da varredura noturna (00:00–06:00 do dia seguinte, no fuso APP_TZ)."""
+    import html
+    def esc(s: str) -> str:
+        return html.escape(s or "")
+
+    msg = "🌙 <b>JOGOS DA MADRUGADA</b>\n"
     msg += f"<i>{date.strftime('%d/%m/%Y')} - 00:00 às 06:00</i>\n"
     msg += "━━━━━━━━━━━━━━━━━━━━\n\n"
-    
-    msg += f"📊 <b>ANÁLISE NOTURNA</b>\n"
+
+    msg += "📊 <b>ANÁLISE NOTURNA</b>\n"
     msg += f"├ Jogos analisados: <b>{analyzed}</b>\n"
     msg += f"└ Jogos selecionados: <b>{len(games)}</b>\n\n"
-    
+
     if games:
-        msg += f"🎯 <b>PICKS DA MADRUGADA</b>\n\n"
-        
-        for g in so
+        msg += "🎯 <b>PICKS DA MADRUGADA</b>\n\n"
+        # Ordena por horário local de início
+        games_sorted = sorted(games, key=lambda x: to_aware_utc(x["start_time"]).astimezone(ZONE))
+        for g in games_sorted:
+            hhmm = to_aware_utc(g["start_time"]).astimezone(ZONE).strftime("%H:%M")
+            pick_key = g.get("pick")
+            pick_map = {"home": "Casa", "draw": "Empate", "away": "Fora"}
+            pick_str = pick_map.get(pick_key, pick_key or "—")
+
+            if pick_key == "home":
+                odd = float(g.get("odds_home") or 0.0)
+            elif pick_key == "draw":
+                odd = float(g.get("odds_draw") or 0.0)
+            else:
+                odd = float(g.get("odds_away") or 0.0)
+
+            msg += (
+                f"🕐 <b>{hhmm}h</b>\n"
+                f"  {esc(g.get('team_home'))} vs {esc(g.get('team_away'))}\n"
+                f"  → {esc(pick_str)} @ {odd:.2f}\n"
+                f"  → Prob.: {float(g.get('pick_prob') or 0)*100:.0f}% | EV: {float(g.get('pick_ev') or 0)*100:+.1f}%\n\n"
+            )
+    else:
+        msg += "ℹ️ Nenhum pick para a janela 00:00–06:00.\n"
+
+    return msg
 
 # ================================
 # Watchlist: rechecagem periódica
