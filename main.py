@@ -245,6 +245,10 @@ _PT_MONTHS = {
 }
 
 def _date_from_header_text(txt: str) -> Optional[datetime]:
+    """
+    Converte textos como "Hoje", "Amanhã", "13 setembro" em um datetime local com hora 00:00.
+    Esta função é essencial para lidar com os cabeçalhos do site que usam termos relativos.
+    """
     t = (txt or "").strip().lower()
     if not t:
         return None
@@ -268,116 +272,131 @@ def _date_from_header_text(txt: str) -> Optional[datetime]:
             return dt
     return None
 
+def _num(txt: str):
+    if not txt:
+        return None
+    txt = txt.strip().replace(",", ".")
+    m = re.search(r"\d+(?:\.\d+)?", txt)
+    return float(m.group(0)) if m else None
+
 def try_parse_events(html: str, url: str):
     """
-    Parser adaptado ao HTML do BetNacional (com data-testid='odd-<id>_1_<col>_').
-    Identifica o cabeçalho de data (“Hoje”, “13 setembro”…), detecta badge “Ao Vivo”
-    e compõe start_local_str com data completa, evitando misturar dias diferentes.
+    Parser robusto para o HTML do BetNacional.
+    Percorre o HTML sequencialmente, identificando blocos de data (Hoje, Amanhã, etc.)
+    e associando os cartões de jogo corretamente ao seu bloco de data.
     """
     soup = BeautifulSoup(html, "html.parser")
-    cards = soup.select('[data-testid="preMatchOdds"]')
     evs = []
 
-    def _num(txt: str):
-        if not txt:
-            return None
-        txt = txt.strip().replace(",", ".")
-        m = re.search(r"\d+(?:\.\d+)?", txt)
-        return float(m.group(0)) if m else None
+    # Encontra o container principal que agrupa todos os eventos por categoria e data.
+    category_containers = soup.select('div[data-testid^="eventsListByCategory-"]')
 
-    for card in cards:
-        # 1) cabeçalho de data mais próximo acima
-        hdr = card.find_previous("div", class_=lambda c: c and "text-odds-subheader-text" in c)
-        header_text = hdr.get_text(strip=True) if hdr else ""
-        header_date = _date_from_header_text(header_text)  # datetime local com 00:00
+    for category_container in category_containers:
+        children = category_container.find_all(recursive=False)  # Filhos diretos
 
-        # 2) ext_id + times
-        a = card.select_one('a[href*="/event/"]')
-        if not a:
-            continue
-        href = a.get("href", "")
-        m = re.search(r"/event/\d+/\d+/(\d+)", href)
-        ext_id = m.group(1) if m else ""
+        current_header_date = None  # Data do último cabeçalho encontrado
 
-        # nomes
-        title = a.get_text(" ", strip=True)
-        team_home, team_away = "", ""
-        if " x " in title:
-            team_home, team_away = [p.strip() for p in title.split(" x ", 1)]
-        else:
-            names = [s.get_text(strip=True) for s in a.select("span.text-ellipsis")]
-            if len(names) >= 2:
-                team_home, team_away = names[0], names[1]
+        for child in children:
+            # Se o elemento é um cabeçalho de data
+            if child.name == "div" and "text-odds-subheader-text" in child.get("class", []):
+                header_text = child.get_text(strip=True)
+                current_header_date = _date_from_header_text(header_text)
+                logger.debug(f"Encontrado cabeçalho de data: '{header_text}' -> Data absoluta: {current_header_date}")
 
-        # 3) detectar "Ao Vivo"
-        is_live = False
-        live_badge = a.find(string=lambda t: isinstance(t, str) and "Ao Vivo" in t)
-        if live_badge:
-            is_live = True
+            # Se o elemento é um cartão de jogo
+            elif child.get("data-testid") == "preMatchOdds":
+                cards = child.select('a[href*="/event/"]')  # Seleciona todos os links de evento dentro do cartão
 
-        # 4) hora local (pode faltar se "Ao Vivo")
-        t = card.select_one(".text-text-light-secondary")
-        # --- NOVA LÓGICA: Combina a data do cabeçalho com a hora local do jogo ---
-        hour_local = t.get_text(strip=True) if t else ""
-        start_local_str = ""
+                for card in cards:
+                    try:
+                        # --- 1. Extrai o ext_id ---
+                        href = card.get("href", "")
+                        m = re.search(r"/event/\d+/\d+/(\d+)", href)
+                        ext_id = m.group(1) if m else ""
+                        if not ext_id:
+                            continue
 
-        if hour_local and header_date:
-            # Extrai apenas a parte de hora e minuto do texto (ex: "17:00")
-            hour_match = re.search(r"(\d{1,2}):(\d{2})", hour_local)
-            if hour_match:
-                hour = int(hour_match.group(1))
-                minute = int(hour_match.group(2))
+                        # --- 2. Extrai os nomes dos times ---
+                        title = card.get_text(" ", strip=True)
+                        team_home, team_away = "", ""
+                        if " x " in title:
+                            team_home, team_away = [p.strip() for p in title.split(" x ", 1)]
+                        else:
+                            names = [s.get_text(strip=True) for s in card.select("span.text-ellipsis")]
+                            if len(names) >= 2:
+                                team_home, team_away = names[0], names[1]
 
-                # Cria um datetime combinando a data do cabeçalho com a hora do jogo
-                combined_dt = header_date.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                        # --- 3. Detecta se é "Ao Vivo" ---
+                        is_live = False
+                        live_badge = card.find(string=lambda t: isinstance(t, str) and "Ao Vivo" in t)
+                        if live_badge:
+                            is_live = True
 
-                # Formata para o padrão usado pelo parser de data
-                start_local_str = combined_dt.strftime("%H:%M %d/%m/%Y")
-            else:
-                # Se não conseguir extrair a hora, usa apenas a data do cabeçalho
-                start_local_str = header_date.strftime("%d/%m/%Y")
-        elif hour_local:
-            # Se não houver cabeçalho, tenta parsear a hora local diretamente (pode falhar perto da meia-noite)
-            start_local_str = hour_local
-        # --- FIM DA NOVA LÓGICA ---
+                        # --- 4. Extrai a hora local ---
+                        time_elem = card.select_one(".text-text-light-secondary")
+                        hour_local = time_elem.get_text(strip=True) if time_elem else ""
 
-        # 5) odds
-        def pick_cell(i: int):
-            if ext_id:
-                c = card.select_one(f"[data-testid='odd-{ext_id}_1_{i}_']")
-                if c:
-                    return _num(c.get_text(" ", strip=True))
-            return None
+                        # --- 5. Combina a data do cabeçalho com a hora local ---
+                        start_local_str = ""
+                        if current_header_date and hour_local:
+                            # Tenta extrair a hora e minuto
+                            hour_match = re.search(r"(\d{1,2}):(\d{2})", hour_local)
+                            if hour_match:
+                                hour = int(hour_match.group(1))
+                                minute = int(hour_match.group(2))
+                                combined_dt = current_header_date.replace(hour=hour, minute=minute)
+                                start_local_str = combined_dt.strftime("%H:%M %d/%m/%Y")
+                            else:
+                                # Se não conseguir extrair a hora, usa apenas a data do cabeçalho
+                                start_local_str = current_header_date.strftime("%d/%m/%Y")
+                        elif hour_local:
+                            start_local_str = hour_local
 
-        odd_home = pick_cell(1)
-        odd_draw = pick_cell(2)
-        odd_away = pick_cell(3)
+                        # --- 6. Extrai as odds ---
+                        def pick_cell(i: int):
+                            if ext_id:
+                                c = card.select_one(f"[data-testid='odd-{ext_id}_1_{i}_']")
+                                if c:
+                                    return _num(c.get_text(" ", strip=True))
+                            return None
 
-        if odd_home is None or odd_draw is None or odd_away is None:
-            cells = card.select("[data-testid^='odd-'][data-testid$='_']")
-            if ext_id:
-                cells = [c for c in cells if c.get("data-testid", "").startswith(f"odd-{ext_id}_1_")]
-            def col_index(c):
-                mm = re.search(r"_1_(\d)_", c.get("data-testid", ""))
-                return int(mm.group(1)) if mm else 99
-            cells = sorted(cells, key=col_index)
-            vals = [_num(c.get_text(" ", strip=True)) for c in cells[:3]]
-            if len(vals) >= 3:
-                odd_home, odd_draw, odd_away = vals
+                        odd_home = pick_cell(1)
+                        odd_draw = pick_cell(2)
+                        odd_away = pick_cell(3)
 
-        evs.append(NS(
-            ext_id=ext_id,
-            source_link=url,
-            competition="",
-            team_home=team_home,
-            team_away=team_away,
-            start_local_str=start_local_str,  # Agora é uma string de data/hora absoluta
-            odds_home=odd_home,
-            odds_draw=odd_draw,
-            odds_away=odd_away,
-            is_live=is_live,
-        ))
+                        # Fallback: se não encontrou pelo data-testid, procura por todos os elementos de odd
+                        if odd_home is None or odd_draw is None or odd_away is None:
+                            cells = card.select("[data-testid^='odd-'][data-testid$='_']")
+                            if ext_id:
+                                cells = [c for c in cells if c.get("data-testid", "").startswith(f"odd-{ext_id}_1_")]
+                            def col_index(c):
+                                mm = re.search(r"_1_(\d)_", c.get("data-testid", ""))
+                                return int(mm.group(1)) if mm else 99
+                            cells = sorted(cells, key=col_index)
+                            vals = [_num(c.get_text(" ", strip=True)) for c in cells[:3]]
+                            if len(vals) >= 3:
+                                odd_home, odd_draw, odd_away = vals
 
+                        # --- 7. Cria o objeto de evento ---
+                        ev = NS(
+                            ext_id=ext_id,
+                            source_link=url,
+                            competition="",
+                            team_home=team_home,
+                            team_away=team_away,
+                            start_local_str=start_local_str,
+                            odds_home=odd_home,
+                            odds_draw=odd_draw,
+                            odds_away=odd_away,
+                            is_live=is_live,
+                        )
+                        evs.append(ev)
+
+                    except Exception as e:
+                        logger.exception(f"Erro ao processar cartão de jogo: {e}")
+                        continue
+
+    logger.info(f"🧮 → eventos extraídos: {len(evs)} | URL: {url}")
     return evs
 
 async def fetch_events_from_link(url: str, backend: str):
@@ -396,7 +415,6 @@ async def fetch_events_from_link(url: str, backend: str):
             r = requests.get(url, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
             r.raise_for_status()
             evs = try_parse_events(r.text, url)
-        logger.info("🧮  → eventos extraídos: %d", len(evs))
         return evs
     except Exception as e:
         logger.warning("Falha ao buscar %s com %s: %s", url, backend_sel, e)
@@ -1101,7 +1119,6 @@ async def _schedule_all_for_game(g: Game):
     except Exception:
         logger.exception("Falha no agendamento do jogo id=%s", g.id)
 
-
 async def morning_scan_and_publish():
     logger.info("🌅 Iniciando varredura matinal...")
     stored_total = 0
@@ -1127,8 +1144,6 @@ async def morning_scan_and_publish():
             logger.exception("Falha ao enviar resumo ao Telegram (fallback simples).")
 
     # --- ALTERAÇÃO CRÍTICA: Força o uso do Playwright ---
-    # O site carrega os jogos via JavaScript. O 'requests' pega apenas o HTML vazio.
-    # Playwright renderiza a página completa, permitindo o scrape dos jogos.
     backend_cfg = "playwright"
     # ---------------------------------------------------
 
@@ -1138,7 +1153,6 @@ async def morning_scan_and_publish():
     with SessionLocal() as session:
         for url in app.all_links():
             evs: List[Any] = []
-            # active_backend é ignorado, pois estamos forçando 'playwright' acima
             active_backend = "playwright"
 
             # 1) tentativa principal
@@ -1340,7 +1354,6 @@ async def morning_scan_and_publish():
 # ================================
 # Watchlist: rechecagem periódica
 # ================================
-
 async def rescan_watchlist_job():
     """
     Rechecagem periódica da watchlist.
@@ -1365,8 +1378,6 @@ async def rescan_watchlist_job():
         for link, its in by_link.items():
             try:
                 # --- ALTERAÇÃO CRÍTICA: Força o uso do Playwright ---
-                # O site carrega os jogos via JavaScript. O 'requests' pega apenas o HTML vazio.
-                # Playwright renderiza a página completa, permitindo o scrape dos jogos.
                 evs = await fetch_events_from_link(link, "playwright")
                 # ---------------------------------------------------
             except Exception:
