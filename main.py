@@ -1,6 +1,4 @@
-# main.py
 from __future__ import annotations
-
 import asyncio
 import os
 import re
@@ -9,22 +7,18 @@ import random
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
-
 import pytz
 import json
 import logging
 from logging.handlers import RotatingFileHandler
-
 import requests
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
-
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from types import SimpleNamespace as NS
-
 from sqlalchemy import (
     create_engine, Column, Integer, String, Float, Text, DateTime, Boolean, JSON, func, UniqueConstraint
 )
@@ -45,16 +39,12 @@ except Exception:
 # Config
 # ================================
 load_dotenv()
-
 APP_TZ = os.getenv("APP_TZ", "America/Fortaleza")
 ZONE = pytz.timezone(APP_TZ)
-
 MORNING_HOUR = int(os.getenv("MORNING_HOUR", "6"))
-
 DB_URL = os.getenv("DB_URL", "sqlite:///betauto.sqlite3")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
-
 SCRAPE_BACKEND = os.getenv("SCRAPE_BACKEND", "requests").lower()  # requests | playwright | auto
 REQUESTS_TIMEOUT = float(os.getenv("REQUESTS_TIMEOUT", "20"))
 USER_AGENT = os.getenv(
@@ -74,17 +64,13 @@ os.makedirs(LOG_DIR, exist_ok=True)
 # ================================
 logger = logging.getLogger("betauto")
 logger.setLevel(logging.INFO)
-
 _fmt = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
-
 h_file = RotatingFileHandler(os.path.join(LOG_DIR, "betauto.log"), maxBytes=2_000_000, backupCount=5, encoding="utf-8")
 h_file.setFormatter(_fmt)
 h_file.setLevel(logging.INFO)
-
 h_out = logging.StreamHandler()
 h_out.setFormatter(_fmt)
 h_out.setLevel(logging.INFO)
-
 if not logger.handlers:
     logger.addHandler(h_file)
     logger.addHandler(h_out)
@@ -118,7 +104,6 @@ class Game(Base):
     hit = Column(Boolean, nullable=True)
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, onupdate=func.now())
-
     __table_args__ = (
         UniqueConstraint("ext_id", "start_time", name="uq_game_extid_start"),
     )
@@ -147,7 +132,6 @@ def tg_send_message(text: str, parse_mode: Optional[str] = "HTML") -> None:
     }
     if parse_mode:  # só inclui quando tem valor válido
         payload["parse_mode"] = parse_mode
-
     try:
         r = requests.post(url, json=payload, timeout=15)
         if r.status_code != 200:
@@ -194,7 +178,6 @@ def parse_local_datetime(s: str) -> Optional[datetime]:
     if not s:
         return None
     s = s.strip()
-
     # 1) tentar ISO-8601 (com Z ou offset)
     try:
         s_iso = s.replace("Z", "+00:00")
@@ -205,7 +188,6 @@ def parse_local_datetime(s: str) -> Optional[datetime]:
         return dt.astimezone(pytz.UTC)
     except Exception:
         pass
-
     # 2) formatos legados
     fmts = [
         "%H:%M %d/%m/%Y", "%H:%M %d/%m/%y",
@@ -227,7 +209,6 @@ def parse_local_datetime(s: str) -> Optional[datetime]:
             continue
     return None
 
-
 @dataclass
 class EventRow:
     competition: str
@@ -245,6 +226,7 @@ _PT_MONTHS = {
     "janeiro": 1, "fevereiro": 2, "março": 3, "marco": 3, "abril": 4, "maio": 5, "junho": 6,
     "julho": 7, "agosto": 8, "setembro": 9, "outubro": 10, "novembro": 11, "dezembro": 12,
 }
+
 def _date_from_header_text(txt: str) -> Optional[datetime]:
     t = (txt or "").strip().lower()
     if not t:
@@ -258,7 +240,6 @@ def _date_from_header_text(txt: str) -> Optional[datetime]:
     if "ontem" in t:
         nowl = datetime.now(ZONE) - timedelta(days=1)
         return nowl.replace(hour=0, minute=0, second=0, microsecond=0)
-
     m = re.search(r"(\d{1,2})\s+([a-zç]+)", t)
     if m:
         day = int(m.group(1))
@@ -373,9 +354,7 @@ async def fetch_events_from_link(url: str, backend: str):
     backend_sel = backend
     if backend_sel == "auto":
         backend_sel = "playwright"  # escolha padrão
-
     logger.info("🔎 Varredura iniciada para %s — backend=%s", url, backend_sel)
-
     try:
         if backend_sel == "playwright":
             html = await _fetch_with_playwright(url)
@@ -384,10 +363,8 @@ async def fetch_events_from_link(url: str, backend: str):
             r = requests.get(url, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
             r.raise_for_status()
             evs = try_parse_events(r.text, url)
-
         logger.info("🧮  → eventos extraídos: %d", len(evs))
         return evs
-
     except Exception as e:
         logger.warning("Falha ao buscar %s com %s: %s", url, backend_sel, e)
         return []
@@ -420,13 +397,19 @@ async def _fetch_with_playwright(url: str) -> str:
 def decide_bet(odds_home, odds_draw, odds_away, competition, teams):
     # parâmetros ajustáveis
     MIN_ODD = 1.01
-    MIN_EV = float(os.getenv("MIN_EV", "0.01"))          # <- relaxado para 1% por padrão
-    MIN_PROB = float(os.getenv("MIN_PROB", "0.25"))
+    MIN_EV = float(os.getenv("MIN_EV", "-0.02"))          # <- relaxado para -2% por padrão
+    MIN_PROB = float(os.getenv("MIN_PROB", "0.20"))       # <- reduzido para 20%
     FAV_MODE = os.getenv("FAV_MODE", "on").lower()      # on|off
-    FAV_PROB_MIN = float(os.getenv("FAV_PROB_MIN", "0.70"))
-    FAV_GAP_MIN = float(os.getenv("FAV_GAP_MIN", "0.18"))
+    FAV_PROB_MIN = float(os.getenv("FAV_PROB_MIN", "0.60")) # <- reduzido
+    FAV_GAP_MIN = float(os.getenv("FAV_GAP_MIN", "0.10"))   # <- reduzido
     EV_TOL = float(os.getenv("EV_TOL", "-0.03"))
     FAV_IGNORE_EV = os.getenv("FAV_IGNORE_EV", "on").lower() == "on"
+
+    # --- NOVO: Parâmetros para a estratégia "Maior Potencial de Ganho" ---
+    HIGH_ODD_MODE = os.getenv("HIGH_ODD_MODE", "on").lower()  # on|off
+    HIGH_ODD_MIN = float(os.getenv("HIGH_ODD_MIN", "1.50"))   # Odd mínima para considerar
+    HIGH_ODD_MAX_PROB = float(os.getenv("HIGH_ODD_MAX_PROB", "0.45")) # Probabilidade máxima (evita favoritos)
+    HIGH_ODD_MIN_EV = float(os.getenv("HIGH_ODD_MIN_EV", "-0.15")) # EV mínimo (pode ser negativo)
 
     names = ("home", "draw", "away")
     odds = (float(odds_home or 0.0), float(odds_draw or 0.0), float(odds_away or 0.0))
@@ -443,13 +426,13 @@ def decide_bet(odds_home, odds_draw, odds_away, competition, teams):
     odd_map = dict(avail)
     ev_map = {n: true[n] * odd_map[n] - 1.0 for n in true}
 
-    # 1) Valor puro
+    # 1) Estratégia Padrão: Valor Esperado Positivo
     pick_ev, best_ev = max(ev_map.items(), key=lambda x: x[1])
     pprob_ev = true[pick_ev]
     if best_ev >= MIN_EV and pprob_ev >= MIN_PROB:
         return True, pick_ev, pprob_ev, best_ev, "EV positivo"
 
-    # 2) Favorito “óbvio” (probabilidade)
+    # 2) Estratégia do Favorito “óbvio”
     if FAV_MODE == "on":
         probs_sorted = sorted(true.items(), key=lambda x: x[1], reverse=True)
         (pick_fav, p1), (_, p2) = probs_sorted[0], probs_sorted[1]
@@ -457,11 +440,27 @@ def decide_bet(odds_home, odds_draw, odds_away, competition, teams):
         gap_ok = (p1 - p2) >= FAV_GAP_MIN
         prob_ok = p1 >= max(MIN_PROB, FAV_PROB_MIN, 0.40)
         ev_ok = (ev_fav >= EV_TOL) or FAV_IGNORE_EV
-
         if prob_ok and gap_ok and ev_ok:
             reason = "Favorito claro (probabilidade)" if FAV_IGNORE_EV else "Favorito claro (regra híbrida)"
             return True, pick_fav, p1, ev_fav, reason
 
+    # --- 3) NOVA ESTRATÉGIA: Maior Potencial de Ganho (High Odds / High EV) ---
+    if HIGH_ODD_MODE == "on":
+        # Ordena os mercados por Valor Esperado (do maior para o menor)
+        ev_sorted = sorted(ev_map.items(), key=lambda x: x[1], reverse=True)
+        for pick_high, ev_high in ev_sorted:
+            odd_high = odd_map[pick_high]
+            prob_high = true[pick_high]
+
+            # Critérios:
+            # a) Odd acima do mínimo configurado (ex: 1.5)
+            # b) Probabilidade abaixo do máximo (evita favoritos óbvios)
+            # c) EV acima do mínimo configurado (pode ser negativo, ex: -15%)
+            if (odd_high >= HIGH_ODD_MIN) and (prob_high <= HIGH_ODD_MAX_PROB) and (ev_high >= HIGH_ODD_MIN_EV):
+                reason = f"Maior Potencial de Ganho (Odd: {odd_high:.2f}, EV: {ev_high*100:.1f}%)"
+                return True, pick_high, prob_high, ev_high, reason
+
+    # Se nenhuma estratégia foi acionada, retorna o motivo da falha da estratégia 1.
     reason = f"EV baixo (<{int(MIN_EV*100)}%)" if best_ev < MIN_EV else f"Probabilidade baixa (<{int(MIN_PROB*100)}%)"
     return False, "", pprob_ev, best_ev, reason
 
@@ -622,11 +621,10 @@ app = BetAuto()
 # --- Config extra por .env ---
 START_ALERT_MIN = int(os.getenv("START_ALERT_MIN", "15"))               # janela para alerta "começa agora"
 LATE_WATCH_WINDOW_MIN = int(os.getenv("LATE_WATCH_WINDOW_MIN", "130"))  # watcher tardio (até 2h10 após o início)
-
 # Watchlist config
-WATCHLIST_DELTA = float(os.getenv("WATCHLIST_DELTA", "0.01"))           # faixa abaixo do MIN_EV
-WATCHLIST_MIN_LEAD_MIN = int(os.getenv("WATCHLIST_MIN_LEAD_MIN", "90")) # só lista se faltar >= X min
-WATCHLIST_RESCAN_MIN = int(os.getenv("WATCHLIST_RESCAN_MIN", "6"))      # rechecagem periódica
+WATCHLIST_DELTA = float(os.getenv("WATCHLIST_DELTA", "0.05"))           # faixa abaixo do MIN_EV (aumentado)
+WATCHLIST_MIN_LEAD_MIN = int(os.getenv("WATCHLIST_MIN_LEAD_MIN", "30")) # só lista se faltar >= X min (reduzido)
+WATCHLIST_RESCAN_MIN = int(os.getenv("WATCHLIST_RESCAN_MIN", "3"))      # rechecagem periódica (reduzido)
 
 # --- Helper: garantir sempre datetime aware em UTC ---
 def to_aware_utc(dt: datetime | None) -> datetime | None:
@@ -635,6 +633,66 @@ def to_aware_utc(dt: datetime | None) -> datetime | None:
     if dt.tzinfo is None:
         return pytz.UTC.localize(dt)
     return dt.astimezone(pytz.UTC)
+
+# --- NOVA FUNÇÃO: Scrape de Resultado Real ---
+def scrape_game_result(html: str, ext_id: str) -> Optional[str]:
+    """
+    Tenta extrair o resultado final (home/draw/away) da página HTML de um jogo encerrado.
+    Esta é uma implementação de exemplo e PRECISA ser adaptada ao HTML real do BetNacional para jogos finalizados.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+
+    # --- EXEMPLO: Encontrar o placar final ---
+    # NOTA: Você precisa inspecionar o HTML real do site para encontrar os seletores corretos.
+    # Aqui, estou supondo que existe um elemento com o placar, por exemplo: <div class="final-score">2 - 1</div>
+    score_element = soup.select_one('.final-score')  # <-- ALTERE ESTE SELETOR COM BASE NO HTML REAL
+    if not score_element:
+        # Tentativa alternativa: procurar por texto que indique o vencedor
+        winner_badge = soup.find(string=lambda t: isinstance(t, str) and ("Vencedor" in t or "Winner" in t))
+        if winner_badge:
+            parent = winner_badge.parent
+            if parent:
+                winner_text = parent.get_text(strip=True)
+                if "Casa" in winner_text or "Home" in winner_text:
+                    return "home"
+                elif "Fora" in winner_text or "Away" in winner_text:
+                    return "away"
+                elif "Empate" in winner_text or "Draw" in winner_text:
+                    return "draw"
+        return None
+
+    score_text = score_element.get_text(strip=True)
+    # Supondo que o placar está no formato "X - Y"
+    if " - " not in score_text:
+        return None
+
+    try:
+        home_goals, away_goals = map(int, score_text.split(" - "))
+        if home_goals > away_goals:
+            return "home"
+        elif away_goals > home_goals:
+            return "away"
+        else:
+            return "draw"
+    except ValueError:
+        return None
+
+async def fetch_game_result(ext_id: str, source_link: str) -> Optional[str]:
+    """
+    Busca a página do jogo e tenta extrair o resultado.
+    """
+    try:
+        # Usa o mesmo backend da varredura matinal
+        backend_sel = SCRAPE_BACKEND if SCRAPE_BACKEND in ("requests", "playwright") else "requests"
+        if backend_sel == "playwright":
+            html = await _fetch_with_playwright(source_link)
+        else:
+            html = fetch_requests(source_link)
+
+        return scrape_game_result(html, ext_id)
+    except Exception as e:
+        logger.error(f"Erro ao buscar resultado para jogo {ext_id}: {e}")
+        return None
 
 async def _schedule_all_for_game(g: Game):
     """Agenda lembrete T-15, alerta 'começa já já' (se aplicável) e watcher/início tardio."""
@@ -697,6 +755,7 @@ async def _schedule_all_for_game(g: Game):
                 atraso = int((now_utc - g_start).total_seconds() // 60)
                 logger.info("⏹️ Watcher não criado: jogo iniciou há %d min (> %d) id=%s.",
                             atraso, LATE_WATCH_WINDOW_MIN, g.id)
+
     except Exception:
         logger.exception("Falha no agendamento do jogo id=%s", g.id)
 
@@ -704,7 +763,6 @@ async def morning_scan_and_publish():
     logger.info("🌅 Iniciando varredura matinal...")
     stored_total = 0
     analyzed_total = 0
-
     # Resumo usa snapshots leves (dict) para evitar DetachedInstanceError
     chosen_view: List[Dict[str, Any]] = []
     chosen_db: List[Game] = []
@@ -783,11 +841,11 @@ async def morning_scan_and_publish():
 
                     # Se não virou pick, avaliar WATCHLIST
                     if not will:
-                        MIN_EV = float(os.getenv("MIN_EV", "0.01"))
+                        MIN_EV = float(os.getenv("MIN_EV", "-0.02"))
                         now_utc = datetime.now(pytz.UTC)
                         lead_ok = (start_utc - now_utc) >= timedelta(minutes=WATCHLIST_MIN_LEAD_MIN)
                         near_cut = (pev >= (MIN_EV - WATCHLIST_DELTA)) and (pev < MIN_EV)
-                        prob_ok = pprob >= float(os.getenv("MIN_PROB", "0.25"))
+                        prob_ok = pprob >= float(os.getenv("MIN_PROB", "0.20"))
                         if lead_ok and near_cut and prob_ok and not getattr(ev, "is_live", False):
                             added = wl_add(session, ev.ext_id, url, start_utc)
                             if added:
@@ -958,14 +1016,15 @@ async def rescan_watchlist_job():
             page_cache[link] = {e.ext_id: e for e in evs}
 
         # 3) iterar itens; remover passados; promover se cruzou corte
-        MIN_EV = float(os.getenv("MIN_EV", "0.01"))
-        MIN_PROB = float(os.getenv("MIN_PROB", "0.25"))
+        MIN_EV = float(os.getenv("MIN_EV", "-0.02"))
+        MIN_PROB = float(os.getenv("MIN_PROB", "0.20"))
         upgraded: List[str] = []
         removed_expired = 0
 
         for it in list(items):
             ext_id = it["ext_id"]; link = it["link"]
             start_utc = to_aware_utc(datetime.fromisoformat(it["start_time"]))
+
             # expirado?
             if start_utc <= now_utc:
                 removed_expired += wl_remove(session, lambda x, eid=ext_id, st=it["start_time"]: x["ext_id"]==eid and x["start_time"]==st)
@@ -1040,21 +1099,38 @@ async def send_reminder_job(game_id: int):
         tg_send_message(fmt_reminder(g))
         logger.info("🔔 Lembrete enviado para jogo id=%s", game_id)
 
+# --- SUBSTITUIÇÃO: Função de Watcher Real ---
 async def watch_game_until_end_job(game_id: int):
-    """Watcher dummy: aguarda ~2h e sorteia resultado (trocar por scraping do evento/placar)."""
+    """Watcher real: aguarda o jogo terminar e scrapeia o resultado final."""
     with SessionLocal() as s:
         g = s.get(Game, game_id)
         if not g:
+            logger.warning(f"Jogo com ID {game_id} não encontrado no banco de dados.")
             return
         start_time_utc = g.start_time
         home, away, gid = g.team_home, g.team_away, g.id
-        logger.info("👀 Monitorando: %s vs %s (id=%s)", home, away, gid)
+        ext_id, source_link = g.ext_id, g.source_link
+        logger.info("👀 Monitorando para resultado: %s vs %s (id=%s)", home, away, gid)
 
-    end_eta = start_time_utc + timedelta(hours=2)
+    # Calcula um tempo estimado para o fim do jogo (2h após o início)
+    end_eta = start_time_utc + timedelta(hours=2, minutes=30) # 2h30min para cobrir prorrogações
+
+    # Aguarda até o tempo estimado de término
     while datetime.now(tz=pytz.UTC) < end_eta:
-        await asyncio.sleep(30)
+        await asyncio.sleep(300)  # Verifica a cada 5 minutos
 
-    outcome = random.choice(["home", "draw", "away"])
+    # Após o tempo estimado, tenta buscar o resultado
+    logger.info(f"Tentando scrapear resultado para jogo {gid} ({home} vs {away})")
+    outcome = await fetch_game_result(ext_id, source_link)
+
+    # Se não conseguir na primeira tentativa, tenta mais algumas vezes
+    retry_count = 0
+    max_retries = 3
+    while outcome is None and retry_count < max_retries:
+        logger.info(f"Tentativa {retry_count + 1} falhou. Nova tentativa em 10 minutos.")
+        await asyncio.sleep(600)  # Espera 10 minutos
+        outcome = await fetch_game_result(ext_id, source_link)
+        retry_count += 1
 
     with SessionLocal() as s:
         g = s.get(Game, game_id)
@@ -1062,11 +1138,18 @@ async def watch_game_until_end_job(game_id: int):
             return
         g.status = "ended"
         g.outcome = outcome
-        g.hit = (outcome == g.pick)
+        if outcome is not None:
+            g.hit = (outcome == g.pick)
+            result_msg = "✅ ACERTOU" if g.hit else "❌ ERROU"
+            logger.info("🏁 Resultado Obtido id=%s | palpite=%s | resultado=%s | %s", g.id, g.pick, g.outcome, result_msg)
+        else:
+            g.hit = None  # Marca como não verificado
+            logger.warning("🏁 Resultado NÃO OBTIDO para id=%s", g.id)
+
         s.commit()
         tg_send_message(fmt_result(g))
-        logger.info("🏁 Encerrado id=%s | palpite=%s | resultado=%s | hit=%s", g.id, g.pick, g.outcome, g.hit)
 
+    # Após atualizar o jogo, verifica se pode enviar o resumo diário
     await maybe_send_daily_wrapup()
 
 async def maybe_send_daily_wrapup():
@@ -1121,20 +1204,16 @@ async def main():
     setup_scheduler()
     # dispara uma varredura no boot para testar
     await morning_scan_and_publish()
-
     loop = asyncio.get_running_loop()
     stop = asyncio.Event()
-
     def _sig(*_):
         logger.info("Sinal de parada recebido; encerrando…")
         stop.set()
-
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
             loop.add_signal_handler(sig, _sig)
         except NotImplementedError:
             pass
-
     await stop.wait()
 
 if __name__ == "__main__":
