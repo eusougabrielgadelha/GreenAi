@@ -599,6 +599,16 @@ def decide_bet(odds_home, odds_draw, odds_away, competition, teams, game_id=None
                 reason = f"Maior Potencial de Ganho (Odd: {odd_high:.2f}, EV Ajustado: {ev_high*100:.1f}%)"
                 return True, pick_high, prob_high, ev_high, reason
 
+    # --- NOVO: Camada de Filtro de Confiança (Reforçada) ---
+    # Prioridade 1: Qualquer mercado com probabilidade > 50%
+    if pprob_ev > 0.50:
+        return True, pick_ev, pprob_ev, best_ev, "Favorito claro (probabilidade > 50%)"
+
+    # Prioridade 2: Mercado com alta probabilidade (40%+), mesmo com EV negativo
+    if pprob_ev >= 0.40:
+        if best_ev >= -0.08:  # Aceita até -8% de EV
+            return True, pick_ev, pprob_ev, best_ev, "Alta confiança (probabilidade > 40%)"
+
     # Se nenhuma estratégia foi acionada, retorna o motivo da falha da estratégia 1.
     reason = f"EV baixo (<{int(MIN_EV*100)}%)" if best_ev < MIN_EV else f"Probabilidade baixa (<{int(MIN_PROB*100)}%)"
     return False, "", pprob_ev, best_ev, reason
