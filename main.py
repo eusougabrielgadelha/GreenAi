@@ -144,6 +144,19 @@ class LiveGameTracker(Base):
 
 Base.metadata.create_all(engine)
 
+class OddHistory(Base):
+    __tablename__ = "odd_history"
+    id = Column(Integer, primary_key=True)
+    game_id = Column(Integer, nullable=False, index=True)  # Referência ao Game.id
+    ext_id = Column(String, index=True)
+    timestamp = Column(DateTime, server_default=func.now())
+    odds_home = Column(Float)
+    odds_draw = Column(Float)
+    odds_away = Column(Float)
+    created_at = Column(DateTime, server_default=func.now())
+
+Base.metadata.create_all(engine, tables=[OddHistory.__table__], checkfirst=True)
+
 # ==== MIGRAÇÃO RÁPIDA (executa no boot) ====
 from sqlalchemy import text
 
@@ -488,22 +501,26 @@ async def _fetch_with_playwright(url: str) -> str:
 # ================================
 # Regras simples de decisão
 # ================================
-def decide_bet(odds_home, odds_draw, odds_away, competition, teams):
+def decide_bet(odds_home, odds_draw, odds_away, competition, teams, game_id=None):
+    """
+    Decisão de aposta com EV ajustado pelo movimento de odds.
+    Se game_id for fornecido, consulta o histórico para calcular a variação.
+    """
     # parâmetros ajustáveis
     MIN_ODD = 1.01
-    MIN_EV = float(os.getenv("MIN_EV", "-0.02"))          # <- relaxado para -2% por padrão
-    MIN_PROB = float(os.getenv("MIN_PROB", "0.20"))       # <- reduzido para 20%
-    FAV_MODE = os.getenv("FAV_MODE", "on").lower()      # on|off
-    FAV_PROB_MIN = float(os.getenv("FAV_PROB_MIN", "0.60")) # <- reduzido
-    FAV_GAP_MIN = float(os.getenv("FAV_GAP_MIN", "0.10"))   # <- reduzido
+    MIN_EV = float(os.getenv("MIN_EV", "-0.02"))  # <- relaxado para -2% por padrão
+    MIN_PROB = float(os.getenv("MIN_PROB", "0.20"))  # <- reduzido para 20%
+    FAV_MODE = os.getenv("FAV_MODE", "on").lower()  # on|off
+    FAV_PROB_MIN = float(os.getenv("FAV_PROB_MIN", "0.60"))  # <- reduzido
+    FAV_GAP_MIN = float(os.getenv("FAV_GAP_MIN", "0.10"))  # <- reduzido
     EV_TOL = float(os.getenv("EV_TOL", "-0.03"))
     FAV_IGNORE_EV = os.getenv("FAV_IGNORE_EV", "on").lower() == "on"
 
     # --- NOVO: Parâmetros para a estratégia "Maior Potencial de Ganho" ---
     HIGH_ODD_MODE = os.getenv("HIGH_ODD_MODE", "on").lower()  # on|off
-    HIGH_ODD_MIN = float(os.getenv("HIGH_ODD_MIN", "1.50"))   # Odd mínima para considerar
-    HIGH_ODD_MAX_PROB = float(os.getenv("HIGH_ODD_MAX_PROB", "0.45")) # Probabilidade máxima (evita favoritos)
-    HIGH_ODD_MIN_EV = float(os.getenv("HIGH_ODD_MIN_EV", "-0.15")) # EV mínimo (pode ser negativo)
+    HIGH_ODD_MIN = float(os.getenv("HIGH_ODD_MIN", "1.50"))  # Odd mínima para considerar
+    HIGH_ODD_MAX_PROB = float(os.getenv("HIGH_ODD_MAX_PROB", "0.45"))  # Probabilidade máxima (evita favoritos)
+    HIGH_ODD_MIN_EV = float(os.getenv("HIGH_ODD_MIN_EV", "-0.15"))  # EV mínimo (pode ser negativo)
 
     names = ("home", "draw", "away")
     odds = (float(odds_home or 0.0), float(odds_draw or 0.0), float(odds_away or 0.0))
@@ -516,21 +533,49 @@ def decide_bet(odds_home, odds_draw, odds_away, competition, teams):
     if tot <= 0:
         return False, "", 0.0, 0.0, "Probabilidades inválidas"
 
-    true = {n: v / tot for n, v in inv}                 # prob. implícitas normalizadas
+    true = {n: v / tot for n, v in inv}  # prob. implícitas normalizadas
     odd_map = dict(avail)
     ev_map = {n: true[n] * odd_map[n] - 1.0 for n in true}
 
-    # 1) Estratégia Padrão: Valor Esperado Positivo
-    pick_ev, best_ev = max(ev_map.items(), key=lambda x: x[1])
+    # --- NOVO: Calcula o EV Ajustado com base no movimento de odds ---
+    adjusted_ev_map = ev_map.copy()
+    if game_id:
+        with SessionLocal() as session:
+            # Busca as odds registradas 1 hora atrás
+            one_hour_ago = datetime.now(pytz.UTC) - timedelta(hours=1)
+            old_odd = session.query(OddHistory).filter(
+                OddHistory.game_id == game_id,
+                OddHistory.timestamp <= one_hour_ago
+            ).order_by(OddHistory.timestamp.desc()).first()
+
+            if old_odd:
+                for market in ["home", "draw", "away"]:
+                    current_odd = odd_map.get(market, 0.0)
+                    old_odd_val = getattr(old_odd, f"odds_{market}", 0.0)
+                    if old_odd_val > 0 and current_odd > 0:
+                        # Calcula a variação percentual (negativa = odd caindo = bom)
+                        variation = (current_odd - old_odd_val) / old_odd_val
+                        # Ajusta o EV: se a odd caiu, aumenta o EV; se subiu, diminui.
+                        adjustment = -variation * 0.5  # Fator de ajuste (configurável)
+                        adjusted_ev_map[market] += adjustment
+
+    # --- NOVO: Análise de Mercados Secundários ---
+    # Para simplificar, vamos focar apenas no mercado "Ambos Marcam" como exemplo.
+    # Em um cenário real, você criaria uma função separada para scrapear e analisar múltiplos mercados.
+    btts_value = 0.0  # Placeholder. Em uma implementação real, você scrapearia o mercado "Ambos Marcam".
+
+    # 1) Estratégia Padrão: Valor Esperado Positivo (Ajustado)
+    pick_ev, best_ev = max(adjusted_ev_map.items(), key=lambda x: x[1])
     pprob_ev = true[pick_ev]
     if best_ev >= MIN_EV and pprob_ev >= MIN_PROB:
-        return True, pick_ev, pprob_ev, best_ev, "EV positivo"
+        reason = "EV positivo (ajustado por movimento de odds)"
+        return True, pick_ev, pprob_ev, best_ev, reason
 
     # 2) Estratégia do Favorito “óbvio”
     if FAV_MODE == "on":
         probs_sorted = sorted(true.items(), key=lambda x: x[1], reverse=True)
         (pick_fav, p1), (_, p2) = probs_sorted[0], probs_sorted[1]
-        ev_fav = ev_map.get(pick_fav, 0.0)
+        ev_fav = adjusted_ev_map.get(pick_fav, 0.0)
         gap_ok = (p1 - p2) >= FAV_GAP_MIN
         prob_ok = p1 >= max(MIN_PROB, FAV_PROB_MIN, 0.40)
         ev_ok = (ev_fav >= EV_TOL) or FAV_IGNORE_EV
@@ -540,8 +585,8 @@ def decide_bet(odds_home, odds_draw, odds_away, competition, teams):
 
     # --- 3) NOVA ESTRATÉGIA: Maior Potencial de Ganho (High Odds / High EV) ---
     if HIGH_ODD_MODE == "on":
-        # Ordena os mercados por Valor Esperado (do maior para o menor)
-        ev_sorted = sorted(ev_map.items(), key=lambda x: x[1], reverse=True)
+        # Ordena os mercados por Valor Esperado Ajustado (do maior para o menor)
+        ev_sorted = sorted(adjusted_ev_map.items(), key=lambda x: x[1], reverse=True)
         for pick_high, ev_high in ev_sorted:
             odd_high = odd_map[pick_high]
             prob_high = true[pick_high]
@@ -551,7 +596,7 @@ def decide_bet(odds_home, odds_draw, odds_away, competition, teams):
             # b) Probabilidade abaixo do máximo (evita favoritos óbvios)
             # c) EV acima do mínimo configurado (pode ser negativo, ex: -15%)
             if (odd_high >= HIGH_ODD_MIN) and (prob_high <= HIGH_ODD_MAX_PROB) and (ev_high >= HIGH_ODD_MIN_EV):
-                reason = f"Maior Potencial de Ganho (Odd: {odd_high:.2f}, EV: {ev_high*100:.1f}%)"
+                reason = f"Maior Potencial de Ganho (Odd: {odd_high:.2f}, EV Ajustado: {ev_high*100:.1f}%)"
                 return True, pick_high, prob_high, ev_high, reason
 
     # Se nenhuma estratégia foi acionada, retorna o motivo da falha da estratégia 1.
@@ -1658,6 +1703,18 @@ async def morning_scan_and_publish():
                                 g.will_bet = will
                                 g.status = "live" if getattr(ev, "is_live", False) else (g.status or "scheduled")
                                 session.commit()
+                                # --- NOVO: Salva o histórico de odds ---
+                            if g.id:  # Certifica-se de que o jogo tem um ID válido
+                                odd_hist = OddHistory(
+                                    game_id=g.id,
+                                    ext_id=g.ext_id,
+                                    odds_home=g.odds_home,
+                                    odds_draw=g.odds_draw,
+                                    odds_away=g.odds_away,
+                                )
+                                session.add(odd_hist)
+                                session.commit()
+                            # --- FIM DA NOVA LÓGICA ---
                             else:
                                 raise
 
@@ -1721,6 +1778,8 @@ async def morning_scan_and_publish():
     _send_summary_safe(msg)
     logger.info("🧾 Varredura concluída — analisados=%d | selecionados=%d | salvos=%d",
                 analyzed_total, len(chosen_view), stored_total)
+    
+
 
 # ================================
 # Checagem da madrugada
