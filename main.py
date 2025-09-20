@@ -4,6 +4,7 @@ import os
 import re
 import signal
 import random
+import html
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
@@ -341,7 +342,6 @@ def try_parse_events(html: str, url: str):
     soup = BeautifulSoup(html, "html.parser")
     evs = []
     
-    # Encontra todos os elementos do DOM em ordem
     all_elements = soup.find_all(['div'])
     
     current_date_header = None
@@ -363,16 +363,16 @@ def try_parse_events(html: str, url: str):
                 logger.warning("Jogo encontrado sem cabeçalho de data precedente")
                 continue
                 
-            # Processa o cartão do jogo
-            # 2) ext_id + times
-            a = element.select_one('a[href*="/event/"]')
+            # CORREÇÃO: usar 'element' ao invés de 'card'
+            a = element.select_one('a[href*="/event/"]')  # ✅ CORRETO
             if not a:
                 continue
+                
             href = a.get("href", "")
             m = re.search(r"/event/\d+/\d+/(\d+)", href)
             ext_id = m.group(1) if m else ""
-
-            # NOVO: URL completo da página do jogo
+            
+            # URL completa da página do jogo
             game_url = urljoin(url, href)
 
             # nomes
@@ -840,28 +840,26 @@ def fmt_morning_summary(date_local: datetime, analyzed: int, chosen: List[Dict[s
     return msg
 
 def fmt_result(g: Game) -> str:
-    """Resultado do jogo formatado de forma elegante"""
-    if g.hit:
-        emoji = "✅"
-        status = "ACERTOU"
-        color = "green"
-    else:
-        emoji = "❌"
-        status = "ERROU"
-        color = "red"
-    
-    msg = f"{emoji} <b>RESULTADO - {status}</b>\n"
-    msg += "━━━━━━━━━━━━━━━━━━━━\n\n"
-    msg += f"⚽ <b>{g.team_home}</b> vs <b>{g.team_away}</b>\n"
-    
+    """Formatação elegante para resultado final do jogo."""
+    if g.hit is None:
+        return "⚠️ <b>RESULTADO NÃO VERIFICADO</b>"
+
+    emoji = "✅" if g.hit else "❌"
+    status = "ACERTAMOS" if g.hit else "ERRAMOS"
+    color = "green" if g.hit else "red"
+
+    msg = f"{emoji} <b>RESULTADO - {status}</b>"
+    msg += "━━━━━━━━━━━━━━━━━━━━"
+    msg += f"⚽ <b>{g.team_home}</b> vs <b>{g.team_away}</b>"
+
     # Mapeia resultado para texto legível
     outcome_map = {"home": g.team_home, "draw": "Empate", "away": g.team_away}
     pick_map = {"home": g.team_home, "draw": "Empate", "away": g.team_away}
-    
-    msg += f"├ Palpite: <b>{pick_map.get(g.pick, g.pick)}</b>\n"
-    msg += f"├ Resultado: <b>{outcome_map.get(g.outcome, g.outcome or '—')}</b>\n"
-    msg += f"└ EV estimado: {g.pick_ev*100:+.1f}%\n"
-    
+
+    msg += f"├ Palpite: <b>{pick_map.get(g.pick, g.pick)}</b>"
+    msg += f"├ Resultado: <b>{outcome_map.get(g.outcome, g.outcome or '—')}</b>"
+    msg += f"└ EV estimado: {g.pick_ev*100:+.1f}%"
+
     return msg
 
 def fmt_pick_now(g: Game) -> str:
@@ -1021,6 +1019,27 @@ def to_aware_utc(dt: datetime | None) -> datetime | None:
     if dt.tzinfo is None:
         return pytz.UTC.localize(dt)
     return dt.astimezone(pytz.UTC)
+
+def save_odd_history(session, game: Game) -> bool:
+    """Salva histórico de odds para um jogo, se possível."""
+    if not game or not game.id:
+        return False
+    
+    try:
+        odd_hist = OddHistory(
+            game_id=game.id,
+            ext_id=game.ext_id,
+            odds_home=game.odds_home,
+            odds_draw=game.odds_draw,
+            odds_away=game.odds_away,
+        )
+        session.add(odd_hist)
+        session.commit()
+        return True
+    except Exception as e:
+        logger.warning(f"Falha ao salvar histórico de odds para jogo {game.id}: {e}")
+        session.rollback()
+        return False
 
 # --- NOVA FUNÇÃO: Scrape de Resultado Real ---
 def scrape_game_result(html: str, ext_id: str) -> Optional[str]:
@@ -1312,8 +1331,8 @@ async def _poll_one_live_game(game_id: int, tracker_id: int, sem: asyncio.Semaph
                 tr = s.get(LiveGameTracker, tracker_id)
                 if not g or not tr:
                     return False
-
-                # busque com requests (não bloqueie o loop por muito tempo)
+                
+                # --- CORREÇÃO: Usa a página específica do jogo ---
                 html = await _fetch_requests_async(g.game_url or g.source_link)
                 live_data = scrape_live_game_data(html, g.ext_id)
 
@@ -1342,72 +1361,75 @@ async def _poll_one_live_game(game_id: int, tracker_id: int, sem: asyncio.Semaph
             await asyncio.sleep(base + jitter)
 
 async def monitor_live_games_job():
-    """
-    Varre jogos com status='live', garante LiveGameTracker para cada um,
-    roda um ciclo de _poll_ concorrente e persiste os updates (placar/minuto,
-    cooldowns, dedupe de picks, etc.).
-    """
     logger.info("⚽ Iniciando monitoramento de jogos ao vivo...")
     now_utc = datetime.now(pytz.UTC)
 
     with SessionLocal() as session:
-        # 1) Carrega jogos ao vivo
         live_games = session.query(Game).filter(Game.status == "live").all()
-        if not live_games:
-            logger.info("⚽ Sem jogos 'live' no momento.")
-            return
 
-        # 2) Garante tracker para cada jogo
-        created = 0
-        for g in live_games:
-            tr = session.query(LiveGameTracker).filter_by(game_id=g.id).one_or_none()
-            if not tr:
-                tr = LiveGameTracker(
-                    game_id=g.id,
-                    ext_id=g.ext_id,
-                    game_url=g.game_url or g.source_link,
-                    last_analysis_time=now_utc - timedelta(minutes=5),
-                    notifications_sent=0,
-                )
-                session.add(tr)
-                created += 1
-        if created:
-            logger.info("🆕 Criados %d LiveGameTracker(s).", created)
-        session.commit()
+        for game in live_games:
+            try:
+                # 1. Busca ou cria o tracker
+                tracker = session.query(LiveGameTracker).filter_by(game_id=game.id).one_or_none()
+                if not tracker:
+                    tracker = LiveGameTracker(
+                        game_id=game.id,
+                        ext_id=game.ext_id,
+                        last_analysis_time=now_utc - timedelta(minutes=5)
+                    )
+                    session.add(tracker)
+                    session.commit()
 
-        # 3) Limita concorrência
-        max_conc = int(os.getenv("LIVE_MAX_CONCURRENCY", "8"))
-        sem = asyncio.Semaphore(max_conc)
+                    # --- NOVO: Envia mensagem de "Análise em Andamento" ---
+                    tg_send_message(
+                        f"🔍 <b>ANÁLISE AO VIVO INICIADA</b>\n"
+                        f"Estamos monitorando <b>{game.team_home} vs {game.team_away}</b> em busca de oportunidades de valor.\n"
+                        f"Você será notificado assim que uma aposta for validada."
+                    )
+                    logger.info(f"🔍 Análise iniciada para jogo {game.id}: {game.team_home} vs {game.team_away}")
 
-        # 4) Mapa jogo->tracker e dispara polls
-        trackers = {
-            t.game_id: t
-            for t in session.query(LiveGameTracker).filter(
-                LiveGameTracker.game_id.in_([g.id for g in live_games])
-            ).all()
-        }
+                # 2. Scrapeia os dados atuais da página do jogo
+                html = fetch_requests(game.game_url or game.source_link)
+                live_data = scrape_live_game_data(html, game.ext_id)
 
-        tasks = []
-        for g in live_games:
-            tr = trackers.get(g.id)
-            if not tr:
-                continue
-            tasks.append(_poll_one_live_game(g.id, tr.id, sem))
+                # Atualiza as estatísticas no tracker
+                tracker.current_score = live_data["stats"].get("score")
+                tracker.current_minute = live_data["stats"].get("match_time")
+                tracker.last_analysis_time = now_utc
 
-        if not tasks:
-            logger.info("⚽ Nenhum tracker elegível para poll.")
-            return
+                # 3. Aplica a lógica de decisão
+                opportunity = decide_live_bet_opportunity(live_data, game, tracker)
 
-        # 5) Aguarda um ciclo de todos os polls; erros são coletados
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        fails = sum(1 for r in results if r is False or isinstance(r, Exception))
-        if fails:
-            logger.info("⚠️ Poll concluiu com %d falha(s) entre %d tarefa(s).", fails, len(results))
+                # 4. Se houver uma oportunidade, envia o palpite
+                if opportunity:
+                    # --- NOVO: Envia mensagem de "Palpite Validado" ---
+                    message = fmt_live_bet_opportunity(game, opportunity, live_data["stats"])
+                    tg_send_message(message)
 
-        # 6) Persiste mudanças feitas pelos polls nos trackers
-        session.commit()
+                    # Atualiza o tracker
+                    tracker.last_pick_sent = now_utc
+                    tracker.last_pick_key = opportunity["last_pick_key"]
+                    tracker.cooldown_until = now_utc + timedelta(minutes=opportunity.get("cooldown_minutes", 5))
 
-    logger.info("✅ Monitoramento de jogos ao vivo concluído.")
+                    logger.info(f"✅ Oportunidade validada e enviada para jogo {game.id}: {opportunity['option']} @ {opportunity['odd']}")
+                else:
+                    # --- NOVO: Envia mensagem de "Busca Continua" (opcional, para não spam) ---
+                    # Só envia a mensagem se for a primeira análise ou se passou muito tempo desde a última.
+                    if (now_utc - tracker.last_analysis_time).total_seconds() > 3600:  # 1 hora
+                        tg_send_message(
+                            f"🔄 <b>BUSCA CONTINUADA</b>\n"
+                            f"Ainda não encontramos uma oportunidade de valor em <b>{game.team_home} vs {game.team_away}</b>.\n"
+                            f"Continuaremos monitorando."
+                        )
+                        tracker.last_analysis_time = now_utc  # Atualiza para evitar spam
+                        session.commit()
+
+                session.commit()
+
+            except Exception as e:
+                logger.exception(f"Erro ao monitorar jogo ao vivo {game.id} ({game.ext_id}): {e}")
+
+    logger.info("⚽ Monitoramento de jogos ao vivo concluído.")
 
 
 # --- NOVA FUNÇÃO: Job de Reavaliação Horária ---
@@ -1415,7 +1437,7 @@ async def hourly_rescan_job():
     """
     Job executado a cada hora para reavaliar as odds dos jogos do dia.
     """
-    logger.info("🔄 Iniciando reavaliação horária dos jogos do dia...")
+    logger.info("🔄 Iniciando reavaliação horária dos jogos do dia.")
     now_utc = datetime.now(pytz.UTC)
     today = now_utc.astimezone(ZONE).date()
 
@@ -1423,7 +1445,7 @@ async def hourly_rescan_job():
         # Busca todos os jogos agendados para hoje que ainda não começaram
         day_start = ZONE.localize(datetime(today.year, today.month, today.day, 0, 0)).astimezone(pytz.UTC)
         day_end = ZONE.localize(datetime(today.year, today.month, today.day, 23, 59)).astimezone(pytz.UTC)
-        
+
         games_to_rescan = (
             session.query(Game)
             .filter(
@@ -1437,23 +1459,24 @@ async def hourly_rescan_job():
 
         for game in games_to_rescan:
             try:
-                # Re-fetch a página do jogo
-                html = await _fetch_requests_async(game.source_link)
-                # Para simplificar, vamos simular uma melhoria nas odds
-                # Em um cenário real, você precisaria re-parsear o evento específico.
-                new_odds_home = game.odds_home * 1.02  # +2%
-                new_odds_draw = game.odds_draw * 1.02
-                new_odds_away = game.odds_away * 1.02
+                # Re-fetch da página do jogo (placeholder: você pode reparsear o evento depois)
+                _ = await _fetch_requests_async(game.source_link)
 
-                # Recalcula a decisão
+                # Exemplo simples: simula melhora de +2% nas odds atuais
+                new_odds_home = (game.odds_home or 0.0) * 1.02
+                new_odds_draw = (game.odds_draw or 0.0) * 1.02
+                new_odds_away = (game.odds_away or 0.0) * 1.02
+
+                # Recalcula a decisão (passa game_id para habilitar ajuste por histórico)
                 will, pick, pprob, pev, reason = decide_bet(
                     new_odds_home, new_odds_draw, new_odds_away,
-                    game.competition, (game.team_home, game.team_away)
+                    game.competition, (game.team_home, game.team_away),
+                    game_id=game.id,
                 )
 
                 # Se o novo EV é 5% melhor que o antigo, atualiza
-                if will and pev > (game.pick_ev + 0.05):
-                    old_ev = game.pick_ev
+                if will and pev > ((game.pick_ev or 0.0) + 0.05):
+                    old_ev = game.pick_ev or 0.0
                     game.odds_home = new_odds_home
                     game.odds_draw = new_odds_draw
                     game.odds_away = new_odds_away
@@ -1462,6 +1485,9 @@ async def hourly_rescan_job():
                     game.pick_ev = pev
                     game.pick_reason = f"Upgrade horário (EV antigo: {old_ev*100:.1f}%)"
                     session.commit()
+
+                    # Salva histórico após atualização (📌 adição)
+                    save_odd_history(session, game)
 
                     # Envia notificação
                     tg_send_message(
@@ -1525,22 +1551,20 @@ async def _schedule_all_for_game(g: Game):
             except Exception:
                 logger.exception("Falha ao agendar watcher do jogo id=%s", g.id)
         else:
+            # Se o jogo já começou, inicia o watcher imediatamente
             limit_late = g_start + timedelta(minutes=LATE_WATCH_WINDOW_MIN)
             if now_utc < limit_late:
                 try:
                     asyncio.create_task(watch_game_until_end_job(g.id))
-                    atraso = int((now_utc - g_start).total_seconds() // 60)
-                    logger.info("▶️ Watcher iniciado imediatamente (id=%s, atraso=%d min).", g.id, atraso)
+                    logger.info("▶️ Watcher iniciado imediatamente (id=%s).", g.id)
                 except Exception:
                     logger.exception("Falha ao iniciar watcher imediato id=%s", g.id)
             else:
-                atraso = int((now_utc - g_start).total_seconds() // 60)
-                logger.info("⏹️ Watcher não criado: jogo iniciou há %d min (> %d) id=%s.",
-                            atraso, LATE_WATCH_WINDOW_MIN, g.id)
+                logger.info("⏹️ Watcher não criado: jogo iniciou há muito tempo (id=%s).", g.id)
 
     except Exception:
         logger.exception("Falha no agendamento do jogo id=%s", g.id)
-
+  
 async def morning_scan_and_publish():
     logger.info("🌅 Iniciando varredura matinal...")
     stored_total = 0
@@ -1713,24 +1737,14 @@ async def morning_scan_and_publish():
                                 g.will_bet = will
                                 g.status = "live" if getattr(ev, "is_live", False) else (g.status or "scheduled")
                                 session.commit()
-                                # --- NOVO: Salva o histórico de odds ---
-                            if g.id:  # Certifica-se de que o jogo tem um ID válido
-                                odd_hist = OddHistory(
-                                    game_id=g.id,
-                                    ext_id=g.ext_id,
-                                    odds_home=g.odds_home,
-                                    odds_draw=g.odds_draw,
-                                    odds_away=g.odds_away,
-                                )
-                                session.add(odd_hist)
-                                session.commit()
-                            # --- FIM DA NOVA LÓGICA ---
                             else:
                                 raise
 
-
                     stored_total += 1
                     session.refresh(g)  # garante id e campos atualizados
+
+                    # ✅ Salva histórico de odds - FORA do except, após refresh
+                    save_odd_history(session, g)
 
                     # Snapshot leve para resumo
                     chosen_db.append(g)
@@ -1788,8 +1802,6 @@ async def morning_scan_and_publish():
     _send_summary_safe(msg)
     logger.info("🧾 Varredura concluída — analisados=%d | selecionados=%d | salvos=%d",
                 analyzed_total, len(chosen_view), stored_total)
-    
-
 
 # ================================
 # Checagem da madrugada
@@ -1856,9 +1868,7 @@ async def night_scan_for_early_games():
                                 )
                         continue
 
-                    # ---------------------------
-                    # UPSERT seguro (sem acessar g antes de existir) + vírgula após game_url
-                    # ---------------------------
+                    # UPSERT seguro
                     g = session.query(Game).filter_by(ext_id=ev.ext_id, start_time=start_utc).one_or_none()
                     if g:
                         g.source_link = url
@@ -1880,7 +1890,7 @@ async def night_scan_for_early_games():
                         g = Game(
                             ext_id=ev.ext_id,
                             source_link=url,
-                            game_url=getattr(ev, "game_url", None),  # <-- vírgula aqui ✔
+                            game_url=getattr(ev, "game_url", None),
                             competition=ev.competition,
                             team_home=ev.team_home,
                             team_away=ev.team_away,
@@ -1924,7 +1934,10 @@ async def night_scan_for_early_games():
                     stored_total += 1
                     session.refresh(g)
 
-                    # Para o resumo
+                    # ✅ Salva histórico de odds
+                    save_odd_history(session, g)
+
+                    # ✅ Adiciona para o resumo (UMA VEZ SÓ)
                     early_games.append({
                         "id": g.id,
                         "team_home": g.team_home,
@@ -1970,7 +1983,6 @@ async def night_scan_for_early_games():
 
     logger.info("🌙 Varredura noturna concluída — analisados=%d | selecionados=%d",
                 analyzed_total, len(early_games))
-
 
 def format_night_scan_summary(date: datetime, analyzed: int, games: List[Dict[str, Any]]) -> str:
     """Formata o resumo da varredura noturna (00:00–06:00 do dia seguinte, no fuso APP_TZ)."""
@@ -2107,7 +2119,7 @@ async def rescan_watchlist_job():
                     g = Game(
                         ext_id=ext_id,
                         source_link=link,
-                        game_url=getattr(ev, "game_url", None),  # <- vírgula corrigida aqui ✔
+                        game_url=getattr(ev, "game_url", None),
                         competition=ev.competition,
                         team_home=ev.team_home,
                         team_away=ev.team_away,
@@ -2147,7 +2159,11 @@ async def rescan_watchlist_job():
                             session.commit()
                         else:
                             raise
+                            
                 session.refresh(g)
+                
+                # ✅ ADICIONE AQUI - Salva histórico de odds quando promove
+                save_odd_history(session, g)
 
                 # mensagem & agendamentos
                 try:
@@ -2169,6 +2185,7 @@ async def rescan_watchlist_job():
             logger.info("⬆️ WATCHLIST: promovidos %d itens: %s", len(upgraded), ", ".join(upgraded))
         else:
             logger.info("ℹ️ WATCHLIST: nenhuma promoção nesta passada.")
+
 
 # ================================
 # Jobs auxiliares
@@ -2253,7 +2270,7 @@ async def maybe_send_daily_wrapup():
             acc = (hits / total * 100) if total else 0.0
             gacc = global_accuracy(s) * 100
             lines = [
-                f"📊 {h('Resumo do dia')} ({today.strftime('%d/%m/%Y')})",
+                f"📊 {h('RESUMO DO DIA')} ({today.strftime('%d/%m/%Y')})",
                 f"Palpites dados: {h(str(total))} | Acertos: {h(str(hits))} | Assertividade do dia: {h(f'{acc:.1f}%')}",
                 f"Assertividade geral do script: {h(f'{gacc:.1f}%')}",
             ]
