@@ -54,6 +54,30 @@ USER_AGENT = os.getenv(
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36"
 )
 
+# --- High confidence gate ---
+HIGH_CONF_THRESHOLD = float(os.getenv("HIGH_CONF_THRESHOLD", "0.60"))  # ajuste fino
+HIGH_CONF_SENT_MARK = "[HC_SENT]"
+
+def is_high_conf(game: "Game") -> bool:
+    """Alta confiança baseada em pick_prob (fallback para campos legados)."""
+    val = (
+        getattr(game, "pick_prob", None)
+        or getattr(game, "pick_confidence", None)
+        or getattr(game, "confidence", None)
+        or 0.0
+    )
+    try:
+        return float(val) >= HIGH_CONF_THRESHOLD
+    except Exception:
+        return False
+
+def was_high_conf_notified(game: "Game") -> bool:
+    return HIGH_CONF_SENT_MARK in (game.pick_reason or "")
+
+def mark_high_conf_notified(game: "Game") -> None:
+    game.pick_reason = (f"{(game.pick_reason or '').strip()} {HIGH_CONF_SENT_MARK}").strip()
+
+
 # Se desejar complementar via .env:
 # BETNACIONAL_LINKS=https://betnacional.bet.br/events/1/0/7,https://...
 EXTRA_LINKS = [s.strip() for s in os.getenv("BETNACIONAL_LINKS", "").split(",") if s.strip()]
@@ -1436,6 +1460,7 @@ async def monitor_live_games_job():
 async def hourly_rescan_job():
     """
     Job executado a cada hora para reavaliar as odds dos jogos do dia.
+    Dispara notificação apenas quando o jogo virar ALTA CONFIANÇA (e não repetir).
     """
     logger.info("🔄 Iniciando reavaliação horária dos jogos do dia.")
     now_utc = datetime.now(pytz.UTC)
@@ -1444,7 +1469,7 @@ async def hourly_rescan_job():
     with SessionLocal() as session:
         # Busca todos os jogos agendados para hoje que ainda não começaram
         day_start = ZONE.localize(datetime(today.year, today.month, today.day, 0, 0)).astimezone(pytz.UTC)
-        day_end = ZONE.localize(datetime(today.year, today.month, today.day, 23, 59)).astimezone(pytz.UTC)
+        day_end   = ZONE.localize(datetime(today.year, today.month, today.day, 23, 59)).astimezone(pytz.UTC)
 
         games_to_rescan = (
             session.query(Game)
@@ -1459,7 +1484,7 @@ async def hourly_rescan_job():
 
         for game in games_to_rescan:
             try:
-                # Re-fetch da página do jogo (placeholder: você pode reparsear o evento depois)
+                # Re-fetch da página do jogo (placeholder)
                 _ = await _fetch_requests_async(game.source_link)
 
                 # Exemplo simples: simula melhora de +2% nas odds atuais
@@ -1467,35 +1492,89 @@ async def hourly_rescan_job():
                 new_odds_draw = (game.odds_draw or 0.0) * 1.02
                 new_odds_away = (game.odds_away or 0.0) * 1.02
 
-                # Recalcula a decisão (passa game_id para habilitar ajuste por histórico)
+                # Recalcula a decisão
                 will, pick, pprob, pev, reason = decide_bet(
                     new_odds_home, new_odds_draw, new_odds_away,
                     game.competition, (game.team_home, game.team_away),
                     game_id=game.id,
                 )
 
-                # Se o novo EV é 5% melhor que o antigo, atualiza
+                prev_high = (game.pick_prob or 0.0) >= HIGH_CONF_THRESHOLD
+                new_high  = (pprob or 0.0) >= HIGH_CONF_THRESHOLD
+
+                # 1) Se virou ALTA CONFIANÇA agora (transição) e ainda não foi notificado -> dispara
+                if new_high and (not prev_high) and not was_high_conf_notified(game):
+                    game.odds_home  = new_odds_home
+                    game.odds_draw  = new_odds_draw
+                    game.odds_away  = new_odds_away
+                    game.pick       = pick
+                    game.pick_prob  = pprob
+                    game.pick_ev    = pev
+                    game.pick_reason = (reason or "Upgrade horário") + " | HIGH_TRUST"
+                    # marca flags de alta confiança
+                    try:
+                        game.tags = ((game.tags or "") + " HIGH_TRUST").strip()
+                        setattr(game, "live_priority", True)
+                    except Exception:
+                        pass
+                    session.commit()
+
+                    # histórico antes da notificação
+                    save_odd_history(session, game)
+
+                    # notifica uma única vez
+                    try:
+                        tg_send_message(fmt_pick_now(game))
+                        mark_high_conf_notified(game)
+                        session.commit()
+                    except Exception:
+                        logger.exception("Falha ao notificar alta confiança (hourly) id=%s", game.id)
+
+                    # garante agendamentos/prioridade
+                    try:
+                        asyncio.create_task(_schedule_all_for_game(game))
+                    except Exception:
+                        logger.exception("Falha ao agendar jobs após alta confiança id=%s", game.id)
+
+                    logger.info("🚀 Virou ALTA CONFIANÇA (id=%s) prob=%.3f", game.id, pprob)
+                    continue  # já tratou este jogo
+
+                # 2) Caso não tenha virado alta confiança: mantém seu critério original de upgrade por EV
                 if will and pev > ((game.pick_ev or 0.0) + 0.05):
                     old_ev = game.pick_ev or 0.0
-                    game.odds_home = new_odds_home
-                    game.odds_draw = new_odds_draw
-                    game.odds_away = new_odds_away
-                    game.pick = pick
-                    game.pick_prob = pprob
-                    game.pick_ev = pev
+                    game.odds_home  = new_odds_home
+                    game.odds_draw  = new_odds_draw
+                    game.odds_away  = new_odds_away
+                    game.pick       = pick
+                    game.pick_prob  = pprob
+                    game.pick_ev    = pev
                     game.pick_reason = f"Upgrade horário (EV antigo: {old_ev*100:.1f}%)"
                     session.commit()
 
-                    # Salva histórico após atualização (📌 adição)
+                    # Salva histórico
                     save_odd_history(session, game)
 
-                    # Envia notificação
-                    tg_send_message(
-                        f"📈 {h('Upgrade de Odd')} para {game.team_home} vs {game.team_away}\n"
-                        f"Novo Pick: {h(pick)} | Novo EV: {pev*100:.1f}% (Antigo: {old_ev*100:.1f}%)\n"
-                        f"Odds Atualizadas: {new_odds_home:.2f}/{new_odds_draw:.2f}/{new_odds_away:.2f}"
-                    )
-                    logger.info(f"📈 Jogo {game.id} atualizado com melhor odd.")
+                    # 🔕 Não notificar upgrades "médios": só notificamos se for alta confiança e ainda não notificado
+                    if (game.pick_prob or 0.0) >= HIGH_CONF_THRESHOLD and not was_high_conf_notified(game):
+                        try:
+                            tg_send_message(fmt_pick_now(game))
+                            mark_high_conf_notified(game)
+                            session.commit()
+                            # garante prioridade
+                            try:
+                                game.tags = ((game.tags or "") + " HIGH_TRUST").strip()
+                                setattr(game, "live_priority", True)
+                                session.commit()
+                            except Exception:
+                                session.rollback()
+                            asyncio.create_task(_schedule_all_for_game(game))
+                        except Exception:
+                            logger.exception("Falha ao notificar upgrade (alta confiança) id=%s", game.id)
+                    else:
+                        logger.info(
+                            "📈 Jogo %s atualizado por EV, sem notificação (prob=%.3f; high_notified=%s)",
+                            game.id, game.pick_prob or 0.0, was_high_conf_notified(game)
+                        )
 
             except Exception as e:
                 logger.exception(f"Erro ao reavaliar jogo {game.id}: {e}")
@@ -1648,7 +1727,14 @@ async def morning_scan_and_publish():
                         ev.odds_home, ev.odds_draw, ev.odds_away, ev.competition, (ev.team_home, ev.team_away)
                     )
 
-                    # Se não virou pick, avaliar WATCHLIST
+                    # 🚀 PASSE LIVRE: alta confiança ignora gates normais
+                    free_pass = (pprob or 0.0) >= HIGH_CONF_THRESHOLD
+                    if not will and free_pass:
+                        will = True
+                        # preserva motivo original e marcação de alta confiança
+                        reason = (reason or "Passe livre") + " | HIGH_TRUST"
+
+                    # Se (ainda) não virou pick, avaliar WATCHLIST
                     if not will:
                         MIN_EV = float(os.getenv("MIN_EV", "-0.02"))
                         now_utc = datetime.now(pytz.UTC)
@@ -1743,6 +1829,15 @@ async def morning_scan_and_publish():
                     stored_total += 1
                     session.refresh(g)  # garante id e campos atualizados
 
+                    # Marca e prioriza se for alta confiança (pode marcar depois do refresh)
+                    if free_pass or ((g.pick_prob or 0.0) >= HIGH_CONF_THRESHOLD):
+                        try:
+                            g.tags = ((g.tags or "") + " HIGH_TRUST").strip()
+                            session.commit()
+                        except Exception:
+                            session.rollback()
+                        # prioridade do live será persistida em _schedule_all_for_game
+
                     # ✅ Salva histórico de odds - FORA do except, após refresh
                     save_odd_history(session, g)
 
@@ -1777,13 +1872,19 @@ async def morning_scan_and_publish():
                         ev.start_local_str, url
                     )
 
-                    # ---- Envio imediato do sinal
+                    # ---- Envio imediato do sinal (APENAS alta confiança, sem duplicar)
                     try:
-                        tg_send_message(fmt_pick_now(g))
+                        if (g.pick_prob or 0.0) >= HIGH_CONF_THRESHOLD and not was_high_conf_notified(g):
+                            tg_send_message(fmt_pick_now(g))
+                            mark_high_conf_notified(g)
+                            session.commit()
+                        else:
+                            logger.info("🔒 Sinal SUPRIMIDO (confiança < alta ou já enviado) id=%s prob=%.2f",
+                                        g.id, g.pick_prob or 0.0)
                     except Exception:
                         logger.exception("Falha ao enviar sinal imediato do jogo id=%s", g.id)
 
-                    # ---- Agendamentos (tudo em UTC aware)
+                    # ---- Agendamentos (tudo em UTC aware) — garantimos prioridade dentro dela
                     await _schedule_all_for_game(g)
 
                 except Exception:
@@ -1803,10 +1904,10 @@ async def morning_scan_and_publish():
     logger.info("🧾 Varredura concluída — analisados=%d | selecionados=%d | salvos=%d",
                 analyzed_total, len(chosen_view), stored_total)
 
+
 # ================================
 # Checagem da madrugada
 # ================================
-
 async def night_scan_for_early_games():
     """Varredura noturna específica para jogos da madrugada (00:00 às 06:00)"""
     logger.info("🌙 Iniciando varredura noturna para jogos da madrugada...")
@@ -1850,6 +1951,12 @@ async def night_scan_for_early_games():
                     will, pick, pprob, pev, reason = decide_bet(
                         ev.odds_home, ev.odds_draw, ev.odds_away, ev.competition, (ev.team_home, ev.team_away)
                     )
+
+                    # 🚀 PASSE LIVRE: alta confiança entra mesmo sem will
+                    free_pass = (pprob or 0.0) >= HIGH_CONF_THRESHOLD
+                    if not will and free_pass:
+                        will = True
+                        reason = (reason or "Passe livre") + " | HIGH_TRUST"
 
                     if not will:
                         # Ainda assim, avaliar ADD na watchlist
@@ -1934,6 +2041,14 @@ async def night_scan_for_early_games():
                     stored_total += 1
                     session.refresh(g)
 
+                    # Marca tag se for alta confiança
+                    if free_pass or ((g.pick_prob or 0.0) >= HIGH_CONF_THRESHOLD):
+                        try:
+                            g.tags = ((g.tags or "") + " HIGH_TRUST").strip()
+                            session.commit()
+                        except Exception:
+                            session.rollback()
+
                     # ✅ Salva histórico de odds
                     save_odd_history(session, g)
 
@@ -1959,12 +2074,19 @@ async def night_scan_for_early_games():
                         getattr(ev, "start_local_str", "?")
                     )
 
-                    # Envio do pick + agendamentos
+                    # 🔔 Envio do pick — SOMENTE se alta confiança e sem duplicar
                     try:
-                        tg_send_message(fmt_pick_now(g))
+                        if (g.pick_prob or 0.0) >= HIGH_CONF_THRESHOLD and not was_high_conf_notified(g):
+                            tg_send_message(fmt_pick_now(g))
+                            mark_high_conf_notified(g)
+                            session.commit()
+                        else:
+                            logger.info("🔒 Pick SUPRIMIDO (confiança < alta ou já enviado) id=%s prob=%.2f",
+                                        g.id, g.pick_prob or 0.0)
                     except Exception:
                         logger.exception("Falha ao enviar pick noturno id=%s", g.id)
 
+                    # Agendamentos (prioridade será tratada dentro dela)
                     await _schedule_all_for_game(g)
 
                 except Exception:
@@ -1983,6 +2105,7 @@ async def night_scan_for_early_games():
 
     logger.info("🌙 Varredura noturna concluída — analisados=%d | selecionados=%d",
                 analyzed_total, len(early_games))
+
 
 def format_night_scan_summary(date: datetime, analyzed: int, games: List[Dict[str, Any]]) -> str:
     """Formata o resumo da varredura noturna (00:00–06:00 do dia seguinte, no fuso APP_TZ)."""
@@ -2034,6 +2157,7 @@ async def rescan_watchlist_job():
     Rechecagem periódica da watchlist.
     Força o uso do Playwright para garantir que os jogos sejam carregados corretamente.
     Promove itens da watchlist a PICK quando cruzam os critérios.
+    Alta confiança tem passe livre (entra mesmo sem cruzar EV/PROB).
     """
     logger.info("🔄 Rechecando WATCHLIST…")
     now_utc = datetime.now(pytz.UTC)
@@ -2077,16 +2201,21 @@ async def rescan_watchlist_job():
                 removed_expired += wl_remove(session, lambda x, eid=ext_id: x["ext_id"] == eid)
                 continue
 
-            # expirado?
-            if start_utc <= now_utc:
-                removed_expired += wl_remove(
-                    session,
-                    lambda x, eid=ext_id, st=it["start_time"]: x["ext_id"] == eid and x["start_time"] == st
-                )
-                continue
-
             page = page_cache.get(link, {})
             ev = page.get(ext_id)
+
+            # === Remoção: só expira se passou do horário; alta confiança fica até +6h ===
+            if start_utc <= now_utc:
+                high_conf = is_high_conf(ev) if ev is not None else False
+                if high_conf and now_utc <= (start_utc + timedelta(hours=6)):
+                    logger.info("⏰ Mantido (HIGH_TRUST até +6h): %s (%s)", ext_id, it.get("start_time"))
+                else:
+                    removed_expired += wl_remove(
+                        session,
+                        lambda x, eid=ext_id, st=it["start_time"]: x["ext_id"] == eid and x["start_time"] == st
+                    )
+                continue
+
             if not ev:
                 # evento sumiu da página; pode ser mudança de card/rota — mantemos temporariamente
                 continue
@@ -2096,8 +2225,17 @@ async def rescan_watchlist_job():
                 ev.odds_home, ev.odds_draw, ev.odds_away, ev.competition, (ev.team_home, ev.team_away)
             )
 
-            if will and (pprob >= MIN_PROB) and (pev >= MIN_EV):
-                # promover a pick (UPSERT seguro)
+            # 🚀 PASSE LIVRE: alta confiança promove mesmo sem cruzar thresholds
+            free_pass = is_high_conf(ev)
+            promote = free_pass or (will and (pprob >= MIN_PROB) and (pev >= MIN_EV))
+
+            if promote:
+                # UPSERT seguro
+                if free_pass:
+                    reason = (reason or "Upgrade watchlist") + " | HIGH_TRUST"
+                else:
+                    reason = "Upgrade watchlist"
+
                 g = session.query(Game).filter_by(ext_id=ext_id, start_time=start_utc).one_or_none()
                 if g:
                     g.source_link = link
@@ -2112,8 +2250,14 @@ async def rescan_watchlist_job():
                     g.pick_prob = pprob
                     g.pick_ev = pev
                     g.will_bet = True
-                    g.pick_reason = "Upgrade watchlist"
+                    g.pick_reason = reason
                     g.status = "scheduled"
+                    if free_pass:
+                        try:
+                            g.tags = ((g.tags or "") + " HIGH_TRUST").strip()
+                            setattr(g, "live_priority", True)
+                        except Exception:
+                            pass
                     session.commit()
                 else:
                     g = Game(
@@ -2131,14 +2275,13 @@ async def rescan_watchlist_job():
                         pick_prob=pprob,
                         pick_ev=pev,
                         will_bet=True,
-                        pick_reason="Upgrade watchlist",
+                        pick_reason=reason,
                         status="scheduled",
                     )
                     session.add(g)
                     try:
                         session.commit()
                     except IntegrityError:
-                        # Corrida: alguém inseriu no meio — atualiza o existente
                         session.rollback()
                         g = session.query(Game).filter_by(ext_id=ext_id, start_time=start_utc).one_or_none()
                         if g:
@@ -2154,23 +2297,42 @@ async def rescan_watchlist_job():
                             g.pick_prob = pprob
                             g.pick_ev = pev
                             g.will_bet = True
-                            g.pick_reason = "Upgrade watchlist"
+                            g.pick_reason = reason
                             g.status = "scheduled"
+                            if free_pass:
+                                try:
+                                    g.tags = ((g.tags or "") + " HIGH_TRUST").strip()
+                                    setattr(g, "live_priority", True)
+                                except Exception:
+                                    pass
                             session.commit()
                         else:
                             raise
-                            
+
                 session.refresh(g)
-                
-                # ✅ ADICIONE AQUI - Salva histórico de odds quando promove
+
+                # ✅ Salva histórico de odds quando promove
                 save_odd_history(session, g)
 
-                # mensagem & agendamentos
+                # ✅ **NOTIFICAÇÃO ATUALIZADA** — só envia se ALTA CONFIANÇA e sem duplicar
                 try:
-                    tg_send_message(fmt_watch_upgrade(g))
-                    asyncio.create_task(_schedule_all_for_game(g))
+                    if (g.pick_prob or 0.0) >= HIGH_CONF_THRESHOLD and not was_high_conf_notified(g):
+                        tg_send_message(fmt_watch_upgrade(g))
+                        mark_high_conf_notified(g)
+                        session.commit()
+                    else:
+                        logger.info(
+                            "🔒 Upgrade sem notificação (confiança<alta ou já notificado) id=%s prob=%.3f",
+                            g.id, g.pick_prob or 0.0
+                        )
                 except Exception:
                     logger.exception("Falha ao notificar upgrade watchlist id=%s", g.id)
+
+                # Agendamentos continuam sempre
+                try:
+                    asyncio.create_task(_schedule_all_for_game(g))
+                except Exception:
+                    logger.exception("Falha ao agendar jobs para id=%s", g.id)
 
                 # remover esse item da watchlist
                 wl_remove(
@@ -2201,55 +2363,114 @@ async def send_reminder_job(game_id: int):
 # --- SUBSTITUIÇÃO: Função de Watcher Real ---
 async def watch_game_until_end_job(game_id: int):
     """Watcher real: aguarda o jogo terminar e scrapeia o resultado final."""
+    # Helpers
+    def to_utc(dt: datetime | None) -> datetime | None:
+        if dt is None:
+            return None
+        if dt.tzinfo is None:
+            return pytz.UTC.localize(dt)
+        return dt.astimezone(pytz.UTC)
+
     with SessionLocal() as s:
         g = s.get(Game, game_id)
         if not g:
-            logger.warning(f"Jogo com ID {game_id} não encontrado no banco de dados.")
+            logger.warning("Jogo com ID %s não encontrado no banco de dados.", game_id)
             return
-        start_time_utc = g.start_time
+        if g.status == "ended":
+            logger.info("⏭️ Jogo id=%s já está encerrado. Pulando watcher.", game_id)
+            return
+
+        start_time_utc = to_utc(g.start_time)
         home, away, gid = g.team_home, g.team_away, g.id
         ext_id, source_link = g.ext_id, g.source_link
+
+        # Fallback se start_time estiver ausente (evita travar o job)
+        if start_time_utc is None:
+            logger.warning("start_time ausente para id=%s; usando agora como base.", gid)
+            start_time_utc = datetime.now(pytz.UTC)
+
         logger.info("👀 Monitorando para resultado: %s vs %s (id=%s)", home, away, gid)
 
-    # Calcula um tempo estimado para o fim do jogo (2h após o início)
-    end_eta = start_time_utc + timedelta(hours=2, minutes=30) # 2h30min para cobrir prorrogações
+    # ETA de término: 2h30 após o início (cobre intervalo + prorrogação)
+    # Se o relógio já passou, agenda do 'agora' mesmo para não dormir negativo.
+    now_utc = datetime.now(pytz.UTC)
+    base = start_time_utc if start_time_utc > now_utc else now_utc
+    end_eta = base + timedelta(hours=2, minutes=30)
 
-    # Aguarda até o tempo estimado de término
-    while datetime.now(tz=pytz.UTC) < end_eta:
-        await asyncio.sleep(300)  # Verifica a cada 5 minutos
+    logger.info("⏳ Aguardando até %s (UTC) para tentar resultado do jogo id=%s",
+                end_eta.isoformat(), gid)
 
-    # Após o tempo estimado, tenta buscar o resultado
-    logger.info(f"Tentando scrapear resultado para jogo {gid} ({home} vs {away})")
-    outcome = await fetch_game_result(ext_id, source_link)
+    # Espera em passos de 5 min, respeitando cancelamentos
+    try:
+        while datetime.now(pytz.UTC) < end_eta:
+            await asyncio.sleep(300)  # 5 min
+    except asyncio.CancelledError:
+        logger.info("🛑 Watcher cancelado para jogo id=%s", gid)
+        raise
+    except Exception:
+        logger.exception("Erro inesperado no loop de espera do watcher (id=%s). Prosseguindo para o scrape.", gid)
 
-    # Se não conseguir na primeira tentativa, tenta mais algumas vezes
+    # Tenta buscar o resultado com algumas tentativas
+    async def _try_fetch():
+        try:
+            return await fetch_game_result(ext_id, source_link)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.exception("Falha ao buscar resultado (id=%s): %s", gid, e)
+            return None
+
+    logger.info("🔎 Tentando scrapear resultado para jogo %s (%s vs %s)", gid, home, away)
+    outcome = await _try_fetch()
+
     retry_count = 0
     max_retries = 3
     while outcome is None and retry_count < max_retries:
-        logger.info(f"Tentativa {retry_count + 1} falhou. Nova tentativa em 10 minutos.")
-        await asyncio.sleep(600)  # Espera 10 minutos
-        outcome = await fetch_game_result(ext_id, source_link)
         retry_count += 1
+        logger.info("♻️ Tentativa %d/%d falhou (id=%s). Nova tentativa em 10 minutos.",
+                    retry_count, max_retries, gid)
+        try:
+            await asyncio.sleep(600)  # 10 min
+        except asyncio.CancelledError:
+            logger.info("🛑 Watcher cancelado durante backoff (id=%s)", gid)
+            raise
+        outcome = await _try_fetch()
 
+    # Persiste o resultado
     with SessionLocal() as s:
         g = s.get(Game, game_id)
         if not g:
+            logger.warning("Jogo id=%s não encontrado ao salvar resultado.", game_id)
             return
-        g.status = "ended"
+
+        # Não sobrescreve se alguém já marcou como ended no meio do caminho
+        if g.status != "ended":
+            g.status = "ended"
+
         g.outcome = outcome
         if outcome is not None:
             g.hit = (outcome == g.pick)
             result_msg = "✅ ACERTOU" if g.hit else "❌ ERROU"
-            logger.info("🏁 Resultado Obtido id=%s | palpite=%s | resultado=%s | %s", g.id, g.pick, g.outcome, result_msg)
+            logger.info("🏁 Resultado Obtido id=%s | palpite=%s | resultado=%s | %s",
+                        g.id, g.pick, g.outcome, result_msg)
         else:
-            g.hit = None  # Marca como não verificado
+            g.hit = None  # não verificado
             logger.warning("🏁 Resultado NÃO OBTIDO para id=%s", g.id)
 
         s.commit()
-        tg_send_message(fmt_result(g))
 
-    # Após atualizar o jogo, verifica se pode enviar o resumo diário
-    await maybe_send_daily_wrapup()
+        # Mensagem final
+        try:
+            tg_send_message(fmt_result(g))
+        except Exception:
+            logger.exception("Falha ao enviar mensagem de resultado (id=%s).", g.id)
+
+    # Após atualizar o jogo, tenta enviar wrap-up diário
+    try:
+        await maybe_send_daily_wrapup()
+    except Exception:
+        logger.exception("Falha ao tentar enviar o resumo diário após jogo id=%s.", gid)
+
 
 async def maybe_send_daily_wrapup():
     today = datetime.now(ZONE).date()
