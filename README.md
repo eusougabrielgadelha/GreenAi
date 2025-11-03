@@ -65,46 +65,28 @@ playwright install chromium
 
 ### Passo 5: Configurar Variáveis de Ambiente
 
-Crie o arquivo `.env` na raiz do projeto:
+Copie o arquivo template e configure suas credenciais:
 
 ```bash
-nano ~/betauto/.env
+cd ~/betauto
+cp env.template .env
+nano .env
 ```
 
-Conteúdo mínimo necessário:
+**IMPORTANTE**: Substitua apenas os valores marcados com `SEU_...`:
+- `TELEGRAM_TOKEN=SEU_TOKEN_AQUI` → Seu token do bot Telegram
+- `TELEGRAM_CHAT_ID=SEU_CHAT_ID_AQUI` → Seu chat ID do Telegram
 
+Os demais valores podem ser mantidos como estão (são padrões funcionais) ou ajustados conforme necessário.
+
+**Conteúdo mínimo obrigatório**:
 ```env
-# Telegram
 TELEGRAM_TOKEN=seu_token_aqui
 TELEGRAM_CHAT_ID=seu_chat_id_aqui
-
-# Timezone
-APP_TZ=America/Sao_Paulo
-MORNING_HOUR=6
-
-# Banco de Dados
-DB_URL=sqlite:///betauto.sqlite3
-
-# Scraping
-SCRAPE_BACKEND=auto
-REQUESTS_TIMEOUT=20
-
-# Configurações de Aposta
-HIGH_CONF_THRESHOLD=0.60
-MIN_EV=0.05
-MIN_PROB=0.45
-
-# Links de Apostas (obrigatório pelo menos um)
 BETTING_LINK_1=https://betnacional.bet.br/events/1/0/390
-# BETTING_LINK_2=https://outro-link.com
-# BETTING_LINK_3=https://mais-um-link.com
-
-# Opcionais
-ENABLE_NIGHT_SCAN=false
-NIGHT_SCAN_HOUR=22
-DAILY_SUMMARY_HOUR=23
-WATCHLIST_RESCAN_MIN=5
 ```
+
+Veja o arquivo `env.template` para todas as opções disponíveis.
 
 ### Passo 6: Testar a Instalação
 
