@@ -6,7 +6,11 @@ from typing import Any, Dict, List
 from models.database import Game, SessionLocal
 from config.settings import ZONE
 from utils.stats import global_accuracy, get_weekly_stats, to_aware_utc, get_lifetime_accuracy, get_daily_summary
-from notifications.telegram import h
+
+
+def h(b: str) -> str:
+    """Helper para formatação HTML (bold)."""
+    return f"<b>{b}</b>"
 
 
 def esc(s: str) -> str:
