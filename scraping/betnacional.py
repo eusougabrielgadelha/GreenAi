@@ -171,6 +171,17 @@ def parse_events_from_api(json_data: Dict[str, Any], source_url: str) -> List[An
         if not event_id:
             continue
         
+        # FILTRAR POR MARKET_STATUS_ID: só processar mercados disponíveis (>= 0)
+        market_status_id = odd_item.get('market_status_id', 1)
+        if market_status_id < 0:  # -1 = mercado fechado/suspenso
+            logger.debug(f"Market {odd_item.get('market_id')} do evento {event_id} ignorado: status {market_status_id} (fechado)")
+            continue
+        
+        # Só processar Market ID 1 (Resultado Final) para eventos pré-jogo
+        market_id = odd_item.get('market_id', 1)
+        if market_id != 1:
+            continue  # Outros mercados são processados separadamente
+        
         if event_id not in events_dict:
             events_dict[event_id] = {
                 'event_id': event_id,
@@ -181,16 +192,25 @@ def parse_events_from_api(json_data: Dict[str, Any], source_url: str) -> List[An
                 'tournament_name': odd_item.get('tournament_name', ''),
                 'category_name': odd_item.get('category_name', ''),
                 'is_live': bool(odd_item.get('is_live', 0)),
-                'odds': {}
+                'odds': {},
+                'odds_previous': {}  # Para tracking de mudanças
             }
         
         # Extrair odds por outcome_id (1=home, 2=draw, 3=away)
         outcome_id = odd_item.get('outcome_id', '')
         odd_value = odd_item.get('odd')
+        previous_odd = odd_item.get('previous_odd')
         
         if outcome_id and odd_value:
             try:
                 events_dict[event_id]['odds'][outcome_id] = float(odd_value)
+                
+                # Armazenar previous_odd se disponível para detectar mudanças
+                if previous_odd is not None:
+                    try:
+                        events_dict[event_id]['odds_previous'][outcome_id] = float(previous_odd)
+                    except (ValueError, TypeError):
+                        pass
             except (ValueError, TypeError):
                 pass
     
@@ -459,22 +479,52 @@ def parse_event_odds_from_api(json_data: Dict[str, Any]) -> Dict[str, Any]:
         if not market_id:
             continue
         
+        # FILTRAR POR MARKET_STATUS_ID: só processar mercados disponíveis (>= 0)
+        market_status_id = odd_item.get('market_status_id', 1)
+        if market_status_id < 0:  # -1 = mercado fechado/suspenso
+            logger.debug(f"Market {market_id} ignorado: status {market_status_id} (fechado)")
+            continue
+        
         if market_id not in markets_dict:
+            # Usar market_name se disponível para identificar o tipo de mercado
+            market_name = odd_item.get('market_name', '')
             markets_dict[market_id] = {
                 'market_id': market_id,
-                'market_status_id': odd_item.get('market_status_id', 1),
-                'odds': {}
+                'market_name': market_name,  # Nome do mercado para identificação
+                'market_status_id': market_status_id,
+                'odds': {},
+                'odds_previous': {}  # Para tracking de mudanças
             }
         
         outcome_id = odd_item.get('outcome_id', '')
+        outcome_name = odd_item.get('outcome_name', '')  # Nome do outcome
         odd_value = odd_item.get('odd')
+        previous_odd = odd_item.get('previous_odd')
         
         if outcome_id and odd_value:
             try:
                 odd_float = float(odd_value)
                 # Validar range (1.0 a 100.0)
                 if 1.0 <= odd_float <= 100.0:
-                    markets_dict[market_id]['odds'][outcome_id] = odd_float
+                    # Armazenar outcome com nome se disponível
+                    outcome_data = {
+                        'odd': odd_float,
+                        'name': outcome_name if outcome_name else None
+                    }
+                    
+                    # Se previous_odd disponível, armazenar para detectar mudanças
+                    if previous_odd is not None:
+                        try:
+                            prev_odd_float = float(previous_odd)
+                            if 1.0 <= prev_odd_float <= 100.0:
+                                outcome_data['previous_odd'] = prev_odd_float
+                                # Calcular variação percentual
+                                variation = ((odd_float - prev_odd_float) / prev_odd_float) * 100
+                                outcome_data['variation_pct'] = variation
+                        except (ValueError, TypeError):
+                            pass
+                    
+                    markets_dict[market_id]['odds'][outcome_id] = outcome_data
                 else:
                     logger.debug(f"Odd {outcome_id} inválida (fora do range): {odd_float}")
             except (ValueError, TypeError) as e:
@@ -495,23 +545,27 @@ def parse_event_odds_from_api(json_data: Dict[str, Any]) -> Dict[str, Any]:
     if 1 in markets_dict:
         market_1 = markets_dict[1]
         odds = market_1.get('odds', {})
+        market_name = market_1.get('market_name', 'Resultado Final')
         
         match_result = {}
-        if '1' in odds:
-            match_result['Casa'] = odds['1']
-        if '2' in odds:
-            match_result['Empate'] = odds['2']
-        if '3' in odds:
-            match_result['Fora'] = odds['3']
+        for outcome_id in ['1', '2', '3']:
+            if outcome_id in odds:
+                outcome_data = odds[outcome_id]
+                if isinstance(outcome_data, dict):
+                    odd_value = outcome_data.get('odd', outcome_data)
+                    match_result['Casa' if outcome_id == '1' else 'Empate' if outcome_id == '2' else 'Fora'] = odd_value
+                else:
+                    match_result['Casa' if outcome_id == '1' else 'Empate' if outcome_id == '2' else 'Fora'] = outcome_data
         
         if match_result:
             data["markets"]["match_result"] = {
-                "display_name": "Resultado Final",
-                "options": match_result
+                "display_name": market_name if market_name else "Resultado Final",
+                "options": match_result,
+                "market_id": 1
             }
     
     # Processar outros mercados dinamicamente
-    # Identificar Placar Exato, Gols Exatos e Handicap Asiático pelos outcome_ids
+    # Usar market_name para identificar o tipo de mercado quando disponível
     
     for market_id, market_data in markets_dict.items():
         if market_id == 1:  # Já processado acima
@@ -521,57 +575,78 @@ def parse_event_odds_from_api(json_data: Dict[str, Any]) -> Dict[str, Any]:
         if not odds:
             continue
         
-        # Tentar identificar o tipo de mercado pelos outcome_ids
+        market_name = market_data.get('market_name', '').lower() if market_data.get('market_name') else ''
         outcome_ids = list(odds.keys())
         
-        # PLACAR EXATO / GOLS EXATOS
-        # Geralmente tem outcome_ids como "0-0", "1-0", "0-1", "2-1", etc.
-        if any('-' in oid or 'x' in oid.lower() for oid in outcome_ids):
-            # Verificar se é formato de placar (ex: "0-0", "1-0", "2-1")
-            score_pattern = re.compile(r'^\d+[-x]\d+$', re.IGNORECASE)
-            if any(score_pattern.match(oid) for oid in outcome_ids):
-                correct_score = {}
-                for oid, odd_val in odds.items():
-                    # Normalizar formato: "0-0" ou "0x0" → "0-0"
-                    normalized_oid = oid.replace('x', '-').replace('X', '-')
-                    correct_score[normalized_oid] = odd_val
-                
-                if correct_score:
-                    data["markets"]["correct_score"] = {
-                        "display_name": "Placar Exato",
-                        "options": correct_score,
-                        "market_id": market_id
-                    }
-                continue
+        # USAR MARKET_NAME PARA IDENTIFICAR TIPO DE MERCADO
+        market_key = None
+        display_name = market_data.get('market_name', f'Market {market_id}')
         
-        # HANDICAP ASIÁTICO
-        # Geralmente tem outcome_ids como "H1", "H2", "H-1", "H-2", "H0", "H0.5", etc.
-        # ou "AH1", "AH2", etc.
-        handicap_pattern = re.compile(r'^H[-]?[\d.]+$|^AH[-]?[\d.]+$', re.IGNORECASE)
-        if any(handicap_pattern.match(oid) for oid in outcome_ids):
-            asian_handicap = {}
-            for oid, odd_val in odds.items():
-                asian_handicap[oid] = odd_val
+        # Identificar por market_name
+        if 'placar' in market_name or 'exato' in market_name or 'gols exatos' in market_name:
+            market_key = "correct_score"
+            display_name = "Placar Exato" if 'placar' in market_name else "Gols Exatos"
+        elif 'handicap' in market_name and 'asiático' in market_name:
+            market_key = "asian_handicap"
+            display_name = "Handicap Asiático"
+        elif 'ambos' in market_name and 'marcam' in market_name:
+            market_key = "btts"
+            display_name = "Ambos os Times Marcam"
+        elif 'total' in market_name and 'gols' in market_name:
+            market_key = "total_goals"
+            display_name = "Total de Gols"
+        
+        # Se não identificou por market_name, tentar por outcome_ids
+        if not market_key:
+            # PLACAR EXATO / GOLS EXATOS
+            # Outcomes especiais: pre:outcometext: ou ccc:outcometext: ou formato "0-0"
+            if any(oid.startswith('pre:outcometext:') or oid.startswith('ccc:outcometext:') for oid in outcome_ids):
+                market_key = "correct_score"
+                display_name = "Placar Exato"
+            elif any('-' in oid or 'x' in oid.lower() for oid in outcome_ids):
+                score_pattern = re.compile(r'^\d+[-x]\d+$', re.IGNORECASE)
+                if any(score_pattern.match(oid) for oid in outcome_ids):
+                    market_key = "correct_score"
+                    display_name = "Placar Exato"
             
-            if asian_handicap:
-                data["markets"]["asian_handicap"] = {
-                    "display_name": "Handicap Asiático",
-                    "options": asian_handicap,
-                    "market_id": market_id
-                }
-            continue
+            # HANDICAP ASIÁTICO
+            if not market_key:
+                handicap_pattern = re.compile(r'^H[-]?[\d.]+$|^AH[-]?[\d.]+$', re.IGNORECASE)
+                if any(handicap_pattern.match(oid) for oid in outcome_ids):
+                    market_key = "asian_handicap"
+                    display_name = "Handicap Asiático"
         
-        # OUTROS MERCADOS - Processar genéricamente
-        # Se não identificamos, armazenar como mercado genérico
-        generic_options = {}
-        for oid, odd_val in odds.items():
-            generic_options[oid] = odd_val
+        # Se ainda não identificou, usar nome genérico
+        if not market_key:
+            market_key = f"market_{market_id}"
+            display_name = market_data.get('market_name', f'Market {market_id}')
         
-        if generic_options:
-            data["markets"][f"market_{market_id}"] = {
-                "display_name": f"Mercado {market_id}",
-                "options": generic_options,
-                "market_id": market_id
+        # Processar odds do mercado
+        market_options = {}
+        for oid, outcome_data in odds.items():
+            if isinstance(outcome_data, dict):
+                odd_value = outcome_data.get('odd', outcome_data)
+                # Usar outcome_name se disponível, senão usar outcome_id
+                outcome_display = outcome_data.get('name') or oid
+                
+                # Se tem previous_odd, incluir informação de mudança
+                option_info = {'odd': odd_value}
+                if 'previous_odd' in outcome_data:
+                    option_info['previous_odd'] = outcome_data['previous_odd']
+                if 'variation_pct' in outcome_data:
+                    option_info['variation_pct'] = outcome_data['variation_pct']
+                
+                market_options[outcome_display] = option_info
+            else:
+                # Formato antigo (apenas número)
+                market_options[oid] = outcome_data
+        
+        if market_options:
+            data["markets"][market_key] = {
+                "display_name": display_name,
+                "options": market_options,
+                "market_id": market_id,
+                "market_status_id": market_data.get('market_status_id', 1)
             }
     
     logger.debug(f"📊 Evento {event_id}: {len(markets_dict)} mercados extraídos via API")
