@@ -574,17 +574,14 @@ async def hourly_rescan_job():
 
                     # notifica uma única vez (usando banco de dados)
                     try:
-                        from utils.notification_tracker import should_notify_pick, mark_pick_notified
+                        from utils.notification_tracker import mark_pick_notified
                         
-                        should_notify, reason = should_notify_pick(game, check_high_conf=True)
-                        if should_notify:
-                            tg_send_message(fmt_pick_now(game), message_type="pick_now", game_id=game.id, ext_id=game.ext_id)
-                            mark_pick_notified(game, session)
-                            game.pick_reason = mark_high_conf_notified(game.pick_reason or "")
-                            session.commit()
-                            logger.info(f"✅ Palpite notificado (hourly rescan) para jogo {game.id} ({game.ext_id})")
-                        else:
-                            logger.debug(f"⏭️  Palpite suprimido (hourly rescan) para jogo {game.id}: {reason}")
+                        # Já verificamos acima que não foi notificado, então pode enviar
+                        tg_send_message(fmt_pick_now(game), message_type="pick_now", game_id=game.id, ext_id=game.ext_id)
+                        mark_pick_notified(game, session)
+                        game.pick_reason = mark_high_conf_notified(game.pick_reason or "")
+                        session.commit()
+                        logger.info(f"✅ Palpite notificado (hourly rescan - transição alta confiança) para jogo {game.id} ({game.ext_id})")
                     except Exception:
                         logger.exception("Falha ao notificar alta confiança (hourly) id=%s", game.id)
 
