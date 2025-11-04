@@ -42,8 +42,15 @@ def _backend_auto() -> str:
     return "playwright" if HAS_PLAYWRIGHT else "requests"
 
 
-async def _fetch_with_playwright(url: str) -> str:
-    """Renderiza a página com Playwright e retorna o HTML."""
+async def _fetch_with_playwright(url: str, wait_for_selector: str = None, wait_time: int = 3000) -> str:
+    """
+    Renderiza a página com Playwright e retorna o HTML.
+    
+    Args:
+        url: URL para buscar
+        wait_for_selector: Seletor CSS para aguardar (opcional)
+        wait_time: Tempo adicional em ms para aguardar após carregamento (padrão: 3000ms)
+    """
     if not HAS_PLAYWRIGHT:
         raise RuntimeError("Playwright não disponível no ambiente.")
     from playwright.async_api import async_playwright
@@ -55,8 +62,18 @@ async def _fetch_with_playwright(url: str) -> str:
         )
         page = await context.new_page()
         try:
-            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            await page.wait_for_selector('[data-testid="preMatchOdds"]', timeout=15000)
+            await page.goto(url, wait_until="networkidle", timeout=60000)
+            
+            # Aguarda seletor específico se fornecido
+            if wait_for_selector:
+                try:
+                    await page.wait_for_selector(wait_for_selector, timeout=15000)
+                except:
+                    pass  # Continua mesmo se não encontrar
+            
+            # Aguarda tempo adicional para JavaScript carregar
+            await page.wait_for_timeout(wait_time)
+            
             html = await page.content()
             return html
         finally:

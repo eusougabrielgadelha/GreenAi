@@ -62,6 +62,7 @@ desktop.ini
 *.backup
 test_*.py
 test_structure.py
+competitions_page.html
 
 # Arquivos de backup
 backup/
