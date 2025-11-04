@@ -20,7 +20,8 @@ from utils.logger import logger
 from utils.stats import to_aware_utc, save_odd_history
 from utils.formatters import fmt_pick_now, fmt_watch_upgrade, fmt_live_bet_opportunity, format_night_scan_summary, fmt_combined_bet
 from models.database import Game, LiveGameTracker, SessionLocal
-from scraping.fetchers import fetch_events_from_link, fetch_game_result, _fetch_requests_async
+from scraping.fetchers import fetch_events_from_link, fetch_game_result, _fetch_requests_async, _fetch_with_playwright
+from config.settings import HAS_PLAYWRIGHT
 from scraping.betnacional import parse_local_datetime, scrape_live_game_data
 from betting.decision import decide_bet, decide_live_bet_opportunity
 from notifications.telegram import tg_send_message
@@ -719,7 +720,27 @@ async def _update_game_tracker(tracker: LiveGameTracker, game: Game, now_utc: da
     """
     # Scrapeia os dados atuais da página do jogo
     source_url = game.game_url or game.source_link
-    html = await _fetch_requests_async(source_url)
+    
+    # Tentar primeiro com requests (mais rápido), depois fallback para Playwright
+    html = None
+    try:
+        html = await _fetch_requests_async(source_url, has_fallback=True)
+    except Exception as e:
+        logger.warning(f"Falha ao buscar HTML com requests para jogo {game.ext_id}: {e}. Tentando fallback Playwright...")
+        if HAS_PLAYWRIGHT:
+            try:
+                html = await _fetch_with_playwright(source_url)
+                logger.info(f"✅ Sucesso com fallback Playwright para jogo {game.ext_id}")
+            except Exception as e2:
+                logger.error(f"Falha também no fallback Playwright para jogo {game.ext_id}: {e2}")
+                raise Exception(f"Falha ao buscar dados do jogo: requests ({e}) e playwright ({e2})")
+        else:
+            logger.error(f"Playwright não disponível, não há fallback para jogo {game.ext_id}")
+            raise
+    
+    if html is None:
+        raise Exception(f"Não foi possível obter HTML para jogo {game.ext_id}")
+    
     live_data = scrape_live_game_data(html, game.ext_id, source_url=source_url)
 
     # Atualiza as estatísticas no tracker

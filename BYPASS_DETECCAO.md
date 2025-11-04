@@ -8,7 +8,99 @@ Sistema avançado para contornar qualquer bloqueio ou detecção que impeça a r
 
 ## ✅ Estratégias Implementadas
 
-### 1. **Rotação Inteligente de Headers**
+> **📌 Atualização Recente:** Sistema foi aprimorado com estratégias avançadas inspiradas em sistemas profissionais de bypass, incluindo bloqueio inteligente, rate limiting sofisticado e reset automático.
+
+### 1. **Sistema de Bloqueio Inteligente com Cooldown** 🆕
+
+**Método:** `BypassDetector._should_use_api()`
+
+O sistema agora controla quando usar API vs. DOM scraping baseado em múltiplos fatores:
+
+- **Bloqueio Temporário**: Após falhas, bloqueia API por períodos exponenciais (2s, 4s, 8s, 16s, 32s...)
+- **Cooldown Pós-Challenge**: Evita API por 2 minutos após detectar desafios de segurança
+- **Rate Limiting Inteligente**: Máximo 30 requisições por minuto com intervalo mínimo de 1s
+- **Tracking de Falhas**: Após 3 falhas consecutivas, força uso de DOM scraping
+- **Reset Automático**: Reabilita API gradualmente quando bloqueios expiram
+
+**Benefícios:**
+- Evita bombardear API com requisições quando bloqueada
+- Reduz chance de bloqueios permanentes
+- Adaptação automática baseada em contexto
+- Recuperação inteligente após bloqueios
+
+### 2. **Tratamento Específico de Status HTTP** 🆕
+
+**Método:** `BypassDetector.detect_blockage()`
+
+Agora trata cada status HTTP de forma específica:
+
+- **429 (Too Many Requests)**: 
+  - Respeita `Retry-After` header se disponível
+  - Bloqueia por 60s por padrão
+  - Incrementa contador de falhas
+  
+- **403 (Forbidden)**:
+  - Bloqueio mais longo: 5 minutos
+  - Possível bloqueio permanente detectado
+  - Força uso de DOM scraping temporariamente
+  
+- **401 (Unauthorized)**:
+  - Bloqueio curto: 1 minuto (sessão pode ter expirado)
+  - Não força DOM scraping (pode ser temporário)
+  
+- **Challenge Detection**:
+  - Detecta padrões de "challenge" no conteúdo
+  - Adiciona cooldown extra de 2 minutos
+
+**Benefícios:**
+- Resposta adequada para cada tipo de bloqueio
+- Respeita headers do servidor (Retry-After)
+- Evita bloqueios desnecessários para erros temporários
+
+### 3. **Rate Limiting Sofisticado** 🆕
+
+**Características:**
+- **Máximo 30 req/min**: Limite configurável por minuto
+- **Intervalo Mínimo**: 1 segundo entre requisições
+- **Jitter Aleatório**: 0.1-0.5s para evitar padrões
+- **Tracking de Timestamps**: Remove requisições antigas automaticamente
+- **Bloqueio Automático**: Bloqueia até que a janela de 1 minuto expire
+
+**Benefícios:**
+- Evita exceder limites do servidor
+- Timing mais natural com jitter
+- Gerenciamento automático de janela deslizante
+
+### 4. **Reset Automático de Bloqueios** 🆕
+
+**Método:** `BypassDetector._reset_api_blocking_if_needed()`
+
+O sistema agora verifica e reseta bloqueios automaticamente:
+
+- **Reset Gradual**: Reduz contador de falhas quando bloqueio expira
+- **Reset Rápido**: Se houve sucesso recente (últimos 5 min), reseta mais rápido
+- **Reabilitação Automática**: Quando falhas chegam a zero, reabilita API
+- **Cooldown de Challenge**: Reseta automaticamente após 2 minutos
+
+**Benefícios:**
+- Recuperação automática sem intervenção manual
+- Adaptação baseada em histórico de sucessos
+- Sistema auto-recuperável
+
+### 5. **Tracking de Sucessos e Falhas** 🆕
+
+**Novos Contadores:**
+- `_api_consecutive_failures`: Falhas consecutivas
+- `_api_success_count`: Total de sucessos
+- `_api_last_success_time`: Timestamp do último sucesso
+- `_api_blocked_until`: Timestamp até quando está bloqueado
+
+**Benefícios:**
+- Monitoramento completo do estado da API
+- Decisões baseadas em histórico
+- Melhor adaptação a condições do servidor
+
+### 6. **Rotação Inteligente de Headers**
 
 **Classe:** `BypassDetector.get_rotated_headers()`
 

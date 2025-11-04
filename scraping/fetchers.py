@@ -12,8 +12,20 @@ from scraping.betnacional import try_parse_events
 HEADERS = {"User-Agent": USER_AGENT}
 
 
-def fetch_requests(url: str) -> str:
-    """Baixa uma página usando requests (síncrono) com cookies persistentes e bypass."""
+def fetch_requests(url: str, has_fallback: bool = True) -> str:
+    """
+    Baixa uma página usando requests (síncrono) com cookies persistentes e bypass.
+    
+    Args:
+        url: URL para buscar
+        has_fallback: Se True, indica que há fallback disponível (reduz verbosidade)
+    
+    Returns:
+        HTML da página
+    
+    Raises:
+        Exception: Se a requisição falhar após todas as tentativas
+    """
     from utils.bypass_detection import get_bypass_detector
     
     detector = get_bypass_detector()
@@ -28,19 +40,33 @@ def fetch_requests(url: str) -> str:
         params=None,
         headers=None,
         max_retries=3,
-        use_cookies=True
+        use_cookies=True,
+        has_fallback=has_fallback
     )
     
     if response is None:
-        raise Exception("Falha ao fazer requisição com bypass")
+        error_msg = f"Falha ao fazer requisição com bypass para {url}"
+        if has_fallback:
+            error_msg += " (fallback disponível)"
+        raise Exception(error_msg)
     
     response.raise_for_status()
     return response.text
 
 
-async def _fetch_requests_async(url: str) -> str:
+async def _fetch_requests_async(url: str, has_fallback: bool = True) -> str:
     """
     Wrapper assíncrono para requests.get com rate limiting e retry.
+    
+    Args:
+        url: URL para buscar
+        has_fallback: Se True, indica que há fallback disponível (reduz verbosidade)
+    
+    Returns:
+        HTML da página
+    
+    Raises:
+        Exception: Se a requisição falhar após todas as tentativas
     """
     from utils.rate_limiter import html_rate_limiter, retry_with_backoff
     
@@ -49,7 +75,7 @@ async def _fetch_requests_async(url: str) -> str:
         await html_rate_limiter.acquire()
         
         # Executar requisição em thread separada
-        return await asyncio.to_thread(fetch_requests, url)
+        return await asyncio.to_thread(fetch_requests, url, has_fallback)
     
     # Tentar com retry
     try:

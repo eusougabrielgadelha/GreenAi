@@ -21,6 +21,13 @@ from utils.cookie_manager import get_cookie_manager, update_cookies_from_respons
 class BypassDetector:
     """
     Sistema completo de bypass de detecção com múltiplas estratégias.
+    
+    Implementa estratégias avançadas inspiradas em sistemas de bypass profissionais:
+    - Bloqueio inteligente com cooldown e backoff exponencial
+    - Rate limiting sofisticado com intervalo mínimo entre requisições
+    - Tratamento específico de status HTTP (429, 403, 401)
+    - Reset automático de bloqueios quando expirarem
+    - Tracking de falhas consecutivas e sucessos
     """
     
     def __init__(self):
@@ -28,6 +35,24 @@ class BypassDetector:
         self.failure_count = 0
         self.last_rotation_time = datetime.now()
         self.detected_patterns = []
+        
+        # Sistema de bloqueio inteligente
+        self._api_blocked_until = 0.0  # Timestamp até quando API está bloqueada
+        self._api_consecutive_failures = 0  # Contador de falhas consecutivas
+        self._api_backoff_base = 2.0  # Base para backoff exponencial (2s, 4s, 8s, 16s...)
+        self._api_last_success_time = 0.0  # Timestamp do último sucesso
+        self._api_success_count = 0  # Contador de sucessos
+        
+        # Rate limiting sofisticado
+        self._api_request_times = []  # Lista de timestamps das requisições
+        self._api_max_requests_per_minute = 30  # Máximo de requisições por minuto
+        self._api_min_interval = 1.0  # Intervalo mínimo entre requisições (segundos)
+        
+        # Cooldown pós-challenge (desafios de segurança)
+        self._challenge_cooldown_until = 0.0  # Timestamp até quando deve evitar API após challenge
+        
+        # Flag de fallback
+        self._api_use_dom_fallback = False  # Se True, força uso de DOM scraping
     
     def get_rotated_headers(self, referer: Optional[str] = None) -> Dict[str, str]:
         """
@@ -164,6 +189,68 @@ class BypassDetector:
         
         time.sleep(delay)
     
+    def _should_use_api(self) -> bool:
+        """
+        Determina se devemos tentar usar a API ou forçar DOM scraping.
+        
+        Considera: bloqueios, rate limiting, falhas consecutivas, cooldown.
+        
+        Returns:
+            True se deve tentar API, False para forçar DOM
+        """
+        current_time = time.time()
+        
+        # Se está em cooldown pós-challenge, evita API
+        if current_time < self._challenge_cooldown_until:
+            return False
+        
+        # Se API está bloqueada temporariamente
+        if current_time < self._api_blocked_until:
+            return False
+        
+        # Se muitas falhas consecutivas, força uso de DOM por um tempo
+        if self._api_consecutive_failures >= 3:
+            # Bloqueia API por período exponencial baseado nas falhas
+            block_duration = self._api_backoff_base ** min(self._api_consecutive_failures - 2, 5)
+            self._api_blocked_until = current_time + block_duration
+            if self._api_consecutive_failures == 3:
+                logger.debug(
+                    f"API bloqueada por {block_duration:.1f}s devido a "
+                    f"{self._api_consecutive_failures} falhas consecutivas"
+                )
+            return False
+        
+        # Se flag de fallback está ativa, usa DOM
+        if self._api_use_dom_fallback:
+            return False
+        
+        # Rate limiting: verifica se não excedeu o limite de requisições
+        # Remove timestamps antigos (mais de 1 minuto)
+        self._api_request_times = [t for t in self._api_request_times if current_time - t < 60]
+        
+        # Se excedeu o limite, bloqueia temporariamente
+        if len(self._api_request_times) >= self._api_max_requests_per_minute:
+            block_duration = 60 - (current_time - self._api_request_times[0])
+            if block_duration > 0:
+                self._api_blocked_until = current_time + block_duration
+                logger.debug(
+                    f"Rate limit atingido - API bloqueada por {block_duration:.1f}s "
+                    f"({len(self._api_request_times)}/{self._api_max_requests_per_minute} req/min)"
+                )
+                return False
+        
+        # Verifica intervalo mínimo entre requisições
+        if self._api_request_times:
+            last_request = self._api_request_times[-1]
+            elapsed = current_time - last_request
+            if elapsed < self._api_min_interval:
+                # Adiciona jitter aleatório para evitar padrões
+                jitter = random.uniform(0.1, 0.3)
+                if elapsed + jitter < self._api_min_interval:
+                    return False
+        
+        return True
+    
     def detect_blockage(self, response: Response) -> Tuple[bool, str]:
         """
         Detecta se a requisição foi bloqueada.
@@ -174,11 +261,38 @@ class BypassDetector:
         Returns:
             (is_blocked, reason)
         """
-        # Verificar status code
-        if response.status_code == 403:
-            return True, "403 Forbidden"
-        elif response.status_code == 429:
+        current_time = time.time()
+        
+        # Verificar status code com tratamento específico
+        if response.status_code == 429:  # Too Many Requests
+            # Respeitar Retry-After header se disponível
+            retry_after = response.headers.get('Retry-After')
+            if retry_after:
+                try:
+                    retry_seconds = int(retry_after)
+                    self._api_blocked_until = current_time + retry_seconds
+                    self._api_consecutive_failures += 1
+                    return True, f"429 Too Many Requests (Retry-After: {retry_seconds}s)"
+                except ValueError:
+                    pass
+            else:
+                # Bloquear por 60s por padrão
+                self._api_blocked_until = current_time + 60
+                self._api_consecutive_failures += 1
             return True, "429 Too Many Requests"
+        
+        elif response.status_code == 403:  # Forbidden
+            # Bloqueio mais longo (possível bloqueio permanente)
+            self._api_blocked_until = current_time + 300  # 5 minutos
+            self._api_consecutive_failures += 1
+            return True, "403 Forbidden"
+        
+        elif response.status_code == 401:  # Unauthorized
+            # 401 pode ser temporário (sessão expirada), não bloqueia por muito tempo
+            self._api_blocked_until = current_time + 60  # 1 minuto
+            self._api_consecutive_failures += 1
+            return True, "401 Unauthorized"
+        
         elif response.status_code == 503:
             return True, "503 Service Unavailable"
         
@@ -196,10 +310,14 @@ class BypassDetector:
             r'too many requests',
             r'bot detection',
             r'security check',
+            r'challenge',
         ]
         
         for pattern in block_patterns:
             if re.search(pattern, content, re.IGNORECASE):
+                # Se detectar challenge, adicionar cooldown extra
+                if 'challenge' in pattern:
+                    self._challenge_cooldown_until = current_time + 120  # 2 minutos
                 return True, f"Blocked content detected: {pattern}"
         
         # Verificar tamanho da resposta (bloqueios geralmente retornam HTML pequeno)
@@ -238,20 +356,23 @@ class BypassDetector:
             self.failure_count = 0
             return True
         
-        # Estratégia 2: Aguardar mais tempo
+        # Estratégia 2: Aguardar mais tempo (já tratado em detect_blockage para 429)
         if "429" in reason or "rate limit" in reason.lower():
-            wait_time = random.uniform(30, 60)
+            # Já foi bloqueado em detect_blockage, apenas aguardar
+            wait_time = random.uniform(1, 3)  # Delay menor, já que já bloqueou
             if not has_fallback:
-                logger.info(f"Aguardando {wait_time:.1f}s devido a rate limit...")
+                logger.debug(f"Aguardando {wait_time:.1f}s antes de retry (429)...")
             time.sleep(wait_time)
             return True
         
         # Estratégia 3: Aguardar antes de retry (para 403)
         if "403" in reason:
-            wait_time = random.uniform(5, 10)
+            # Já foi bloqueado por 5 minutos em detect_blockage
+            wait_time = random.uniform(2, 5)  # Delay menor
             if not has_fallback:
                 logger.debug(f"Aguardando {wait_time:.1f}s antes de retry (403)...")
             time.sleep(wait_time)
+            self._api_use_dom_fallback = True  # Forçar DOM por um tempo
             return True
         
         # Estratégia 4: Limpar cookies e recomeçar
@@ -263,9 +384,38 @@ class BypassDetector:
             manager.clear_cookies()
             session.cookies.clear()
             self.failure_count = 0
+            self._api_use_dom_fallback = True  # Forçar DOM temporariamente
             return True
         
         return False
+    
+    def _reset_api_blocking_if_needed(self):
+        """
+        Verifica e reseta bloqueios de API se necessário.
+        
+        Chama periodicamente para reabilitar API após bloqueios expirarem.
+        """
+        current_time = time.time()
+        
+        # Se bloqueio expirou, tenta reabilitar gradualmente
+        if current_time >= self._api_blocked_until and self._api_blocked_until > 0:
+            # Se houve sucesso recente (últimos 5 minutos), reseta mais rápido
+            if current_time - self._api_last_success_time < 300:
+                self._api_consecutive_failures = max(0, self._api_consecutive_failures - 1)
+            else:
+                # Se não há sucesso recente, reseta mais devagar
+                self._api_consecutive_failures = max(0, self._api_consecutive_failures - 1)
+            
+            # Se chegou a zero, reabilita API
+            if self._api_consecutive_failures == 0:
+                self._api_use_dom_fallback = False
+                self._api_blocked_until = 0.0
+                if self._api_success_count > 0:
+                    logger.debug("API reabilitada - tentando novamente")
+        
+        # Resetar cooldown de challenge se expirou
+        if current_time >= self._challenge_cooldown_until and self._challenge_cooldown_until > 0:
+            self._challenge_cooldown_until = 0.0
     
     def make_request_with_bypass(
         self,
@@ -289,16 +439,46 @@ class BypassDetector:
             headers: Headers customizados (se None, usa rotacionados)
             max_retries: Número máximo de tentativas
             use_cookies: Se True, atualiza cookies após requisição
+            has_fallback: Se True, há fallback disponível (reduz verbosidade)
         
         Returns:
             Response ou None em caso de falha
         """
         from utils.anti_block import api_throttle, add_random_delay
         
+        # Resetar bloqueios se necessário
+        self._reset_api_blocking_if_needed()
+        
+        # Verificar se deve usar API ou forçar DOM
+        if not self._should_use_api():
+            if has_fallback:
+                logger.debug("API bloqueada ou em cooldown, usando fallback DOM")
+            else:
+                logger.warning("API bloqueada ou em cooldown")
+            return None
+        
         for attempt in range(max_retries):
             try:
                 # Throttle antes da requisição
                 api_throttle.wait_if_needed()
+                
+                # Verificar intervalo mínimo entre requisições
+                current_time = time.time()
+                if self._api_request_times:
+                    last_request = self._api_request_times[-1]
+                    elapsed = current_time - last_request
+                    if elapsed < self._api_min_interval:
+                        # Adiciona jitter aleatório para evitar padrões
+                        jitter = random.uniform(0.1, 0.5)
+                        wait_time = self._api_min_interval - elapsed + jitter
+                        if wait_time > 0:
+                            time.sleep(wait_time)
+                
+                # Registrar timestamp da requisição
+                current_time = time.time()
+                self._api_request_times.append(current_time)
+                # Limpar timestamps antigos
+                self._api_request_times = [t for t in self._api_request_times if current_time - t < 60]
                 
                 # Rotacionar headers se necessário
                 if headers is None:
@@ -307,11 +487,15 @@ class BypassDetector:
                 else:
                     session.headers.update(headers)
                 
-                # Adicionar delay humano
+                # Adicionar delay humano antes da requisição
                 if attempt > 0:
                     wait_time = random.uniform(2, 5) * (attempt + 1)
                     logger.debug(f"Aguardando {wait_time:.1f}s antes de retry {attempt + 1}...")
                     time.sleep(wait_time)
+                else:
+                    # Adicionar jitter aleatório no intervalo (0.1-0.5s) para evitar padrões
+                    jitter = random.uniform(0.1, 0.5)
+                    time.sleep(jitter)
                 
                 # Fazer requisição
                 if method.upper() == "GET":
@@ -348,16 +532,21 @@ class BypassDetector:
                 if use_cookies:
                     update_cookies_from_response(response)
                 
+                # Registrar sucesso
+                current_time = time.time()
+                self._api_last_success_time = current_time
+                self._api_success_count += 1
+                self._api_consecutive_failures = 0  # Resetar falhas consecutivas
+                self.failure_count = 0
+                self._api_use_dom_fallback = False  # Reabilitar API
+                
                 # Adicionar delay após sucesso
                 add_random_delay(min_seconds=0.3, max_seconds=1.0)
-                
-                # Resetar contador de falhas após sucesso
-                if response.status_code == 200:
-                    self.failure_count = 0
                 
                 return response
                 
             except Exception as e:
+                self._api_consecutive_failures += 1
                 logger.warning(f"Erro na tentativa {attempt + 1}/{max_retries}: {e}")
                 
                 if attempt < max_retries - 1:
