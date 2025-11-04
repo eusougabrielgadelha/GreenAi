@@ -603,13 +603,71 @@ async def hourly_rescan_job():
         session.commit()
 
 
+async def update_games_to_live_status():
+    """
+    Atualiza status de jogos de 'scheduled' para 'live' quando o horário de início chegar.
+    Executa a cada minuto para detectar jogos que acabaram de começar.
+    """
+    now_utc = datetime.now(pytz.UTC)
+    
+    with SessionLocal() as session:
+        # Busca jogos que deveriam estar ao vivo (start_time <= now, mas ainda estão como scheduled)
+        games_to_activate = (
+            session.query(Game)
+            .filter(
+                Game.status == "scheduled",
+                Game.will_bet.is_(True),
+                Game.start_time <= now_utc,
+                Game.start_time >= now_utc - timedelta(minutes=5)  # Janela de 5min para evitar reprocessar
+            )
+            .all()
+        )
+        
+        for game in games_to_activate:
+            game.status = "live"
+            logger.info("▶️ Jogo %d (%s vs %s) iniciado - status atualizado para 'live'", 
+                       game.id, game.team_home, game.team_away)
+        
+        if games_to_activate:
+            session.commit()
+            logger.info("✅ %d jogo(s) atualizado(s) para status 'live'", len(games_to_activate))
+
+
 async def monitor_live_games_job():
-    """Monitora jogos ao vivo em busca de oportunidades de aposta."""
-    logger.info("⚽ Iniciando monitoramento de jogos ao vivo...")
+    """
+    Monitora jogos ao vivo em busca de oportunidades de aposta.
+    Só monitora jogos que estão dentro do horário previsto (start_time até start_time + 2h30min).
+    Só executa se houver jogos pré-selecionados (will_bet=True) no banco.
+    """
     now_utc = datetime.now(pytz.UTC)
 
     with SessionLocal() as session:
-        live_games = session.query(Game).filter(Game.status == "live").all()
+        # 1. Verifica se há jogos pré-selecionados antes de iniciar monitoramento
+        preselected_count = session.query(Game).filter(Game.will_bet.is_(True)).count()
+        if preselected_count == 0:
+            logger.debug("⏭️  Nenhum jogo pré-selecionado. Monitoramento ao vivo não executado.")
+            return
+        
+        # 2. Busca apenas jogos que estão dentro do horário do jogo
+        # Considera janela de 2h30min após o início (jogo normal + prorrogação)
+        game_window_end = now_utc - timedelta(hours=2, minutes=30)
+        
+        live_games = (
+            session.query(Game)
+            .filter(
+                Game.status == "live",
+                Game.will_bet.is_(True),  # Só monitora jogos pré-selecionados
+                Game.start_time >= game_window_end,  # Jogo começou há menos de 2h30min
+                Game.start_time <= now_utc  # Jogo já começou
+            )
+            .all()
+        )
+        
+        if not live_games:
+            logger.debug("⏭️  Nenhum jogo ao vivo dentro do horário previsto.")
+            return
+        
+        logger.info("⚽ Iniciando monitoramento de %d jogo(s) ao vivo...", len(live_games))
 
         for game in live_games:
             try:
@@ -802,25 +860,41 @@ async def send_today_games_job():
 async def morning_scan_and_publish():
     """
     Varredura matinal completa:
-    1. Coleta jogos de hoje (scan_games_for_date)
-    2. Envia resumo de jogos da madrugada (se houver)
-    3. Envia resumo de jogos de hoje
+    1. Analisa todas as oportunidades em todos os campeonatos
+    2. Decide quais jogos serão monitorados ao vivo
+    3. NÃO envia resumos aqui - isso é feito em horários específicos:
+       - Jogos da madrugada: 23h
+       - Jogos de hoje: 06h
     """
     from scanner.game_scanner import scan_games_for_date
     
     logger.info("🌅 Iniciando varredura matinal completa...")
     
-    # 1. Coleta jogos de hoje
+    # Analisa todas as oportunidades de hoje
     result = await scan_games_for_date(date_offset=0, send_summary=False)
     logger.info("✅ Varredura concluída: %d analisados, %d selecionados", result["analyzed"], result["selected"])
     
-    # 2. Envia resumo de jogos da madrugada (00h-06h)
-    from scanner.game_scanner import send_dawn_games
-    await send_dawn_games()
-    
-    # 3. Envia resumo de jogos de hoje (06h-23h)
-    from scanner.game_scanner import send_today_games
-    await send_today_games()
+    # Marca jogos selecionados para monitoramento ao vivo quando iniciarem
+    with SessionLocal() as session:
+        selected_games = (
+            session.query(Game)
+            .filter(
+                Game.will_bet.is_(True),
+                Game.status == "scheduled"
+            )
+            .all()
+        )
+        
+        # Garante que os jogos têm game_url para monitoramento ao vivo
+        for game in selected_games:
+            if not game.game_url and game.source_link:
+                # Tenta construir game_url a partir do source_link
+                from urllib.parse import urljoin
+                if game.ext_id:
+                    game.game_url = f"https://betnacional.bet.br/event/1/0/{game.ext_id}"
+                    session.commit()
+        
+        logger.info("📋 %d jogo(s) pré-selecionado(s) preparado(s) para monitoramento ao vivo", len(selected_games))
     
     logger.info("✅ Varredura matinal concluída.")
 
@@ -1008,6 +1082,17 @@ def setup_scheduler():
         misfire_grace_time=120,
     )
 
+    # --- Atualização de status de jogos para 'live' ---
+    scheduler.add_job(
+        update_games_to_live_status,
+        trigger=IntervalTrigger(minutes=1),
+        id="update_games_to_live",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+        misfire_grace_time=60,
+    )
+    
     # --- Monitoramento de jogos ao vivo ---
     scheduler.add_job(
         monitor_live_games_job,
@@ -1032,8 +1117,8 @@ def setup_scheduler():
     )
     logger.info("📥 Coleta de jogos de amanhã agendada para %02d:00", collect_tomorrow_hour)
 
-    # --- Envio de jogos da madrugada (00h ou 06h) - só se houver ---
-    dawn_hour = int(os.getenv("DAWN_GAMES_HOUR", "6"))
+    # --- Envio de jogos da madrugada (23h do dia anterior) ---
+    dawn_hour = int(os.getenv("DAWN_GAMES_HOUR", "23"))
     scheduler.add_job(
         send_dawn_games_job,
         trigger=CronTrigger(hour=dawn_hour, minute=0),
