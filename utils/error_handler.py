@@ -11,7 +11,8 @@ def log_error_with_context(
     error: Exception,
     context: Optional[Dict[str, Any]] = None,
     level: str = "error",
-    reraise: bool = False
+    reraise: bool = False,
+    suppress_403_if_fallback: bool = False
 ) -> None:
     """
     Loga um erro com contexto detalhado.
@@ -21,6 +22,7 @@ def log_error_with_context(
         context: Dict com informações de contexto (url, ext_id, etc)
         level: Nível do log (error, warning, critical)
         reraise: Se True, re-levanta a exceção após logar
+        suppress_403_if_fallback: Se True, reduz verbosidade de 403 quando há fallback
     """
     context = context or {}
     
@@ -30,6 +32,24 @@ def log_error_with_context(
         "error_message": str(error)[:500],  # Limitar tamanho
         "traceback": traceback.format_exc()
     }
+    
+    # Detectar erros 403 Forbidden (comum e esperado com anti-bot)
+    is_403 = (
+        "403" in str(error) or 
+        "Forbidden" in str(error) or
+        (hasattr(error, 'response') and hasattr(error.response, 'status_code') and error.response.status_code == 403)
+    )
+    
+    # Se for 403 e temos fallback, reduzir verbosidade
+    if is_403 and suppress_403_if_fallback:
+        # Log apenas em DEBUG para 403 com fallback
+        logger.debug(
+            f"API bloqueada (403) - usando fallback | Contexto: {', '.join([f'{k}={v}' for k, v in context.items() if v and k != 'traceback'])}",
+            extra={**context, **error_info}
+        )
+        if reraise:
+            raise
+        return
     
     # Combinar com contexto fornecido
     full_context = {**context, **error_info}

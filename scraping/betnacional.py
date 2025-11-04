@@ -109,7 +109,8 @@ def fetch_events_from_api(sport_id: int, category_id: int = 0, tournament_id: in
                 "stage": "fetch_events_from_api"
             },
             level="warning",
-            reraise=False
+            reraise=False,
+            suppress_403_if_fallback=True  # Reduz verbosidade de 403 quando há fallback HTML
         )
         return None
 
@@ -342,7 +343,8 @@ def fetch_event_odds_from_api(event_id: int, language_id: int = 1,
                 "stage": "fetch_event_odds_from_api"
             },
             level="warning",
-            reraise=False
+            reraise=False,
+            suppress_403_if_fallback=True  # Reduz verbosidade de 403 quando há fallback HTML
         )
         return None
 
