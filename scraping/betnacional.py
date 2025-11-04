@@ -1208,37 +1208,8 @@ def scrape_live_game_data(html: str, ext_id: str, source_url: str = None) -> Dic
         ext_id: ID externo do evento
         source_url: URL de origem do evento (opcional, usado para extrair event_id)
     """
-    # Tentar buscar via API primeiro se tivermos a URL - APENAS SE NÃO ESTIVER DESABILITADO
-    from utils.xhr_status import is_xhr_disabled, disable_xhr
-    
-    if not is_xhr_disabled() and source_url:
-        event_id = extract_event_id_from_url(source_url)
-        if event_id:
-            logger.info(f"📡 Tentando buscar dados via API para evento {event_id}")
-            try:
-                json_data = fetch_event_odds_from_api(event_id)
-                if json_data:
-                    api_data = parse_event_odds_from_api(json_data)
-                    # Se conseguiu extrair dados da API, retornar
-                    if api_data.get("markets") or api_data.get("stats"):
-                        logger.info(f"✅ Dados extraídos via API para evento {event_id}")
-                        return api_data
-                    # API retornou dados mas sem conteúdo válido - desabilitar XHR
-                    disable_xhr("API retornou dados mas sem conteúdo válido")
-                    logger.info("API retornou dados mas sem conteúdo válido, desabilitando XHR e usando HTML...")
-                else:
-                    # API não retornou dados - desabilitar XHR
-                    disable_xhr("API não retornou dados")
-                    logger.info("API não retornou dados, desabilitando XHR e usando HTML scraping...")
-            except Exception as e:
-                # API falhou - desabilitar XHR
-                disable_xhr(f"Erro na API: {type(e).__name__}")
-                logger.warning(f"Erro ao buscar via API: {e}. Desabilitando XHR e usando HTML scraping...")
-    elif is_xhr_disabled():
-        logger.debug("XHR desabilitado, usando HTML scraping diretamente para evento ao vivo")
-    
-    # Fallback para HTML scraping
-    logger.debug(f"🌐 Usando HTML scraping para evento {ext_id}")
+    # Usar APENAS HTML scraping (XHR desativado)
+    logger.debug(f"🌐 Usando HTML scraping para evento {ext_id} (XHR desativado)")
     soup = BeautifulSoup(html, "html.parser")
     data = {
         "stats": {},
