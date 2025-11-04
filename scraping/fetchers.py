@@ -335,7 +335,7 @@ async def fetch_game_result(ext_id: str, source_link: str) -> Optional[str]:
         event_id = None
         try:
             # Tentar extrair event_id da URL
-        if source_link:
+            if source_link:
             event_id = extract_event_id_from_url(source_link)
         # Se não conseguir, tentar usar ext_id diretamente
         if not event_id and ext_id:
