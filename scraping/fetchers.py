@@ -27,10 +27,28 @@ def fetch_requests(url: str, has_fallback: bool = True) -> str:
         Exception: Se a requisição falhar após todas as tentativas
     """
     from utils.bypass_detection import get_bypass_detector
+    from utils.cookie_manager import get_cookie_manager
     
     detector = get_bypass_detector()
     session = detector.create_stealth_session(use_cookies=True)
     session.headers.update(HEADERS)
+    
+    # Verificar se há cookies válidos - se não houver, fazer warm-up
+    manager = get_cookie_manager()
+    stats = manager.get_stats()
+    if stats['valid_cookies'] == 0:
+        logger.debug("Nenhum cookie válido, fazendo warm-up antes da requisição...")
+        try:
+            warmup_url = "https://betnacional.bet.br/"
+            warmup_response = session.get(warmup_url, timeout=10)
+            if warmup_response.status_code == 200:
+                from utils.cookie_manager import update_cookies_from_response
+                update_cookies_from_response(warmup_response)
+                logger.debug("Warm-up bem-sucedido, cookies obtidos")
+            else:
+                logger.warning(f"Warm-up retornou status {warmup_response.status_code}")
+        except Exception as e:
+            logger.debug(f"Erro durante warm-up: {e}")
     
     # Fazer requisição com bypass automático
     response = detector.make_request_with_bypass(
@@ -85,9 +103,13 @@ async def _fetch_requests_async(url: str, has_fallback: bool = True) -> str:
             initial_delay=1.0,
             max_delay=20.0,
             exponential_base=2.0,
-            exceptions=(requests.exceptions.RequestException, Exception),
+            exceptions=(requests.exceptions.RequestException, Exception, asyncio.CancelledError),
             rate_limiter=None  # Já usamos dentro de _fetch
         )
+    except asyncio.CancelledError:
+        # Não logar erro se foi cancelado - apenas propagar
+        logger.debug(f"Requisição para {url} foi cancelada (CancelledError)")
+        raise
     except Exception as e:
         from utils.error_handler import log_error_with_context
         log_error_with_context(

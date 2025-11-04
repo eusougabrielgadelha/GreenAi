@@ -30,7 +30,7 @@ from watchlist.manager import wl_load, wl_save, wl_add, wl_remove
 scheduler = AsyncIOScheduler(
     timezone=APP_TZ,
     job_defaults={
-        "misfire_grace_time": 60,
+        "misfire_grace_time": 120,  # Aumentado para 2 minutos
         "coalesce": True,
         "max_instances": 1
     }
@@ -925,58 +925,76 @@ async def _handle_active_game(session, game: Game, tracker: LiveGameTracker, liv
             session.commit()
 
 
+# Lock para prevenir execuções simultâneas do monitor_live_games_job
+_monitor_live_games_lock = asyncio.Lock()
+
 async def monitor_live_games_job():
     """
     Monitora jogos ao vivo em busca de oportunidades de aposta.
     Só monitora jogos que estão dentro do horário previsto (start_time até start_time + 2h30min).
     Só executa se houver jogos pré-selecionados (will_bet=True) no banco.
+    
+    Usa lock assíncrono para prevenir execuções simultâneas.
     """
-    now_utc = datetime.now(pytz.UTC)
+    # Verificar se já está em execução
+    if _monitor_live_games_lock.locked():
+        logger.debug("Monitor de jogos ao vivo já em execução, pulando esta execução")
+        return
+    
+    async with _monitor_live_games_lock:
+        try:
+            now_utc = datetime.now(pytz.UTC)
 
-    with SessionLocal() as session:
-        # Busca jogos ao vivo
-        live_games = _get_live_games_within_window(session, now_utc)
-        
-        if not live_games:
-            logger.debug("⏭️  Nenhum jogo ao vivo dentro do horário previsto.")
-            return
-        
-        from utils.logger import log_with_context
-        log_with_context(
-            "info",
-            f"Iniciando monitoramento de {len(live_games)} jogo(s) ao vivo",
-            stage="monitor_live_games",
-            status="started",
-            extra_fields={"games_count": len(live_games)}
-        )
-
-        for game in live_games:
-            try:
-                # 1. Garante que tracker existe
-                tracker = _ensure_tracker_exists(session, game, now_utc)
+            with SessionLocal() as session:
+                # Busca jogos ao vivo
+                live_games = _get_live_games_within_window(session, now_utc)
                 
-                # 2. Atualiza tracker com dados atuais
-                live_data = await _update_game_tracker(tracker, game, now_utc)
+                if not live_games:
+                    logger.debug("⏭️  Nenhum jogo ao vivo dentro do horário previsto.")
+                    return
                 
-                # 3. Verifica se jogo terminou
-                if _is_game_finished(tracker.current_minute or "") and game.status == "live":
-                    await _handle_finished_game(session, game, tracker, now_utc)
-                    continue  # Pula para próximo jogo
-                
-                # 4. Processa jogo ativo
-                await _handle_active_game(session, game, tracker, live_data, now_utc)
-                session.commit()
+                from utils.logger import log_with_context
+                log_with_context(
+                    "info",
+                    f"Iniciando monitoramento de {len(live_games)} jogo(s) ao vivo",
+                    stage="monitor_live_games",
+                    status="started",
+                    extra_fields={"games_count": len(live_games)}
+                )
 
-            except Exception as e:
-                logger.exception(f"Erro ao monitorar jogo ao vivo {game.id} ({game.ext_id}): {e}")
+                for game in live_games:
+                    try:
+                        # 1. Garante que tracker existe
+                        tracker = _ensure_tracker_exists(session, game, now_utc)
+                        
+                        # 2. Atualiza tracker com dados atuais
+                        live_data = await _update_game_tracker(tracker, game, now_utc)
+                        
+                        # 3. Verifica se jogo terminou
+                        if _is_game_finished(tracker.current_minute or "") and game.status == "live":
+                            await _handle_finished_game(session, game, tracker, now_utc)
+                            continue  # Pula para próximo jogo
+                        
+                        # 4. Processa jogo ativo
+                        await _handle_active_game(session, game, tracker, live_data, now_utc)
+                        session.commit()
 
-        from utils.logger import log_with_context
-        log_with_context(
-            "info",
-            "Monitoramento de jogos ao vivo concluído",
-            stage="monitor_live_games",
-            status="completed"
-        )
+                    except Exception as e:
+                        logger.exception(f"Erro ao monitorar jogo ao vivo {game.id} ({game.ext_id}): {e}")
+
+                from utils.logger import log_with_context
+                log_with_context(
+                    "info",
+                    "Monitoramento de jogos ao vivo concluído",
+                    stage="monitor_live_games",
+                    status="completed"
+                )
+        except asyncio.CancelledError:
+            logger.warning("Monitor de jogos ao vivo foi cancelado (CancelledError)")
+            raise  # Re-raise para que o scheduler saiba que foi cancelado
+        except Exception as e:
+            logger.exception(f"Erro inesperado no monitor de jogos ao vivo: {e}")
+            raise
 
 
 async def send_daily_summary_job():

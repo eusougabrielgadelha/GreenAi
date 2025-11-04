@@ -389,6 +389,48 @@ class BypassDetector:
         
         return False
     
+    def reset_bypass_state(self, force: bool = False):
+        """
+        Reseta o estado do bypass forçadamente.
+        
+        Args:
+            force: Se True, reseta tudo imediatamente. Se False, apenas reseta se bloqueios expiraram.
+        """
+        current_time = time.time()
+        
+        if force:
+            # Reset completo e imediato
+            self._api_blocked_until = 0.0
+            self._api_consecutive_failures = 0
+            self._api_use_dom_fallback = False
+            self._challenge_cooldown_until = 0.0
+            self._api_request_times = []
+            logger.info("Estado do bypass resetado forçadamente")
+        else:
+            # Reset gradual (chama _reset_api_blocking_if_needed)
+            self._reset_api_blocking_if_needed()
+    
+    def get_bypass_status(self) -> Dict[str, Any]:
+        """
+        Retorna o status atual do bypass para diagnóstico.
+        
+        Returns:
+            Dict com informações de status
+        """
+        current_time = time.time()
+        
+        return {
+            'blocked_until': self._api_blocked_until,
+            'is_blocked': current_time < self._api_blocked_until,
+            'consecutive_failures': self._api_consecutive_failures,
+            'use_dom_fallback': self._api_use_dom_fallback,
+            'challenge_cooldown_until': self._challenge_cooldown_until,
+            'last_success_time': self._api_last_success_time,
+            'success_count': self._api_success_count,
+            'requests_last_minute': len([t for t in self._api_request_times if current_time - t < 60]),
+            'max_requests_per_minute': self._api_max_requests_per_minute,
+        }
+    
     def _reset_api_blocking_if_needed(self):
         """
         Verifica e reseta bloqueios de API se necessário.
@@ -451,11 +493,29 @@ class BypassDetector:
         
         # Verificar se deve usar API ou forçar DOM
         if not self._should_use_api():
-            if has_fallback:
-                logger.debug("API bloqueada ou em cooldown, usando fallback DOM")
+            # Se não há fallback, tentar forçar reset e tentar novamente uma vez
+            if not has_fallback:
+                logger.warning("API bloqueada ou em cooldown, tentando reset...")
+                # Resetar se bloqueio expirou há mais de 5 minutos
+                current_time = time.time()
+                if current_time - self._api_blocked_until > 300:  # 5 minutos
+                    self.reset_bypass_state(force=True)
+                    # Tentar novamente após reset
+                    if self._should_use_api():
+                        logger.info("Reset bem-sucedido, tentando novamente...")
+                    else:
+                        logger.warning("Reset não removeu bloqueio. Estado atual:")
+                        status = self.get_bypass_status()
+                        logger.warning(f"  - Bloqueado até: {status['blocked_until']}")
+                        logger.warning(f"  - Falhas consecutivas: {status['consecutive_failures']}")
+                        logger.warning(f"  - DOM fallback: {status['use_dom_fallback']}")
+                        return None
+                else:
+                    return None
             else:
-                logger.warning("API bloqueada ou em cooldown")
-            return None
+                # Com fallback, apenas logar em debug
+                logger.debug("API bloqueada ou em cooldown, usando fallback DOM")
+                return None
         
         for attempt in range(max_retries):
             try:
