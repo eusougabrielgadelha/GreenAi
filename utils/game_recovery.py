@@ -8,7 +8,13 @@ import pytz
 from models.database import Game, SessionLocal
 from utils.logger import logger
 from scraping.fetchers import fetch_game_result
-from scheduler.jobs import _schedule_all_for_game, _ensure_tracker_exists, _update_game_tracker
+from scheduler.jobs import (
+    _schedule_all_for_game, 
+    _ensure_tracker_exists, 
+    _update_game_tracker,
+    _is_game_finished,
+    _handle_finished_game
+)
 
 
 async def recover_pending_games():
