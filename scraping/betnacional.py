@@ -1,15 +1,17 @@
 """Parsing específico da BetNacional."""
 import json
 import re
+import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urljoin
 from bs4 import BeautifulSoup
 from types import SimpleNamespace as NS
 import pytz
+import requests
 
-from config.settings import ZONE
+from config.settings import ZONE, USER_AGENT
 from utils.logger import logger
 
 # Mapeamento de meses em português
@@ -30,6 +32,325 @@ class EventRow:
     odds_away: Optional[float]
     ext_id: Optional[str] = None
     is_live: bool = False
+
+
+# ============================================
+# API XHR - Funções para buscar dados via API
+# ============================================
+
+def extract_ids_from_url(url: str) -> Optional[Tuple[int, int, int]]:
+    """
+    Extrai sport_id, category_id e tournament_id de uma URL do BetNacional.
+    
+    Exemplo: https://betnacional.bet.br/events/1/0/7
+    Retorna: (1, 0, 7) -> (sport_id, category_id, tournament_id)
+    """
+    pattern = r'/events/(\d+)/(\d+)/(\d+)'
+    match = re.search(pattern, url)
+    if match:
+        return (int(match.group(1)), int(match.group(2)), int(match.group(3)))
+    return None
+
+
+def fetch_events_from_api(sport_id: int, category_id: int = 0, tournament_id: int = 0, 
+                          market_id: int = 1) -> Optional[Dict[str, Any]]:
+    """
+    Busca eventos diretamente da API XHR da BetNacional.
+    
+    Args:
+        sport_id: ID do esporte (1 = futebol)
+        category_id: ID da categoria (0 = todas)
+        tournament_id: ID do torneio/campeonato (0 = todos)
+        market_id: ID do mercado (1 = 1x2)
+    
+    Returns:
+        Dict com a resposta JSON da API ou None em caso de erro
+    """
+    api_url = "https://prod-global-bff-events.bet6.com.br/api/odds/1/events-by-seasons"
+    
+    params = {
+        'sport_id': str(sport_id),
+        'category_id': str(category_id),
+        'tournament_id': str(tournament_id),
+        'markets': str(market_id),
+        'filter_time_event': ''
+    }
+    
+    headers = {
+        'User-Agent': USER_AGENT,
+        'sec-ch-ua': '"Chromium";v="142", "Google Chrome";v="142", "Not_A Brand";v="99"',
+        'sec-ch-ua-mobile': '?0',
+        'sec-ch-ua-platform': '"Windows"',
+        'Referer': 'https://betnacional.bet.br/',
+        'Accept': 'application/json',
+        'Accept-Language': 'pt-BR,pt;q=0.9',
+    }
+    
+    try:
+        response = requests.get(api_url, params=params, headers=headers, timeout=20)
+        response.raise_for_status()
+        return response.json()
+    except Exception as e:
+        logger.warning(f"Erro ao buscar eventos da API: {e}")
+        return None
+
+
+def parse_events_from_api(json_data: Dict[str, Any], source_url: str) -> List[Any]:
+    """
+    Converte dados JSON da API para o formato esperado pelo sistema.
+    
+    Args:
+        json_data: Dados JSON retornados pela API
+        source_url: URL de origem (para metadata)
+    
+    Returns:
+        Lista de eventos no formato SimpleNamespace
+    """
+    events = []
+    
+    if not json_data or 'odds' not in json_data:
+        return events
+    
+    odds_list = json_data.get('odds', [])
+    
+    # Agrupar odds por event_id para ter as 3 odds (home, draw, away)
+    events_dict = {}
+    
+    for odd_item in odds_list:
+        event_id = odd_item.get('event_id')
+        if not event_id:
+            continue
+        
+        if event_id not in events_dict:
+            events_dict[event_id] = {
+                'event_id': event_id,
+                'home': odd_item.get('home', ''),
+                'away': odd_item.get('away', ''),
+                'date_start': odd_item.get('date_start', ''),
+                'date_start_original': odd_item.get('date_start_original', ''),
+                'tournament_name': odd_item.get('tournament_name', ''),
+                'category_name': odd_item.get('category_name', ''),
+                'is_live': bool(odd_item.get('is_live', 0)),
+                'odds': {}
+            }
+        
+        # Extrair odds por outcome_id (1=home, 2=draw, 3=away)
+        outcome_id = odd_item.get('outcome_id', '')
+        odd_value = odd_item.get('odd')
+        
+        if outcome_id and odd_value:
+            try:
+                events_dict[event_id]['odds'][outcome_id] = float(odd_value)
+            except (ValueError, TypeError):
+                pass
+    
+    # Converter para formato esperado
+    for event_id, event_data in events_dict.items():
+        odds = event_data['odds']
+        
+        # Extrair odds (1=home, 2=draw, 3=away)
+        odds_home = odds.get('1')
+        odds_draw = odds.get('2')
+        odds_away = odds.get('3')
+        
+        # Se não tiver todas as 3 odds, pular
+        if not (odds_home and odds_draw and odds_away):
+            continue
+        
+        # Converter data para formato local
+        date_start = event_data.get('date_start', '')
+        start_local_str = ''
+        
+        if date_start:
+            try:
+                # Formato da API: "2025-11-04 14:45:00"
+                dt = datetime.strptime(date_start, "%Y-%m-%d %H:%M:%S")
+                # Assumir que a data está no timezone local
+                dt_local = ZONE.localize(dt)
+                start_local_str = dt_local.strftime("%H:%M %d/%m/%Y")
+            except Exception as e:
+                logger.debug(f"Erro ao converter data {date_start}: {e}")
+                start_local_str = date_start
+        
+        # Construir URL do jogo
+        game_url = f"https://betnacional.bet.br/event/{event_id}/1/1"
+        
+        events.append(NS(
+            ext_id=str(event_id),
+            source_link=source_url,
+            game_url=game_url,
+            competition=event_data.get('tournament_name', ''),
+            team_home=event_data.get('home', ''),
+            team_away=event_data.get('away', ''),
+            start_local_str=start_local_str,
+            odds_home=odds_home,
+            odds_draw=odds_draw,
+            odds_away=odds_away,
+            is_live=event_data.get('is_live', False),
+        ))
+    
+    logger.info(f"📊 → {len(events)} eventos extraídos via API XHR | URL: {source_url}")
+    return events
+
+
+async def fetch_events_from_api_async(sport_id: int, category_id: int = 0, 
+                                       tournament_id: int = 0, market_id: int = 1) -> Optional[Dict[str, Any]]:
+    """Wrapper assíncrono para fetch_events_from_api."""
+    return await asyncio.to_thread(fetch_events_from_api, sport_id, category_id, tournament_id, market_id)
+
+
+def extract_event_id_from_url(url: str) -> Optional[int]:
+    """
+    Extrai event_id de uma URL de evento individual do BetNacional.
+    
+    Exemplo: https://betnacional.bet.br/event/1/1/62155186
+    Retorna: 62155186
+    """
+    pattern = r'/event/\d+/\d+/(\d+)'
+    match = re.search(pattern, url)
+    if match:
+        return int(match.group(1))
+    return None
+
+
+def fetch_event_odds_from_api(event_id: int, language_id: int = 1, 
+                               status_id: int = 1) -> Optional[Dict[str, Any]]:
+    """
+    Busca dados de um evento individual (incluindo odds) via API XHR.
+    
+    Args:
+        event_id: ID do evento
+        language_id: ID do idioma (1 = português)
+        status_id: ID do status (1 = ativo)
+    
+    Returns:
+        Dict com a resposta JSON da API ou None em caso de erro
+    """
+    api_url = f"https://prod-global-bff-events.bet6.com.br/api/event-odds/{event_id}"
+    
+    params = {
+        'languageId': str(language_id),
+        'marketIds': '',
+        'outcomeIds': '',
+        'statusId': str(status_id),
+    }
+    
+    headers = {
+        'User-Agent': USER_AGENT,
+        'sec-ch-ua': '"Chromium";v="142", "Google Chrome";v="142", "Not_A Brand";v="99"',
+        'sec-ch-ua-mobile': '?0',
+        'sec-ch-ua-platform': '"Windows"',
+        'Referer': 'https://betnacional.bet.br/',
+        'Accept': 'application/json',
+        'Accept-Language': 'pt-BR,pt;q=0.9',
+    }
+    
+    try:
+        response = requests.get(api_url, params=params, headers=headers, timeout=20)
+        response.raise_for_status()
+        return response.json()
+    except Exception as e:
+        logger.warning(f"Erro ao buscar odds do evento {event_id} da API: {e}")
+        return None
+
+
+def parse_event_odds_from_api(json_data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Converte dados JSON da API de evento individual para o formato esperado.
+    
+    Args:
+        json_data: Dados JSON retornados pela API
+    
+    Returns:
+        Dict com estrutura: {stats: {}, markets: {match_result: {...}, ...}}
+    """
+    data = {
+        "stats": {},
+        "markets": {}
+    }
+    
+    if not json_data or 'events' not in json_data:
+        return data
+    
+    events = json_data.get('events', [])
+    if not events:
+        return data
+    
+    # Pegar o primeiro evento (geralmente só há um)
+    event = events[0]
+    
+    # Extrair informações básicas do evento
+    event_id = event.get('event_id')
+    home = event.get('home', '')
+    away = event.get('away', '')
+    event_status_id = event.get('event_status_id', 0)
+    date_start = event.get('date_start', '')
+    
+    # Estatísticas básicas (se disponíveis na API)
+    data["stats"]["event_id"] = event_id
+    data["stats"]["home"] = home
+    data["stats"]["away"] = away
+    data["stats"]["event_status_id"] = event_status_id
+    data["stats"]["date_start"] = date_start
+    
+    # Processar odds
+    odds_list = event.get('odds', [])
+    
+    # Agrupar odds por market_id
+    markets_dict = {}
+    
+    for odd_item in odds_list:
+        market_id = odd_item.get('market_id')
+        if not market_id:
+            continue
+        
+        if market_id not in markets_dict:
+            markets_dict[market_id] = {
+                'market_id': market_id,
+                'market_status_id': odd_item.get('market_status_id', 1),
+                'odds': {}
+            }
+        
+        outcome_id = odd_item.get('outcome_id', '')
+        odd_value = odd_item.get('odd')
+        
+        if outcome_id and odd_value:
+            try:
+                markets_dict[market_id]['odds'][outcome_id] = float(odd_value)
+            except (ValueError, TypeError):
+                pass
+    
+    # Converter markets para formato esperado
+    # Market 1 = Resultado Final (1x2)
+    if 1 in markets_dict:
+        market_1 = markets_dict[1]
+        odds = market_1.get('odds', {})
+        
+        match_result = {}
+        if '1' in odds:
+            match_result['Casa'] = odds['1']
+        if '2' in odds:
+            match_result['Empate'] = odds['2']
+        if '3' in odds:
+            match_result['Fora'] = odds['3']
+        
+        if match_result:
+            data["markets"]["match_result"] = {
+                "display_name": "Resultado Final",
+                "options": match_result
+            }
+    
+    # Adicionar outros mercados conforme necessário
+    # Por enquanto, focamos no mercado 1x2 (market_id=1)
+    
+    logger.debug(f"📊 Evento {event_id}: {len(markets_dict)} mercados extraídos via API")
+    return data
+
+
+async def fetch_event_odds_from_api_async(event_id: int, language_id: int = 1, 
+                                          status_id: int = 1) -> Optional[Dict[str, Any]]:
+    """Wrapper assíncrono para fetch_event_odds_from_api."""
+    return await asyncio.to_thread(fetch_event_odds_from_api, event_id, language_id, status_id)
 
 
 def num_from_text(s: str) -> Optional[float]:
@@ -357,10 +678,36 @@ def scrape_game_result(html: str, ext_id: str) -> Optional[str]:
     return None
 
 
-def scrape_live_game_data(html: str, ext_id: str) -> Dict[str, Any]:
+def scrape_live_game_data(html: str, ext_id: str, source_url: str = None) -> Dict[str, Any]:
     """
     Extrai TUDO de uma página de jogo ao vivo: estatísticas e odds dos principais mercados.
+    
+    Prioriza API XHR se disponível, depois fallback para HTML scraping.
+    
+    Args:
+        html: HTML da página (usado como fallback)
+        ext_id: ID externo do evento
+        source_url: URL de origem do evento (opcional, usado para extrair event_id)
     """
+    # Tentar buscar via API primeiro se tivermos a URL
+    if source_url:
+        event_id = extract_event_id_from_url(source_url)
+        if event_id:
+            logger.info(f"📡 Tentando buscar dados via API para evento {event_id}")
+            try:
+                json_data = fetch_event_odds_from_api(event_id)
+                if json_data:
+                    api_data = parse_event_odds_from_api(json_data)
+                    # Se conseguiu extrair dados da API, retornar
+                    if api_data.get("markets") or api_data.get("stats"):
+                        logger.info(f"✅ Dados extraídos via API para evento {event_id}")
+                        return api_data
+                    logger.info("API retornou dados mas sem conteúdo válido, tentando HTML...")
+            except Exception as e:
+                logger.warning(f"Erro ao buscar via API: {e}. Tentando HTML scraping...")
+    
+    # Fallback para HTML scraping
+    logger.debug(f"🌐 Usando HTML scraping para evento {ext_id}")
     soup = BeautifulSoup(html, "html.parser")
     data = {
         "stats": {},

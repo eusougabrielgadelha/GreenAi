@@ -694,8 +694,9 @@ async def monitor_live_games_job():
                     logger.info(f"🔍 Análise iniciada para jogo {game.id}: {game.team_home} vs {game.team_away}")
 
                 # 2. Scrapeia os dados atuais da página do jogo
-                html = await _fetch_requests_async(game.game_url or game.source_link)
-                live_data = scrape_live_game_data(html, game.ext_id)
+                source_url = game.game_url or game.source_link
+                html = await _fetch_requests_async(source_url)
+                live_data = scrape_live_game_data(html, game.ext_id, source_url=source_url)
 
                 # Atualiza as estatísticas no tracker
                 tracker.current_score = live_data["stats"].get("score")

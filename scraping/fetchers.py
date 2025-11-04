@@ -83,16 +83,44 @@ async def _fetch_with_playwright(url: str, wait_for_selector: str = None, wait_t
 
 async def fetch_events_from_link(url: str, backend: str):
     """
-    Baixa a página (via requests ou playwright) e parseia os eventos.
-    Tenta o backend escolhido; se falhar ou vier vazio, tenta o outro.
+    Busca eventos de uma URL do BetNacional.
+    Prioriza API XHR (mais eficiente), depois fallback para HTML scraping.
     """
     from utils.analytics_logger import log_extraction
+    from scraping.betnacional import (
+        extract_ids_from_url, fetch_events_from_api_async, 
+        parse_events_from_api, try_parse_events
+    )
     
     def _other(b: str) -> str:
         return "requests" if b == "playwright" else "playwright"
 
+    logger.info("🔎 Varredura iniciada para %s", url)
+    
+    # ETAPA 1: Tentar API XHR primeiro (mais eficiente)
+    ids = extract_ids_from_url(url)
+    if ids:
+        sport_id, category_id, tournament_id = ids
+        logger.info("📡 Tentando buscar via API XHR (sport_id=%d, category_id=%d, tournament_id=%d)", 
+                   sport_id, category_id, tournament_id)
+        
+        try:
+            json_data = await fetch_events_from_api_async(sport_id, category_id, tournament_id)
+            if json_data:
+                evs = parse_events_from_api(json_data, url)
+                if evs:
+                    log_extraction(url, len(evs), "api_xhr", success=True, metadata={"method": "api"})
+                    return evs
+                logger.info("API retornou dados mas nenhum evento válido encontrado")
+            else:
+                logger.info("API não retornou dados, tentando fallback HTML...")
+        except Exception as e:
+            error_msg = str(e)[:500]
+            logger.warning("Erro ao buscar via API XHR: %s. Tentando fallback HTML...", error_msg)
+    
+    # ETAPA 2: Fallback para HTML scraping
     backend_sel = backend if backend != "auto" else _backend_auto()
-    logger.info("🔎 Varredura iniciada para %s — backend=%s", url, backend_sel)
+    logger.info("🌐 Fallback para HTML scraping — backend=%s", backend_sel)
 
     for attempt, b in enumerate([backend_sel, _other(backend_sel)]):
         try:
@@ -102,7 +130,7 @@ async def fetch_events_from_link(url: str, backend: str):
                 html = await _fetch_requests_async(url)
             evs = try_parse_events(html, url)
             if evs:
-                log_extraction(url, len(evs), b, success=True, metadata={"attempt": attempt + 1})
+                log_extraction(url, len(evs), b, success=True, metadata={"attempt": attempt + 1, "method": "html"})
                 return evs
             logger.info("Nenhum evento com backend=%s; tentando fallback…", b)
         except Exception as e:
