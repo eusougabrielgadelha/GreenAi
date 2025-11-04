@@ -1217,40 +1217,113 @@ def scrape_live_game_data(html: str, ext_id: str, source_url: str = None) -> Dic
     }
 
     # --- 1. Extrair Estatísticas (Placar, Tempo, etc) ---
-    lmt_container = soup.find("div", id="lmt-match-preview")
-    if lmt_container:
+    # Estratégia 1: Procurar scoreboard com data-testid="scoreboard"
+    scoreboard = soup.find("div", {"data-testid": "scoreboard"})
+    if scoreboard:
         try:
-            # Placar
-            score_elements = lmt_container.select(".sr-lmt-1-sbr__score")
-            if len(score_elements) >= 2:
-                home_goals = int(score_elements[0].get_text(strip=True))
-                away_goals = int(score_elements[1].get_text(strip=True))
-                data["stats"]["score"] = f"{home_goals} - {away_goals}"
-                data["stats"]["home_goals"] = home_goals
-                data["stats"]["away_goals"] = away_goals
-
-            # Tempo de Jogo
-            time_element = lmt_container.select_one(".sr-lmt-clock-v2__time")
-            if time_element:
-                data["stats"]["match_time"] = time_element.get_text(strip=True)
-
-            # Último Evento (Gol, Cartão, etc)
-            last_event_element = lmt_container.select_one(".sr-lmt-1-evt__text-content")
-            if last_event_element:
-                data["stats"]["last_event"] = last_event_element.get_text(" ", strip=True)
-            
-            # Tenta extrair estatísticas adicionais (chutes, posse, cartões, escanteios)
-            # Nota: Estrutura pode variar, então tentamos múltiplas estratégias
-            try:
-                from betting.live_validator import expand_live_game_stats
-                expanded = expand_live_game_stats(str(lmt_container))
-                if expanded:
-                    data["stats"].update(expanded)
-            except Exception:
-                pass  # Não crítico se não conseguir extrair
-
+            # Extrair tabela dentro do scoreboard
+            table = scoreboard.find("table")
+            if table:
+                rows = table.find_all("tr")
+                
+                # Primeira linha: cabeçalho com tempo e estatísticas
+                if len(rows) > 0:
+                    header_row = rows[0]
+                    # Extrair tempo (primeira célula)
+                    time_cell = header_row.find("td")
+                    if time_cell:
+                        time_text = time_cell.get_text(strip=True)
+                        # Remover ícones e extrair apenas números
+                        import re
+                        time_match = re.search(r'(\d+)', time_text)
+                        if time_match:
+                            data["stats"]["match_time"] = time_match.group(1)
+                            data["stats"]["match_time_raw"] = time_text
+                
+                # Próximas linhas: times com estatísticas
+                if len(rows) >= 3:
+                    # Linha 1: Time da casa
+                    home_row = rows[1]
+                    home_cells = home_row.find_all("td")
+                    if len(home_cells) >= 6:
+                        home_team = home_cells[0].get_text(strip=True)
+                        home_corners = home_cells[1].get_text(strip=True)
+                        home_yellow = home_cells[2].get_text(strip=True)
+                        home_red = home_cells[3].get_text(strip=True)
+                        home_penalties = home_cells[4].get_text(strip=True)
+                        home_goals = home_cells[5].get_text(strip=True)
+                        
+                        data["stats"]["home_team"] = home_team
+                        data["stats"]["home_corners"] = int(home_corners) if home_corners.isdigit() else 0
+                        data["stats"]["home_yellow_cards"] = int(home_yellow) if home_yellow.isdigit() else 0
+                        data["stats"]["home_red_cards"] = int(home_red) if home_red.isdigit() else 0
+                        data["stats"]["home_penalties"] = int(home_penalties) if home_penalties.isdigit() else 0
+                        data["stats"]["home_goals"] = int(home_goals) if home_goals.isdigit() else 0
+                    
+                    # Linha 2: Time visitante
+                    away_row = rows[2]
+                    away_cells = away_row.find_all("td")
+                    if len(away_cells) >= 6:
+                        away_team = away_cells[0].get_text(strip=True)
+                        away_corners = away_cells[1].get_text(strip=True)
+                        away_yellow = away_cells[2].get_text(strip=True)
+                        away_red = away_cells[3].get_text(strip=True)
+                        away_penalties = away_cells[4].get_text(strip=True)
+                        away_goals = away_cells[5].get_text(strip=True)
+                        
+                        data["stats"]["away_team"] = away_team
+                        data["stats"]["away_corners"] = int(away_corners) if away_corners.isdigit() else 0
+                        data["stats"]["away_yellow_cards"] = int(away_yellow) if away_yellow.isdigit() else 0
+                        data["stats"]["away_red_cards"] = int(away_red) if away_red.isdigit() else 0
+                        data["stats"]["away_penalties"] = int(away_penalties) if away_penalties.isdigit() else 0
+                        data["stats"]["away_goals"] = int(away_goals) if away_goals.isdigit() else 0
+                        
+                        # Criar placar
+                        if "home_goals" in data["stats"] and "away_goals" in data["stats"]:
+                            data["stats"]["score"] = f"{data['stats']['home_goals']} - {data['stats']['away_goals']}"
+                            
         except Exception as e:
-            logger.error(f"Erro ao extrair estatísticas do jogo ao vivo {ext_id}: {e}")
+            logger.debug(f"Erro ao extrair estatísticas do scoreboard para jogo {ext_id}: {e}")
+    
+    # Estratégia 2: Fallback para estrutura antiga (lmt-match-preview)
+    if not data["stats"].get("score"):
+        lmt_container = soup.find("div", id="lmt-match-preview")
+        if lmt_container:
+            try:
+                # Placar
+                score_elements = lmt_container.select(".sr-lmt-1-sbr__score")
+                if len(score_elements) >= 2:
+                    home_goals = int(score_elements[0].get_text(strip=True))
+                    away_goals = int(score_elements[1].get_text(strip=True))
+                    data["stats"]["score"] = f"{home_goals} - {away_goals}"
+                    data["stats"]["home_goals"] = home_goals
+                    data["stats"]["away_goals"] = away_goals
+
+                # Tempo de Jogo
+                if not data["stats"].get("match_time"):
+                    time_element = lmt_container.select_one(".sr-lmt-clock-v2__time")
+                    if time_element:
+                        data["stats"]["match_time"] = time_element.get_text(strip=True)
+
+                # Último Evento (Gol, Cartão, etc)
+                last_event_element = lmt_container.select_one(".sr-lmt-1-evt__text-content")
+                if last_event_element:
+                    data["stats"]["last_event"] = last_event_element.get_text(" ", strip=True)
+                
+            except Exception as e:
+                logger.debug(f"Erro ao extrair estatísticas do lmt-container para jogo {ext_id}: {e}")
+    
+    # Tenta extrair estatísticas adicionais usando função auxiliar
+    try:
+        from betting.live_validator import expand_live_game_stats
+        expanded = expand_live_game_stats(str(soup))
+        if expanded:
+            # Merge sem sobrescrever dados já extraídos
+            for key, value in expanded.items():
+                if key not in data["stats"]:
+                    data["stats"][key] = value
+    except Exception:
+        pass  # Não crítico se não conseguir extrair
 
     # --- 2. Extrair Mercados de Apostas ---
     market_name_map = {
