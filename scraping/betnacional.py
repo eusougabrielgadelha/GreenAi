@@ -77,13 +77,20 @@ def fetch_events_from_api(sport_id: int, category_id: int = 0, tournament_id: in
     }
     
     headers = {
-        'User-Agent': USER_AGENT,
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36',
+        'Accept': 'application/json, text/plain, */*',
+        'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Referer': 'https://betnacional.bet.br/',
+        'Origin': 'https://betnacional.bet.br',
         'sec-ch-ua': '"Chromium";v="142", "Google Chrome";v="142", "Not_A Brand";v="99"',
         'sec-ch-ua-mobile': '?0',
         'sec-ch-ua-platform': '"Windows"',
-        'Referer': 'https://betnacional.bet.br/',
-        'Accept': 'application/json',
-        'Accept-Language': 'pt-BR,pt;q=0.9',
+        'sec-fetch-dest': 'empty',
+        'sec-fetch-mode': 'cors',
+        'sec-fetch-site': 'cross-site',
+        'Connection': 'keep-alive',
+        'Cache-Control': 'no-cache',
     }
     
     try:
@@ -236,13 +243,20 @@ def fetch_event_odds_from_api(event_id: int, language_id: int = 1,
     }
     
     headers = {
-        'User-Agent': USER_AGENT,
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36',
+        'Accept': 'application/json, text/plain, */*',
+        'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Referer': 'https://betnacional.bet.br/',
+        'Origin': 'https://betnacional.bet.br',
         'sec-ch-ua': '"Chromium";v="142", "Google Chrome";v="142", "Not_A Brand";v="99"',
         'sec-ch-ua-mobile': '?0',
         'sec-ch-ua-platform': '"Windows"',
-        'Referer': 'https://betnacional.bet.br/',
-        'Accept': 'application/json',
-        'Accept-Language': 'pt-BR,pt;q=0.9',
+        'sec-fetch-dest': 'empty',
+        'sec-fetch-mode': 'cors',
+        'sec-fetch-site': 'cross-site',
+        'Connection': 'keep-alive',
+        'Cache-Control': 'no-cache',
     }
     
     try:
