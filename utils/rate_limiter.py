@@ -212,9 +212,9 @@ def with_retry(
 
 
 # Instâncias globais de rate limiters
-# Para API XHR: 10 requisições por minuto
-api_rate_limiter = RateLimiter(max_requests=10, window_seconds=60)
+# Para API XHR: 8 requisições por minuto (mais conservador para evitar bloqueios)
+api_rate_limiter = RateLimiter(max_requests=8, window_seconds=60)
 
-# Para HTML scraping: 5 requisições por minuto (mais conservador)
-html_rate_limiter = RateLimiter(max_requests=5, window_seconds=60)
+# Para HTML scraping: 3 requisições por minuto (muito conservador)
+html_rate_limiter = RateLimiter(max_requests=3, window_seconds=60)
 

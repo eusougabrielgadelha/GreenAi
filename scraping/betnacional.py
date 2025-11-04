@@ -62,10 +62,17 @@ def fetch_events_from_api(sport_id: int, category_id: int = 0, tournament_id: in
         category_id: ID da categoria (0 = todas)
         tournament_id: ID do torneio/campeonato (0 = todos)
         market_id: ID do mercado (1 = 1x2)
+        rate_limiter: Rate limiter opcional (não usado diretamente aqui, mas para compatibilidade)
     
     Returns:
         Dict com a resposta JSON da API ou None em caso de erro
     """
+    from utils.anti_block import (
+        get_enhanced_headers_for_api, api_throttle, 
+        add_random_delay
+    )
+    from utils.bypass_detection import get_bypass_detector
+    
     api_url = "https://prod-global-bff-events.bet6.com.br/api/odds/1/events-by-seasons"
     
     params = {
@@ -76,25 +83,29 @@ def fetch_events_from_api(sport_id: int, category_id: int = 0, tournament_id: in
         'filter_time_event': ''
     }
     
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36',
-        'Accept': 'application/json, text/plain, */*',
-        'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
-        'Accept-Encoding': 'gzip, deflate, br',
-        'Referer': 'https://betnacional.bet.br/',
-        'Origin': 'https://betnacional.bet.br',
-        'sec-ch-ua': '"Chromium";v="142", "Google Chrome";v="142", "Not_A Brand";v="99"',
-        'sec-ch-ua-mobile': '?0',
-        'sec-ch-ua-platform': '"Windows"',
-        'sec-fetch-dest': 'empty',
-        'sec-fetch-mode': 'cors',
-        'sec-fetch-site': 'cross-site',
-        'Connection': 'keep-alive',
-        'Cache-Control': 'no-cache',
-    }
+    # Usar bypass detector para requisições mais robustas
+    detector = get_bypass_detector()
+    session = detector.create_stealth_session(use_cookies=True)
+    
+    # Usar headers otimizados com rotação de User-Agent
+    headers = get_enhanced_headers_for_api()
     
     try:
-        response = requests.get(api_url, params=params, headers=headers, timeout=API_TIMEOUT)
+        # Fazer requisição com bypass automático
+        response = detector.make_request_with_bypass(
+            session=session,
+            url=api_url,
+            method="GET",
+            params=params,
+            headers=headers,
+            max_retries=3,
+            use_cookies=True
+        )
+        
+        if response is None:
+            logger.warning("Falha ao fazer requisição com bypass, retornando None")
+            return None
+        
         response.raise_for_status()
         return response.json()
     except Exception as e:
@@ -302,6 +313,11 @@ def fetch_event_odds_from_api(event_id: int, language_id: int = 1,
     Returns:
         Dict com a resposta JSON da API ou None em caso de erro
     """
+    from utils.anti_block import (
+        get_enhanced_headers_for_api, get_realistic_referer
+    )
+    from utils.bypass_detection import get_bypass_detector
+    
     api_url = f"https://prod-global-bff-events.bet6.com.br/api/event-odds/{event_id}"
     
     params = {
@@ -311,25 +327,31 @@ def fetch_event_odds_from_api(event_id: int, language_id: int = 1,
         'statusId': str(status_id),
     }
     
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36',
-        'Accept': 'application/json, text/plain, */*',
-        'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
-        'Accept-Encoding': 'gzip, deflate, br',
-        'Referer': 'https://betnacional.bet.br/',
-        'Origin': 'https://betnacional.bet.br',
-        'sec-ch-ua': '"Chromium";v="142", "Google Chrome";v="142", "Not_A Brand";v="99"',
-        'sec-ch-ua-mobile': '?0',
-        'sec-ch-ua-platform': '"Windows"',
-        'sec-fetch-dest': 'empty',
-        'sec-fetch-mode': 'cors',
-        'sec-fetch-site': 'cross-site',
-        'Connection': 'keep-alive',
-        'Cache-Control': 'no-cache',
-    }
+    # Usar bypass detector para requisições mais robustas
+    detector = get_bypass_detector()
+    session = detector.create_stealth_session(use_cookies=True)
+    
+    # Usar headers otimizados com referer realista
+    referer = get_realistic_referer(f"https://betnacional.bet.br/event/1/1/{event_id}")
+    headers = get_enhanced_headers_for_api()
+    headers['Referer'] = referer
     
     try:
-        response = requests.get(api_url, params=params, headers=headers, timeout=API_TIMEOUT)
+        # Fazer requisição com bypass automático
+        response = detector.make_request_with_bypass(
+            session=session,
+            url=api_url,
+            method="GET",
+            params=params,
+            headers=headers,
+            max_retries=3,
+            use_cookies=True
+        )
+        
+        if response is None:
+            logger.warning("Falha ao fazer requisição com bypass, retornando None")
+            return None
+        
         response.raise_for_status()
         return response.json()
     except Exception as e:

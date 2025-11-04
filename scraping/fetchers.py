@@ -13,10 +13,29 @@ HEADERS = {"User-Agent": USER_AGENT}
 
 
 def fetch_requests(url: str) -> str:
-    """Baixa uma página usando requests (síncrono)."""
-    r = requests.get(url, headers=HEADERS, timeout=HTML_TIMEOUT)
-    r.raise_for_status()
-    return r.text
+    """Baixa uma página usando requests (síncrono) com cookies persistentes e bypass."""
+    from utils.bypass_detection import get_bypass_detector
+    
+    detector = get_bypass_detector()
+    session = detector.create_stealth_session(use_cookies=True)
+    session.headers.update(HEADERS)
+    
+    # Fazer requisição com bypass automático
+    response = detector.make_request_with_bypass(
+        session=session,
+        url=url,
+        method="GET",
+        params=None,
+        headers=None,
+        max_retries=3,
+        use_cookies=True
+    )
+    
+    if response is None:
+        raise Exception("Falha ao fazer requisição com bypass")
+    
+    response.raise_for_status()
+    return response.text
 
 
 async def _fetch_requests_async(url: str) -> str:

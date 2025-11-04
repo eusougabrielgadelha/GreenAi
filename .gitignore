@@ -76,3 +76,7 @@ arquivos_antigos/
 # Playwright
 .playwright/
 
+# Cookies persistentes
+cookies/
+*.pkl
+
