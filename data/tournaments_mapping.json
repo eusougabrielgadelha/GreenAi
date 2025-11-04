@@ -1,0 +1,3131 @@
+[
+  {
+    "sport_id": 1,
+    "category_id": 14,
+    "tournament_id": 170,
+    "tournament_name": "1. HNL",
+    "category_name": "Croácia",
+    "category_image_name": "hr",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/14/170",
+    "categories": [
+      {
+        "category_id": 14,
+        "category_name": "Croácia",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 18,
+    "tournament_id": 172,
+    "tournament_name": "1. Liga",
+    "category_name": "República Checa",
+    "category_image_name": "cz",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/18/172",
+    "categories": [
+      {
+        "category_id": 18,
+        "category_name": "República Checa",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 46,
+    "tournament_id": 98,
+    "tournament_name": "1. Liga",
+    "category_name": "Turquia",
+    "category_image_name": "tr",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/46/98",
+    "categories": [
+      {
+        "category_id": 46,
+        "category_name": "Turquia",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 159,
+    "tournament_id": 199,
+    "tournament_name": "1. MFL",
+    "category_name": "Macedónia",
+    "category_image_name": "mk",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/159/199",
+    "categories": [
+      {
+        "category_id": 159,
+        "category_name": "Macedónia",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 376,
+    "tournament_id": 742,
+    "tournament_name": "1ª Divisão",
+    "category_name": "Andorra",
+    "category_image_name": "ad",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/376/742",
+    "categories": [
+      {
+        "category_id": 376,
+        "category_name": "Andorra",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 297,
+    "tournament_id": 736,
+    "tournament_name": "1ª Divisão",
+    "category_name": "Azerbaijão",
+    "category_image_name": "az",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/297/736",
+    "categories": [
+      {
+        "category_id": 297,
+        "category_name": "Azerbaijão",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 102,
+    "tournament_id": 171,
+    "tournament_name": "1ª Divisão",
+    "category_name": "Chipre",
+    "category_image_name": "cy",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/102/171",
+    "categories": [
+      {
+        "category_id": 102,
+        "category_name": "Chipre",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 8,
+    "tournament_id": 47,
+    "tournament_name": "1ª Divisão",
+    "category_name": "Dinamarca",
+    "category_image_name": "dk",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/8/47",
+    "categories": [
+      {
+        "category_id": 8,
+        "category_name": "Dinamarca",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 5,
+    "tournament_id": 22,
+    "tournament_name": "1ª Divisão ",
+    "category_name": "Noruega",
+    "category_image_name": "no",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/5/22",
+    "categories": [
+      {
+        "category_id": 5,
+        "category_name": "Noruega",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 30,
+    "tournament_id": 44,
+    "tournament_name": "2. Bundesliga",
+    "category_name": "Alemanha",
+    "category_image_name": "de",
+    "continent_name": "Europa",
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/30/44",
+    "categories": [
+      {
+        "category_id": 30,
+        "category_name": "Alemanha",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 14,
+    "tournament_id": 724,
+    "tournament_name": "2. HNL",
+    "category_name": "Croácia",
+    "category_image_name": "hr",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/14/724",
+    "categories": [
+      {
+        "category_id": 14,
+        "category_name": "Croácia",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 17,
+    "tournament_id": 135,
+    "tournament_name": "2. Liga",
+    "category_name": "Áustria",
+    "category_image_name": "at",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/17/135",
+    "categories": [
+      {
+        "category_id": 17,
+        "category_name": "Áustria",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 23,
+    "tournament_id": 224,
+    "tournament_name": "2. Liga",
+    "category_name": "Eslováquia",
+    "category_image_name": "sk",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/23/224",
+    "categories": [
+      {
+        "category_id": 23,
+        "category_name": "Eslováquia",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 21,
+    "tournament_id": 40305,
+    "tournament_name": "2. Liga, Division A",
+    "category_name": "Rússia",
+    "category_image_name": "ru",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/21/40305",
+    "categories": [
+      {
+        "category_id": 21,
+        "category_name": "Rússia",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 8,
+    "tournament_id": 65,
+    "tournament_name": "2ª Divisão",
+    "category_name": "Dinamarca",
+    "category_image_name": "dk",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/8/65",
+    "categories": [
+      {
+        "category_id": 8,
+        "category_name": "Dinamarca",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 24,
+    "tournament_id": 532,
+    "tournament_name": "2ª Liga",
+    "category_name": "Eslovénia",
+    "category_image_name": "si",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/24/532",
+    "categories": [
+      {
+        "category_id": 24,
+        "category_name": "Eslovénia",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 254,
+    "tournament_id": 97,
+    "tournament_name": "2ª Liga",
+    "category_name": "Turquia Amadores",
+    "category_image_name": "tr",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/254/97",
+    "categories": [
+      {
+        "category_id": 254,
+        "category_name": "Turquia Amadores",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 30,
+    "tournament_id": 491,
+    "tournament_name": "3. Liga",
+    "category_name": "Alemanha",
+    "category_image_name": "de",
+    "continent_name": "Europa",
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/30/491",
+    "categories": [
+      {
+        "category_id": 30,
+        "category_name": "Alemanha",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 160,
+    "tournament_id": 198,
+    "tournament_name": "A Liga",
+    "category_name": "Lituânia",
+    "category_image_name": "lt",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/160/198",
+    "categories": [
+      {
+        "category_id": 160,
+        "category_name": "Lituânia",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 34,
+    "tournament_id": 136,
+    "tournament_name": "A-League",
+    "category_name": "Austrália",
+    "category_image_name": "au",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/34/136",
+    "categories": [
+      {
+        "category_id": 34,
+        "category_name": "Austrália",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 393,
+    "tournament_id": 463,
+    "tournament_name": "AFC Champions League Elite",
+    "category_name": "Clubes Internacionais",
+    "category_image_name": null,
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/393/463",
+    "categories": [
+      {
+        "category_id": 393,
+        "category_name": "Clubes Internacionais",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 393,
+    "tournament_id": 668,
+    "tournament_name": "AFC Champions League Two",
+    "category_name": "Clubes Internacionais",
+    "category_image_name": null,
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/393/668",
+    "categories": [
+      {
+        "category_id": 393,
+        "category_name": "Clubes Internacionais",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 30,
+    "tournament_id": 35,
+    "tournament_name": "Alemanha - Bundesliga",
+    "category_name": "",
+    "category_image_name": null,
+    "continent_name": null,
+    "season_id": 130571,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/30/35",
+    "categories": [
+      {
+        "category_id": 30,
+        "category_name": "Alemanha",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 9,
+    "tournament_id": 40,
+    "tournament_name": "Allsvenskan",
+    "category_name": "Suécia",
+    "category_image_name": "se",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/9/40",
+    "categories": [
+      {
+        "category_id": 9,
+        "category_name": "Suécia",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 4,
+    "tournament_id": 851,
+    "tournament_name": "Amistosos Internacionais",
+    "category_name": "Internacional",
+    "category_image_name": null,
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/4/851",
+    "categories": [
+      {
+        "category_id": 4,
+        "category_name": "Internacional",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 4,
+    "tournament_id": 26916,
+    "tournament_name": "Bola de Ouro 2025",
+    "category_name": "Internacional",
+    "category_image_name": null,
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/4/26916",
+    "categories": [
+      {
+        "category_id": 4,
+        "category_name": "Internacional",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 303,
+    "tournament_id": 937,
+    "tournament_name": "Botola",
+    "category_name": "Marrocos",
+    "category_image_name": "ma",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/303/937",
+    "categories": [
+      {
+        "category_id": 303,
+        "category_name": "Marrocos",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 13,
+    "tournament_id": 325,
+    "tournament_name": "Brasileirão Série A",
+    "category_name": "",
+    "image_name": "br",
+    "season_id": 128461,
+    "is_important": true,
+    "url": "https://betnacional.bet.br/events/1/13/325",
+    "categories": [
+      {
+        "category_id": 9999,
+        "category_name": "Campeonatos Importantes",
+        "is_primary": false
+      },
+      {
+        "category_id": 13,
+        "category_name": "Brasil",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 13,
+    "tournament_id": 390,
+    "tournament_name": "Brasileirão Série B",
+    "category_name": "",
+    "image_name": "br",
+    "season_id": 128819,
+    "is_important": true,
+    "url": "https://betnacional.bet.br/events/1/13/390",
+    "categories": [
+      {
+        "category_id": 9999,
+        "category_name": "Campeonatos Importantes",
+        "is_primary": false
+      },
+      {
+        "category_id": 13,
+        "category_name": "Brasil",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 17,
+    "tournament_id": 45,
+    "tournament_name": "Bundesliga",
+    "category_name": "Áustria",
+    "category_image_name": "at",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/17/45",
+    "categories": [
+      {
+        "category_id": 17,
+        "category_name": "Áustria",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 122,
+    "tournament_id": 232,
+    "tournament_name": "Bundesliga Feminina",
+    "category_name": "Alemanha Amadores",
+    "category_image_name": "de",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/122/232",
+    "categories": [
+      {
+        "category_id": 122,
+        "category_name": "Alemanha Amadores",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 388,
+    "tournament_id": 28432,
+    "tournament_name": "Canadian Premier League",
+    "category_name": "Canadá",
+    "category_image_name": "ca",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/388/28432",
+    "categories": [
+      {
+        "category_id": 388,
+        "category_name": "Canadá",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 22,
+    "tournament_id": 331,
+    "tournament_name": "Challenge Cup",
+    "category_name": "Escócia",
+    "category_image_name": "gb-sct",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/22/331",
+    "categories": [
+      {
+        "category_id": 22,
+        "category_name": "Escócia",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 33,
+    "tournament_id": 9,
+    "tournament_name": "Challenger Pro League",
+    "category_name": "Bélgica",
+    "category_image_name": "be",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/33/9",
+    "categories": [
+      {
+        "category_id": 33,
+        "category_name": "Bélgica",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 22,
+    "tournament_id": 206,
+    "tournament_name": "Championship",
+    "category_name": "Escócia",
+    "category_image_name": "gb-sct",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/22/206",
+    "categories": [
+      {
+        "category_id": 22,
+        "category_name": "Escócia",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 48,
+    "tournament_id": 1024,
+    "tournament_name": "Copa Argentina",
+    "category_name": "Argentina",
+    "category_image_name": "ar",
+    "continent_name": "Américas",
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/48/1024",
+    "categories": [
+      {
+        "category_id": 48,
+        "category_name": "Argentina",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 30,
+    "tournament_id": 217,
+    "tournament_name": "Copa da Alemanha",
+    "category_name": "Alemanha",
+    "category_image_name": "de",
+    "continent_name": "Europa",
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/30/217",
+    "categories": [
+      {
+        "category_id": 30,
+        "category_name": "Alemanha",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 78,
+    "tournament_id": 365,
+    "tournament_name": "Copa da Bulgária",
+    "category_name": "Bulgária",
+    "category_image_name": "bg",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/78/365",
+    "categories": [
+      {
+        "category_id": 78,
+        "category_name": "Bulgária",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 33,
+    "tournament_id": 326,
+    "tournament_name": "Copa da Bélgica",
+    "category_name": "Bélgica",
+    "category_image_name": "be",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/33/326",
+    "categories": [
+      {
+        "category_id": 33,
+        "category_name": "Bélgica",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 24,
+    "tournament_id": 291,
+    "tournament_name": "Copa da Eslovênia",
+    "category_name": "Eslovénia",
+    "category_image_name": "si",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/24/291",
+    "categories": [
+      {
+        "category_id": 24,
+        "category_name": "Eslovénia",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 7,
+    "tournament_id": 335,
+    "tournament_name": "Copa da França",
+    "category_name": "França",
+    "category_image_name": "fr",
+    "continent_name": "Europa",
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/7/335",
+    "categories": [
+      {
+        "category_id": 7,
+        "category_name": "França",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 67,
+    "tournament_id": 375,
+    "tournament_name": "Copa da Grécia ",
+    "category_name": "Grécia",
+    "category_image_name": "gr",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/67/375",
+    "categories": [
+      {
+        "category_id": 67,
+        "category_name": "Grécia",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 31,
+    "tournament_id": 328,
+    "tournament_name": "Copa da Itália",
+    "category_name": "Itália",
+    "category_image_name": "it",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/31/328",
+    "categories": [
+      {
+        "category_id": 31,
+        "category_name": "Itália",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 130,
+    "tournament_id": 611,
+    "tournament_name": "Copa da Liga",
+    "category_name": "Irlanda do Norte",
+    "category_image_name": "gb-nir",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/130/611",
+    "categories": [
+      {
+        "category_id": 130,
+        "category_name": "Irlanda do Norte",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 18,
+    "tournament_id": 282,
+    "tournament_name": "Copa da Rep. Checa",
+    "category_name": "República Checa",
+    "category_image_name": "cz",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/18/282",
+    "categories": [
+      {
+        "category_id": 18,
+        "category_name": "República Checa",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 21,
+    "tournament_id": 91,
+    "tournament_name": "Copa da Rússia",
+    "category_name": "Rússia",
+    "category_image_name": "ru",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/21/91",
+    "categories": [
+      {
+        "category_id": 21,
+        "category_name": "Rússia",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 4,
+    "tournament_id": 270,
+    "tournament_name": "Copa das Nações Africanas",
+    "category_name": "Internacional",
+    "category_image_name": null,
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/4/270",
+    "categories": [
+      {
+        "category_id": 4,
+        "category_name": "Internacional",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 32,
+    "tournament_id": 24864,
+    "tournament_name": "Copa De La Reina",
+    "category_name": "Espanha",
+    "category_image_name": "es",
+    "continent_name": "Europa",
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/32/24864",
+    "categories": [
+      {
+        "category_id": 32,
+        "category_name": "Espanha",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 13,
+    "tournament_id": 373,
+    "tournament_name": "Copa do Brasil",
+    "category_name": "Brasil",
+    "category_image_name": "br",
+    "continent_name": "Américas",
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/13/373",
+    "categories": [
+      {
+        "category_id": 13,
+        "category_name": "Brasil",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 102,
+    "tournament_id": 315,
+    "tournament_name": "Copa do Chipre",
+    "category_name": "Chipre",
+    "category_image_name": "cy",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/102/315",
+    "categories": [
+      {
+        "category_id": 102,
+        "category_name": "Chipre",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 4,
+    "tournament_id": 16,
+    "tournament_name": "Copa do Mundo",
+    "category_name": "Internacional",
+    "category_image_name": null,
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/4/16",
+    "categories": [
+      {
+        "category_id": 4,
+        "category_name": "Internacional",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 32,
+    "tournament_id": 329,
+    "tournament_name": "Copa do Rei",
+    "category_name": "Espanha",
+    "category_image_name": "es",
+    "continent_name": "Europa",
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/32/329",
+    "categories": [
+      {
+        "category_id": 32,
+        "category_name": "Espanha",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 393,
+    "tournament_id": 384,
+    "tournament_name": "Copa Libertadores",
+    "category_name": "Clubes Internacionais",
+    "category_image_name": null,
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/393/384",
+    "categories": [
+      {
+        "category_id": 393,
+        "category_name": "Clubes Internacionais",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 17,
+    "tournament_id": 445,
+    "tournament_name": "Copa OFB",
+    "category_name": "Áustria",
+    "category_image_name": "at",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/17/445",
+    "categories": [
+      {
+        "category_id": 17,
+        "category_name": "Áustria",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 393,
+    "tournament_id": 480,
+    "tournament_name": "Copa Sul-Americana",
+    "category_name": "Clubes Internacionais",
+    "category_image_name": null,
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/393/480",
+    "categories": [
+      {
+        "category_id": 393,
+        "category_name": "Clubes Internacionais",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 31,
+    "tournament_id": 39221,
+    "tournament_name": "Coppa Italia Serie D",
+    "category_name": "Itália",
+    "category_image_name": "it",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/31/39221",
+    "categories": [
+      {
+        "category_id": 31,
+        "category_name": "Itália",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 9,
+    "tournament_id": 214,
+    "tournament_name": "Damallsvenskan, Feminino",
+    "category_name": "Suécia",
+    "category_image_name": "se",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/9/214",
+    "categories": [
+      {
+        "category_id": 9,
+        "category_name": "Suécia",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 8,
+    "tournament_id": 76,
+    "tournament_name": "DBU Pokalen",
+    "category_name": "Dinamarca",
+    "category_image_name": "dk",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/8/76",
+    "categories": [
+      {
+        "category_id": 8,
+        "category_name": "Dinamarca",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 379,
+    "tournament_id": 33980,
+    "tournament_name": "División Profesional",
+    "category_name": "Bolívia",
+    "category_image_name": "bo",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/379/33980",
+    "categories": [
+      {
+        "category_id": 379,
+        "category_name": "Bolívia",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 197,
+    "tournament_id": 690,
+    "tournament_name": "Divisão Nacional",
+    "category_name": "Luxemburgo",
+    "category_image_name": "lu",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/197/690",
+    "categories": [
+      {
+        "category_id": 197,
+        "category_name": "Luxemburgo",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 35,
+    "tournament_id": 131,
+    "tournament_name": "Eerste Divisie",
+    "category_name": "Holanda",
+    "category_image_name": "nl",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/35/131",
+    "categories": [
+      {
+        "category_id": 35,
+        "category_name": "Holanda",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 47,
+    "tournament_id": 202,
+    "tournament_name": "Ekstraklasa",
+    "category_name": "Polónia",
+    "category_image_name": "pl",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/47/202",
+    "categories": [
+      {
+        "category_id": 47,
+        "category_name": "Polónia",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 8,
+    "tournament_id": 14193,
+    "tournament_name": "Elitedivisionen, Feminino",
+    "category_name": "Dinamarca",
+    "category_image_name": "dk",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/8/14193",
+    "categories": [
+      {
+        "category_id": 8,
+        "category_name": "Dinamarca",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 5,
+    "tournament_id": 20,
+    "tournament_name": "Elitserien",
+    "category_name": "Noruega",
+    "category_image_name": "no",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/5/20",
+    "categories": [
+      {
+        "category_id": 5,
+        "category_name": "Noruega",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 35,
+    "tournament_id": 37,
+    "tournament_name": "Eredivisie",
+    "category_name": "Holanda",
+    "category_image_name": "nl",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/35/37",
+    "categories": [
+      {
+        "category_id": 35,
+        "category_name": "Holanda",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 32,
+    "tournament_id": 8,
+    "tournament_name": "Espanha - LaLiga",
+    "category_name": "",
+    "image_name": "es",
+    "season_id": 130805,
+    "is_important": true,
+    "url": "https://betnacional.bet.br/events/1/32/8",
+    "categories": [
+      {
+        "category_id": 9999,
+        "category_name": "Campeonatos Importantes",
+        "is_primary": false
+      },
+      {
+        "category_id": 32,
+        "category_name": "Espanha",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 4,
+    "tournament_id": 11,
+    "tournament_name": "Europa - Eliminatórias da Copa",
+    "category_name": "Internacional",
+    "category_image_name": null,
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/4/11",
+    "categories": [
+      {
+        "category_id": 4,
+        "category_name": "Internacional",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 252,
+    "tournament_id": 1044,
+    "tournament_name": "FA Super League Feminina",
+    "category_name": "Inglaterra Amadores",
+    "category_image_name": "gb",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/252/1044",
+    "categories": [
+      {
+        "category_id": 252,
+        "category_name": "Inglaterra Amadores",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 18,
+    "tournament_id": 205,
+    "tournament_name": "FNL",
+    "category_name": "República Checa",
+    "category_image_name": "cz",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/18/205",
+    "categories": [
+      {
+        "category_id": 18,
+        "category_name": "República Checa",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 47,
+    "tournament_id": 229,
+    "tournament_name": "I Liga",
+    "category_name": "Polónia",
+    "category_image_name": "pl",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/47/229",
+    "categories": [
+      {
+        "category_id": 47,
+        "category_name": "Polónia",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 47,
+    "tournament_id": 515,
+    "tournament_name": "II Liga",
+    "category_name": "Polónia",
+    "category_image_name": "pl",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/47/515",
+    "categories": [
+      {
+        "category_id": 47,
+        "category_name": "Polónia",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 1,
+    "tournament_id": 18,
+    "tournament_name": "Inglaterra - Championship",
+    "category_name": "",
+    "image_name": "gb",
+    "season_id": 130921,
+    "is_important": true,
+    "url": "https://betnacional.bet.br/events/1/1/18",
+    "categories": [
+      {
+        "category_id": 9999,
+        "category_name": "Campeonatos Importantes",
+        "is_primary": false
+      },
+      {
+        "category_id": 1,
+        "category_name": "Inglaterra",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 1,
+    "tournament_id": 17,
+    "tournament_name": "Inglaterra - Premier League",
+    "category_name": "",
+    "image_name": "gb",
+    "season_id": 130281,
+    "is_important": true,
+    "url": "https://betnacional.bet.br/events/1/1/17",
+    "categories": [
+      {
+        "category_id": 9999,
+        "category_name": "Campeonatos Importantes",
+        "is_primary": false
+      },
+      {
+        "category_id": 1,
+        "category_name": "Inglaterra",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 252,
+    "tournament_id": 1131,
+    "tournament_name": "Isthmian League, Pr. Div",
+    "category_name": "Inglaterra Amadores",
+    "category_image_name": "gb",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/252/1131",
+    "categories": [
+      {
+        "category_id": 252,
+        "category_name": "Inglaterra Amadores",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 291,
+    "tournament_id": 777,
+    "tournament_name": "K-Liga Challenge",
+    "category_name": "República da Coreia",
+    "category_image_name": "kr",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/291/777",
+    "categories": [
+      {
+        "category_id": 291,
+        "category_name": "República da Coreia",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 291,
+    "tournament_id": 410,
+    "tournament_name": "K-Liga Clássica",
+    "category_name": "República da Coreia",
+    "category_image_name": "kr",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/291/410",
+    "categories": [
+      {
+        "category_id": 291,
+        "category_name": "República da Coreia",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 32,
+    "tournament_id": 54,
+    "tournament_name": "LaLiga 2",
+    "category_name": "Espanha",
+    "category_image_name": "es",
+    "continent_name": "Europa",
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/32/54",
+    "categories": [
+      {
+        "category_id": 32,
+        "category_name": "Espanha",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 131,
+    "tournament_id": 367,
+    "tournament_name": "League Cup",
+    "category_name": "País de Gales",
+    "category_image_name": "gb-wls",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/131/367",
+    "categories": [
+      {
+        "category_id": 131,
+        "category_name": "País de Gales",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 22,
+    "tournament_id": 207,
+    "tournament_name": "League One",
+    "category_name": "Escócia",
+    "category_image_name": "gb-sct",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/22/207",
+    "categories": [
+      {
+        "category_id": 22,
+        "category_name": "Escócia",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 22,
+    "tournament_id": 209,
+    "tournament_name": "League Two",
+    "category_name": "Escócia",
+    "category_image_name": "gb-sct",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/22/209",
+    "categories": [
+      {
+        "category_id": 22,
+        "category_name": "Escócia",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 368,
+    "tournament_id": 1015,
+    "tournament_name": "Liga 1",
+    "category_name": "Indonésia",
+    "category_image_name": "id",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/368/1015",
+    "categories": [
+      {
+        "category_id": 368,
+        "category_name": "Indonésia",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 378,
+    "tournament_id": 984,
+    "tournament_name": "Liga 1",
+    "category_name": "Tunísia",
+    "category_image_name": "tn",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/378/984",
+    "categories": [
+      {
+        "category_id": 378,
+        "category_name": "Tunísia",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 25,
+    "tournament_id": 216,
+    "tournament_name": "Liga Challenge",
+    "category_name": "Suíça",
+    "category_image_name": "ch",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/25/216",
+    "categories": [
+      {
+        "category_id": 25,
+        "category_name": "Suíça",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 25,
+    "tournament_id": 1101,
+    "tournament_name": "Liga da Promoção",
+    "category_name": "Suíça",
+    "category_image_name": "ch",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/25/1101",
+    "categories": [
+      {
+        "category_id": 25,
+        "category_name": "Suíça",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 353,
+    "tournament_id": 825,
+    "tournament_name": "Liga das Estrelas",
+    "category_name": "Catar",
+    "category_image_name": "qa",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/353/825",
+    "categories": [
+      {
+        "category_id": 353,
+        "category_name": "Catar",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 12,
+    "tournament_id": 27382,
+    "tournament_name": "Liga de Ascenso Apertura",
+    "category_name": "México",
+    "category_image_name": "mx",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/12/27382",
+    "categories": [
+      {
+        "category_id": 12,
+        "category_name": "México",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 67,
+    "tournament_id": 186,
+    "tournament_name": "Liga de Futebol",
+    "category_name": "Grécia",
+    "category_image_name": "gr",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/67/186",
+    "categories": [
+      {
+        "category_id": 67,
+        "category_name": "Grécia",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 331,
+    "tournament_id": 1002,
+    "tournament_name": "Liga do Kuwait",
+    "category_name": "Kuwait",
+    "category_image_name": "kw",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/331/1002",
+    "categories": [
+      {
+        "category_id": 331,
+        "category_name": "Kuwait",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 77,
+    "tournament_id": 152,
+    "tournament_name": "Liga I",
+    "category_name": "Roménia",
+    "category_image_name": "ro",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/77/152",
+    "categories": [
+      {
+        "category_id": 77,
+        "category_name": "Roménia",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 52,
+    "tournament_id": 196,
+    "tournament_name": "Liga J1",
+    "category_name": "Japão",
+    "category_image_name": "jp",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/52/196",
+    "categories": [
+      {
+        "category_id": 52,
+        "category_name": "Japão",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 52,
+    "tournament_id": 402,
+    "tournament_name": "Liga J2",
+    "category_name": "Japão",
+    "category_image_name": "jp",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/52/402",
+    "categories": [
+      {
+        "category_id": 52,
+        "category_name": "Japão",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 52,
+    "tournament_id": 2094,
+    "tournament_name": "Liga J3",
+    "category_name": "Japão",
+    "category_image_name": "jp",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/52/2094",
+    "categories": [
+      {
+        "category_id": 52,
+        "category_name": "Japão",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 270,
+    "tournament_id": 704,
+    "tournament_name": "Liga Nacional",
+    "category_name": "Georgia",
+    "category_image_name": "ge",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/270/704",
+    "categories": [
+      {
+        "category_id": 270,
+        "category_name": "Georgia",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 66,
+    "tournament_id": 727,
+    "tournament_name": "Liga Nacional",
+    "category_name": "Israel",
+    "category_image_name": "il",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/66/727",
+    "categories": [
+      {
+        "category_id": 66,
+        "category_name": "Israel",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 21,
+    "tournament_id": 204,
+    "tournament_name": "Liga Nacional de Futebol",
+    "category_name": "Rússia",
+    "category_image_name": "ru",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/21/204",
+    "categories": [
+      {
+        "category_id": 21,
+        "category_name": "Rússia",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 48,
+    "tournament_id": 155,
+    "tournament_name": "Liga Profissional",
+    "category_name": "Argentina",
+    "category_image_name": "ar",
+    "continent_name": "Américas",
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/48/155",
+    "categories": [
+      {
+        "category_id": 48,
+        "category_name": "Argentina",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 310,
+    "tournament_id": 955,
+    "tournament_name": "Liga Saudita Profissional",
+    "category_name": "Arábia Saudita",
+    "category_image_name": "sa",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/310/955",
+    "categories": [
+      {
+        "category_id": 310,
+        "category_name": "Arábia Saudita",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 7,
+    "tournament_id": 34,
+    "tournament_name": "Ligue 1",
+    "category_name": "França",
+    "category_image_name": "fr",
+    "continent_name": "Europa",
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/7/34",
+    "categories": [
+      {
+        "category_id": 7,
+        "category_name": "França",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 7,
+    "tournament_id": 182,
+    "tournament_name": "Ligue 2",
+    "category_name": "França",
+    "category_image_name": "fr",
+    "continent_name": "Europa",
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/7/182",
+    "categories": [
+      {
+        "category_id": 7,
+        "category_name": "França",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 26,
+    "tournament_id": 242,
+    "tournament_name": "Major League Soccer",
+    "category_name": "Estados Unidos da América",
+    "category_image_name": "us",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/26/242",
+    "categories": [
+      {
+        "category_id": 26,
+        "category_name": "Estados Unidos da América",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 18,
+    "tournament_id": 14147,
+    "tournament_name": "MSFL",
+    "category_name": "República Checa",
+    "category_image_name": "cz",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/18/14147",
+    "categories": [
+      {
+        "category_id": 18,
+        "category_name": "República Checa",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 7,
+    "tournament_id": 183,
+    "tournament_name": "Nacional 1",
+    "category_name": "França",
+    "category_image_name": "fr",
+    "continent_name": "Europa",
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/7/183",
+    "categories": [
+      {
+        "category_id": 7,
+        "category_name": "França",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 252,
+    "tournament_id": 176,
+    "tournament_name": "National League North",
+    "category_name": "Inglaterra Amadores",
+    "category_image_name": "gb",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/252/176",
+    "categories": [
+      {
+        "category_id": 252,
+        "category_name": "Inglaterra Amadores",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 252,
+    "tournament_id": 174,
+    "tournament_name": "National League South",
+    "category_name": "Inglaterra Amadores",
+    "category_image_name": "gb",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/252/174",
+    "categories": [
+      {
+        "category_id": 252,
+        "category_name": "Inglaterra Amadores",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 11,
+    "tournament_id": 187,
+    "tournament_name": "NB I",
+    "category_name": "Hungria",
+    "category_image_name": "hu",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/11/187",
+    "categories": [
+      {
+        "category_id": 11,
+        "category_name": "Hungria",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 11,
+    "tournament_id": 1339,
+    "tournament_name": "NB II",
+    "category_name": "Hungria",
+    "category_image_name": "hu",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/11/1339",
+    "categories": [
+      {
+        "category_id": 11,
+        "category_name": "Hungria",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 252,
+    "tournament_id": 1111,
+    "tournament_name": "Northern League, Pr. Div",
+    "category_name": "Inglaterra Amadores",
+    "category_image_name": "gb",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/252/1111",
+    "categories": [
+      {
+        "category_id": 252,
+        "category_name": "Inglaterra Amadores",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 78,
+    "tournament_id": 247,
+    "tournament_name": "Parva Liga",
+    "category_name": "Bulgária",
+    "category_image_name": "bg",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/78/247",
+    "categories": [
+      {
+        "category_id": 78,
+        "category_name": "Bulgária",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 305,
+    "tournament_id": 808,
+    "tournament_name": "Premier League",
+    "category_name": "Egito",
+    "category_image_name": "eg",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/305/808",
+    "categories": [
+      {
+        "category_id": 305,
+        "category_name": "Egito",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 66,
+    "tournament_id": 266,
+    "tournament_name": "Premier League",
+    "category_name": "Israel",
+    "category_image_name": "il",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/66/266",
+    "categories": [
+      {
+        "category_id": 66,
+        "category_name": "Israel",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 131,
+    "tournament_id": 254,
+    "tournament_name": "Premier League",
+    "category_name": "País de Gales",
+    "category_image_name": "gb-wls",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/131/254",
+    "categories": [
+      {
+        "category_id": 131,
+        "category_name": "País de Gales",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 803,
+    "tournament_id": 2436,
+    "tournament_name": "Premier League",
+    "category_name": "República da Tanzânia",
+    "category_image_name": "tz",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/803/2436",
+    "categories": [
+      {
+        "category_id": 803,
+        "category_name": "República da Tanzânia",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 21,
+    "tournament_id": 203,
+    "tournament_name": "Premier League",
+    "category_name": "Rússia",
+    "category_image_name": "ru",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/21/203",
+    "categories": [
+      {
+        "category_id": 21,
+        "category_name": "Rússia",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 45,
+    "tournament_id": 634,
+    "tournament_name": "Premier League",
+    "category_name": "Singapura",
+    "category_image_name": "sg",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/45/634",
+    "categories": [
+      {
+        "category_id": 45,
+        "category_name": "Singapura",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 485,
+    "tournament_id": 1032,
+    "tournament_name": "Premier League",
+    "category_name": "Tailândia",
+    "category_image_name": "th",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/485/1032",
+    "categories": [
+      {
+        "category_id": 485,
+        "category_name": "Tailândia",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 86,
+    "tournament_id": 218,
+    "tournament_name": "Premier League",
+    "category_name": "Ucrânia",
+    "category_image_name": "ua",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/86/218",
+    "categories": [
+      {
+        "category_id": 86,
+        "category_name": "Ucrânia",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 824,
+    "tournament_id": 14864,
+    "tournament_name": "Premier League",
+    "category_name": "Uganda",
+    "category_image_name": "ug",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/824/14864",
+    "categories": [
+      {
+        "category_id": 824,
+        "category_name": "Uganda",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 322,
+    "tournament_id": 358,
+    "tournament_name": "Premier Soccer League",
+    "category_name": "África do Sul",
+    "category_image_name": "za",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/322/358",
+    "categories": [
+      {
+        "category_id": 322,
+        "category_name": "África do Sul",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 22,
+    "tournament_id": 36,
+    "tournament_name": "Premiership",
+    "category_name": "Escócia",
+    "category_image_name": "gb-sct",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/22/36",
+    "categories": [
+      {
+        "category_id": 22,
+        "category_name": "Escócia",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 92,
+    "tournament_id": 178,
+    "tournament_name": "Premium Liiga",
+    "category_name": "Estónia",
+    "category_image_name": "ee",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/92/178",
+    "categories": [
+      {
+        "category_id": 92,
+        "category_name": "Estónia",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 322,
+    "tournament_id": 1906,
+    "tournament_name": "Primeira Divisão Nacional",
+    "category_name": "África do Sul",
+    "category_image_name": "za",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/322/1906",
+    "categories": [
+      {
+        "category_id": 322,
+        "category_name": "África do Sul",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 44,
+    "tournament_id": 238,
+    "tournament_name": "Primeira Liga",
+    "category_name": "Portugal",
+    "category_image_name": "pt",
+    "continent_name": "Europa",
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/44/238",
+    "categories": [
+      {
+        "category_id": 44,
+        "category_name": "Portugal",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 130,
+    "tournament_id": 200,
+    "tournament_name": "Primeira Liga JJB Sports",
+    "category_name": "Irlanda do Norte",
+    "category_image_name": "gb-nir",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/130/200",
+    "categories": [
+      {
+        "category_id": 130,
+        "category_name": "Irlanda do Norte",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 274,
+    "tournament_id": 27072,
+    "tournament_name": "Primera A Clausura",
+    "category_name": "Colômbia",
+    "category_image_name": "co",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/274/27072",
+    "categories": [
+      {
+        "category_id": 274,
+        "category_name": "Colômbia",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 48,
+    "tournament_id": 1347,
+    "tournament_name": "Primera B",
+    "category_name": "Argentina",
+    "category_image_name": "ar",
+    "continent_name": "Américas",
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/48/1347",
+    "categories": [
+      {
+        "category_id": 48,
+        "category_name": "Argentina",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 49,
+    "tournament_id": 27665,
+    "tournament_name": "Primera División",
+    "category_name": "Chile",
+    "category_image_name": "cl",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/49/27665",
+    "categories": [
+      {
+        "category_id": 49,
+        "category_name": "Chile",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 12,
+    "tournament_id": 27464,
+    "tournament_name": "Primera División Apertura",
+    "category_name": "México",
+    "category_image_name": "mx",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/12/27464",
+    "categories": [
+      {
+        "category_id": 12,
+        "category_name": "México",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 280,
+    "tournament_id": 27100,
+    "tournament_name": "Primera División Clausura",
+    "category_name": "Paraguai",
+    "category_image_name": "py",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/280/27100",
+    "categories": [
+      {
+        "category_id": 280,
+        "category_name": "Paraguai",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 32,
+    "tournament_id": 34834,
+    "tournament_name": "Primera Federación",
+    "category_name": "Espanha",
+    "category_image_name": "es",
+    "continent_name": "Europa",
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/32/34834",
+    "categories": [
+      {
+        "category_id": 32,
+        "category_name": "Espanha",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 48,
+    "tournament_id": 703,
+    "tournament_name": "Primera Nacional",
+    "category_name": "Argentina",
+    "category_image_name": "ar",
+    "continent_name": "Américas",
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/48/703",
+    "categories": [
+      {
+        "category_id": 48,
+        "category_name": "Argentina",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 33,
+    "tournament_id": 38,
+    "tournament_name": "Pro League",
+    "category_name": "Bélgica",
+    "category_image_name": "be",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/33/38",
+    "categories": [
+      {
+        "category_id": 33,
+        "category_name": "Bélgica",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 24,
+    "tournament_id": 212,
+    "tournament_name": "PrvaLiga",
+    "category_name": "Eslovénia",
+    "category_image_name": "si",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/24/212",
+    "categories": [
+      {
+        "category_id": 24,
+        "category_name": "Eslovénia",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 22,
+    "tournament_id": 347,
+    "tournament_name": "Scottish Cup",
+    "category_name": "Escócia",
+    "category_image_name": "gb-sct",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/22/347",
+    "categories": [
+      {
+        "category_id": 22,
+        "category_name": "Escócia",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 57,
+    "tournament_id": 1908,
+    "tournament_name": "Segunda División",
+    "category_name": "Uruguai",
+    "category_image_name": "uy",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/57/1908",
+    "categories": [
+      {
+        "category_id": 57,
+        "category_name": "Uruguai",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 44,
+    "tournament_id": 239,
+    "tournament_name": "Segunda Liga",
+    "category_name": "Portugal",
+    "category_image_name": "pt",
+    "continent_name": "Europa",
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/44/239",
+    "categories": [
+      {
+        "category_id": 44,
+        "category_name": "Portugal",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 31,
+    "tournament_id": 23,
+    "tournament_name": "Serie A",
+    "category_name": "Itália",
+    "category_image_name": "it",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/31/23",
+    "categories": [
+      {
+        "category_id": 31,
+        "category_name": "Itália",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 31,
+    "tournament_id": 20808,
+    "tournament_name": "Serie A Feminina",
+    "category_name": "Itália",
+    "category_image_name": "it",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/31/20808",
+    "categories": [
+      {
+        "category_id": 31,
+        "category_name": "Itália",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 31,
+    "tournament_id": 53,
+    "tournament_name": "Serie B",
+    "category_name": "Itália",
+    "category_image_name": "it",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/31/53",
+    "categories": [
+      {
+        "category_id": 31,
+        "category_name": "Itália",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 31,
+    "tournament_id": 26554,
+    "tournament_name": "Serie C Group A",
+    "category_name": "Itália",
+    "category_image_name": "it",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/31/26554",
+    "categories": [
+      {
+        "category_id": 31,
+        "category_name": "Itália",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 31,
+    "tournament_id": 26556,
+    "tournament_name": "Serie C Grupo B",
+    "category_name": "Itália",
+    "category_image_name": "it",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/31/26556",
+    "categories": [
+      {
+        "category_id": 31,
+        "category_name": "Itália",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 23,
+    "tournament_id": 303,
+    "tournament_name": "Slovensky Pohar",
+    "category_name": "Eslováquia",
+    "category_image_name": "sk",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/23/303",
+    "categories": [
+      {
+        "category_id": 23,
+        "category_name": "Eslováquia",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 252,
+    "tournament_id": 26056,
+    "tournament_name": "Southern Football League Premier Division Central",
+    "category_name": "Inglaterra Amadores",
+    "category_image_name": "gb",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/252/26056",
+    "categories": [
+      {
+        "category_id": 252,
+        "category_name": "Inglaterra Amadores",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 252,
+    "tournament_id": 26058,
+    "tournament_name": "Southern Football League Premier Division South",
+    "category_name": "Inglaterra Amadores",
+    "category_image_name": "gb",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/252/26058",
+    "categories": [
+      {
+        "category_id": 252,
+        "category_name": "Inglaterra Amadores",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 99,
+    "tournament_id": 649,
+    "tournament_name": "Super League",
+    "category_name": "China",
+    "category_image_name": "cn",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/99/649",
+    "categories": [
+      {
+        "category_id": 99,
+        "category_name": "China",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 67,
+    "tournament_id": 185,
+    "tournament_name": "Super Liga",
+    "category_name": "Grécia",
+    "category_image_name": "gr",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/67/185",
+    "categories": [
+      {
+        "category_id": 67,
+        "category_name": "Grécia",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 31,
+    "tournament_id": 341,
+    "tournament_name": "Supercopa",
+    "category_name": "Itália",
+    "category_image_name": "it",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/31/341",
+    "categories": [
+      {
+        "category_id": 31,
+        "category_name": "Itália",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 9,
+    "tournament_id": 46,
+    "tournament_name": "Superettan",
+    "category_name": "Suécia",
+    "category_image_name": "se",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/9/46",
+    "categories": [
+      {
+        "category_id": 9,
+        "category_name": "Suécia",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 8,
+    "tournament_id": 39,
+    "tournament_name": "Superliga",
+    "category_name": "Dinamarca",
+    "category_image_name": "dk",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/8/39",
+    "categories": [
+      {
+        "category_id": 8,
+        "category_name": "Dinamarca",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 23,
+    "tournament_id": 211,
+    "tournament_name": "Superliga",
+    "category_name": "Eslováquia",
+    "category_image_name": "sk",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/23/211",
+    "categories": [
+      {
+        "category_id": 23,
+        "category_name": "Eslováquia",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 152,
+    "tournament_id": 210,
+    "tournament_name": "Superliga",
+    "category_name": "Sérvia",
+    "category_image_name": "rs",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/152/210",
+    "categories": [
+      {
+        "category_id": 152,
+        "category_name": "Sérvia",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 25,
+    "tournament_id": 215,
+    "tournament_name": "Superliga",
+    "category_name": "Suíça",
+    "category_image_name": "ch",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/25/215",
+    "categories": [
+      {
+        "category_id": 25,
+        "category_name": "Suíça",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 46,
+    "tournament_id": 52,
+    "tournament_name": "Superliga",
+    "category_name": "Turquia",
+    "category_image_name": "tr",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/46/52",
+    "categories": [
+      {
+        "category_id": 46,
+        "category_name": "Turquia",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 77,
+    "tournament_id": 48235,
+    "tournament_name": "Superliga Feminina",
+    "category_name": "Roménia",
+    "category_image_name": "ro",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/77/48235",
+    "categories": [
+      {
+        "category_id": 77,
+        "category_name": "Roménia",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 165,
+    "tournament_id": 240,
+    "tournament_name": "Série A",
+    "category_name": "Equador",
+    "category_image_name": "ec",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/165/240",
+    "categories": [
+      {
+        "category_id": 165,
+        "category_name": "Equador",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 31,
+    "tournament_id": 26558,
+    "tournament_name": "Série C Grupo C",
+    "category_name": "Itália",
+    "category_image_name": "it",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/31/26558",
+    "categories": [
+      {
+        "category_id": 31,
+        "category_name": "Itália",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 57,
+    "tournament_id": 35811,
+    "tournament_name": "Tercera División",
+    "category_name": "Uruguai",
+    "category_image_name": "uy",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/57/35811",
+    "categories": [
+      {
+        "category_id": 57,
+        "category_name": "Uruguai",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 393,
+    "tournament_id": 7,
+    "tournament_name": "UEFA Champions League",
+    "category_name": "",
+    "image_name": null,
+    "season_id": 131129,
+    "is_important": true,
+    "url": "https://betnacional.bet.br/events/1/393/7",
+    "categories": [
+      {
+        "category_id": 9999,
+        "category_name": "Campeonatos Importantes",
+        "is_primary": false
+      },
+      {
+        "category_id": 393,
+        "category_name": "Clubes Internacionais",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 393,
+    "tournament_id": 34480,
+    "tournament_name": "UEFA Conference League",
+    "category_name": "",
+    "image_name": null,
+    "season_id": 131637,
+    "is_important": true,
+    "url": "https://betnacional.bet.br/events/1/393/34480",
+    "categories": [
+      {
+        "category_id": 9999,
+        "category_name": "Campeonatos Importantes",
+        "is_primary": false
+      },
+      {
+        "category_id": 393,
+        "category_name": "Clubes Internacionais",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 393,
+    "tournament_id": 679,
+    "tournament_name": "UEFA Europa League",
+    "category_name": "",
+    "image_name": null,
+    "season_id": 131635,
+    "is_important": true,
+    "url": "https://betnacional.bet.br/events/1/393/679",
+    "categories": [
+      {
+        "category_id": 9999,
+        "category_name": "Campeonatos Importantes",
+        "is_primary": false
+      },
+      {
+        "category_id": 393,
+        "category_name": "Clubes Internacionais",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 26,
+    "tournament_id": 28163,
+    "tournament_name": "USL Championship",
+    "category_name": "Estados Unidos da América",
+    "category_image_name": "us",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/26/28163",
+    "categories": [
+      {
+        "category_id": 26,
+        "category_name": "Estados Unidos da América",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 366,
+    "tournament_id": 626,
+    "tournament_name": "V-League",
+    "category_name": "Vietname",
+    "category_image_name": "vn",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/366/626",
+    "categories": [
+      {
+        "category_id": 366,
+        "category_name": "Vietname",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 163,
+    "tournament_id": 197,
+    "tournament_name": "Virsliga",
+    "category_name": "Letónia",
+    "category_image_name": "lv",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/163/197",
+    "categories": [
+      {
+        "category_id": 163,
+        "category_name": "Letónia",
+        "is_primary": true
+      }
+    ]
+  },
+  {
+    "sport_id": 1,
+    "category_id": 91,
+    "tournament_id": 169,
+    "tournament_name": "Vysshaya Liga",
+    "category_name": "Bielorrússia",
+    "category_image_name": "by",
+    "continent_name": null,
+    "season_id": 0,
+    "is_important": false,
+    "url": "https://betnacional.bet.br/events/1/91/169",
+    "categories": [
+      {
+        "category_id": 91,
+        "category_name": "Bielorrússia",
+        "is_primary": true
+      }
+    ]
+  }
+]

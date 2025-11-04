@@ -1,0 +1,11 @@
+{
+  "importants": [
+    {
+      "sport_id": 1,
+      "category_id": 393,
+      "tournament_id": 7,
+      "tournament_name": "UEFA Champions League"
+    }
+  ],
+  "tourneys": []
+}

@@ -11,7 +11,7 @@ from types import SimpleNamespace as NS
 import pytz
 import requests
 
-from config.settings import ZONE, USER_AGENT
+from config.settings import ZONE, USER_AGENT, API_TIMEOUT
 from utils.logger import logger
 
 # Mapeamento de meses em português
@@ -53,7 +53,7 @@ def extract_ids_from_url(url: str) -> Optional[Tuple[int, int, int]]:
 
 
 def fetch_events_from_api(sport_id: int, category_id: int = 0, tournament_id: int = 0, 
-                          market_id: int = 1) -> Optional[Dict[str, Any]]:
+                          market_id: int = 1, rate_limiter=None) -> Optional[Dict[str, Any]]:
     """
     Busca eventos diretamente da API XHR da BetNacional.
     
@@ -94,11 +94,23 @@ def fetch_events_from_api(sport_id: int, category_id: int = 0, tournament_id: in
     }
     
     try:
-        response = requests.get(api_url, params=params, headers=headers, timeout=20)
+        response = requests.get(api_url, params=params, headers=headers, timeout=API_TIMEOUT)
         response.raise_for_status()
         return response.json()
     except Exception as e:
-        logger.warning(f"Erro ao buscar eventos da API: {e}")
+        from utils.error_handler import log_error_with_context
+        log_error_with_context(
+            e,
+            context={
+                "sport_id": sport_id,
+                "category_id": category_id,
+                "tournament_id": tournament_id,
+                "market_id": market_id,
+                "stage": "fetch_events_from_api"
+            },
+            level="warning",
+            reraise=False
+        )
         return None
 
 
@@ -152,6 +164,8 @@ def parse_events_from_api(json_data: Dict[str, Any], source_url: str) -> List[An
                 pass
     
     # Converter para formato esperado
+    from utils.validators import validate_odds, validate_event_data
+    
     for event_id, event_data in events_dict.items():
         odds = event_data['odds']
         
@@ -160,8 +174,24 @@ def parse_events_from_api(json_data: Dict[str, Any], source_url: str) -> List[An
         odds_draw = odds.get('2')
         odds_away = odds.get('3')
         
-        # Se não tiver todas as 3 odds, pular
-        if not (odds_home and odds_draw and odds_away):
+        # Validar odds
+        home_odd, draw_odd, away_odd = validate_odds(odds_home, odds_draw, odds_away)
+        if not (home_odd and draw_odd and away_odd):
+            logger.debug(f"Evento {event_id} ignorado: odds inválidas")
+            continue
+        
+        # Validar dados do evento antes de processar
+        validated_event = validate_event_data(
+            event_id=event_id,
+            home=event_data.get('home', ''),
+            away=event_data.get('away', ''),
+            odds_home=home_odd,
+            odds_draw=draw_odd,
+            odds_away=away_odd
+        )
+        
+        if not validated_event:
+            logger.debug(f"Evento {event_id} ignorado: dados inválidos")
             continue
         
         # Converter data para formato local
@@ -179,6 +209,11 @@ def parse_events_from_api(json_data: Dict[str, Any], source_url: str) -> List[An
                 logger.debug(f"Erro ao converter data {date_start}: {e}")
                 start_local_str = date_start
         
+        # Usar dados validados
+        validated_home = validated_event['home']
+        validated_away = validated_event['away']
+        validated_odds = validated_event['odds']
+        
         # Construir URL do jogo
         game_url = f"https://betnacional.bet.br/event/{event_id}/1/1"
         
@@ -187,23 +222,56 @@ def parse_events_from_api(json_data: Dict[str, Any], source_url: str) -> List[An
             source_link=source_url,
             game_url=game_url,
             competition=event_data.get('tournament_name', ''),
-            team_home=event_data.get('home', ''),
-            team_away=event_data.get('away', ''),
+            team_home=validated_home,
+            team_away=validated_away,
             start_local_str=start_local_str,
-            odds_home=odds_home,
-            odds_draw=odds_draw,
-            odds_away=odds_away,
+            odds_home=validated_odds['home'],
+            odds_draw=validated_odds['draw'],
+            odds_away=validated_odds['away'],
             is_live=event_data.get('is_live', False),
         ))
     
-    logger.info(f"📊 → {len(events)} eventos extraídos via API XHR | URL: {source_url}")
+    from utils.logger import log_with_context
+    log_with_context(
+        "info",
+        f"Eventos extraídos via API XHR: {len(events)} eventos",
+        url=source_url,
+        stage="parse_events_api",
+        status="success",
+        extra_fields={"events_count": len(events), "method": "api_xhr"}
+    )
     return events
 
 
 async def fetch_events_from_api_async(sport_id: int, category_id: int = 0, 
                                        tournament_id: int = 0, market_id: int = 1) -> Optional[Dict[str, Any]]:
-    """Wrapper assíncrono para fetch_events_from_api."""
-    return await asyncio.to_thread(fetch_events_from_api, sport_id, category_id, tournament_id, market_id)
+    """
+    Wrapper assíncrono para fetch_events_from_api com rate limiting e retry.
+    """
+    from utils.rate_limiter import api_rate_limiter, retry_with_backoff
+    import requests
+    
+    async def _fetch():
+        # Usar rate limiter antes de fazer requisição
+        await api_rate_limiter.acquire()
+        
+        # Executar função síncrona em thread separada
+        return await asyncio.to_thread(fetch_events_from_api, sport_id, category_id, tournament_id, market_id)
+    
+    # Tentar com retry (especialmente para 403 errors)
+    try:
+        return await retry_with_backoff(
+            _fetch,
+            max_retries=3,
+            initial_delay=2.0,
+            max_delay=30.0,
+            exponential_base=2.0,
+            exceptions=(requests.exceptions.HTTPError, requests.exceptions.RequestException, Exception),
+            rate_limiter=None  # Já usamos dentro de _fetch
+        )
+    except Exception as e:
+        logger.warning(f"Erro ao buscar eventos da API após retries: {e}")
+        return None
 
 
 def extract_event_id_from_url(url: str) -> Optional[int]:
@@ -260,11 +328,22 @@ def fetch_event_odds_from_api(event_id: int, language_id: int = 1,
     }
     
     try:
-        response = requests.get(api_url, params=params, headers=headers, timeout=20)
+        response = requests.get(api_url, params=params, headers=headers, timeout=API_TIMEOUT)
         response.raise_for_status()
         return response.json()
     except Exception as e:
-        logger.warning(f"Erro ao buscar odds do evento {event_id} da API: {e}")
+        from utils.error_handler import log_error_with_context
+        log_error_with_context(
+            e,
+            context={
+                "event_id": event_id,
+                "language_id": language_id,
+                "status_id": status_id,
+                "stage": "fetch_event_odds_from_api"
+            },
+            level="warning",
+            reraise=False
+        )
         return None
 
 
@@ -330,8 +409,14 @@ def parse_event_odds_from_api(json_data: Dict[str, Any]) -> Dict[str, Any]:
         
         if outcome_id and odd_value:
             try:
-                markets_dict[market_id]['odds'][outcome_id] = float(odd_value)
-            except (ValueError, TypeError):
+                odd_float = float(odd_value)
+                # Validar range (1.0 a 100.0)
+                if 1.0 <= odd_float <= 100.0:
+                    markets_dict[market_id]['odds'][outcome_id] = odd_float
+                else:
+                    logger.debug(f"Odd {outcome_id} inválida (fora do range): {odd_float}")
+            except (ValueError, TypeError) as e:
+                logger.debug(f"Erro ao converter odd {outcome_id}: {e}")
                 pass
     
     # Converter markets para formato esperado
@@ -363,8 +448,33 @@ def parse_event_odds_from_api(json_data: Dict[str, Any]) -> Dict[str, Any]:
 
 async def fetch_event_odds_from_api_async(event_id: int, language_id: int = 1, 
                                           status_id: int = 1) -> Optional[Dict[str, Any]]:
-    """Wrapper assíncrono para fetch_event_odds_from_api."""
-    return await asyncio.to_thread(fetch_event_odds_from_api, event_id, language_id, status_id)
+    """
+    Wrapper assíncrono para fetch_event_odds_from_api com rate limiting e retry.
+    """
+    from utils.rate_limiter import api_rate_limiter, retry_with_backoff
+    import requests
+    
+    async def _fetch():
+        # Usar rate limiter antes de fazer requisição
+        await api_rate_limiter.acquire()
+        
+        # Executar função síncrona em thread separada
+        return await asyncio.to_thread(fetch_event_odds_from_api, event_id, language_id, status_id)
+    
+    # Tentar com retry (especialmente para 403 errors)
+    try:
+        return await retry_with_backoff(
+            _fetch,
+            max_retries=3,
+            initial_delay=2.0,
+            max_delay=30.0,
+            exponential_base=2.0,
+            exceptions=(requests.exceptions.HTTPError, requests.exceptions.RequestException, Exception),
+            rate_limiter=None  # Já usamos dentro de _fetch
+        )
+    except Exception as e:
+        logger.warning(f"Erro ao buscar odds do evento {event_id} após retries: {e}")
+        return None
 
 
 def num_from_text(s: str) -> Optional[float]:
@@ -426,7 +536,9 @@ def parse_local_datetime(s: str) -> Optional[datetime]:
                 dt = dt.replace(day=nowl.day, month=nowl.month, year=nowl.year)
             dt_local = ZONE.localize(dt)
             return dt_local.astimezone(pytz.UTC)
-        except Exception:
+        except Exception as e:
+            # Erro ao parsear data - não é crítico, continuar tentando outros formatos
+            logger.debug(f"Erro ao parsear data '{s}' com formato '{fmt}': {e}")
             continue
     return None
 
@@ -641,7 +753,15 @@ def try_parse_events(html: str, url: str) -> List[Any]:
                 is_live=is_live,
             ))
 
-    logger.info(f"🧮 → eventos extraídos via HTML: {len(evs)} | URL: {url}")
+    from utils.logger import log_with_context
+    log_with_context(
+        "info",
+        f"Eventos extraídos via HTML: {len(evs)} eventos",
+        url=url,
+        stage="parse_events_html",
+        status="success",
+        extra_fields={"events_count": len(evs), "method": "html"}
+    )
     
     # Se não encontrou eventos no HTML renderizado, tenta extrair do JSON
     if not evs:
@@ -657,10 +777,130 @@ def try_parse_events(html: str, url: str) -> List[Any]:
 def scrape_game_result(html: str, ext_id: str) -> Optional[str]:
     """
     Tenta extrair o resultado final (home/draw/away) da página HTML de um jogo encerrado.
+    
+    Usa múltiplas estratégias para maior robustez:
+    1. Extrair do placar final (MAIS CONFIÁVEL)
+    2. Buscar em elementos de resultado final
+    3. Procurar texto "Vencedor" (fallback)
+    4. Procurar classes CSS de vencedor (fallback)
     """
     soup = BeautifulSoup(html, "html.parser")
 
-    # Estratégia 1: Procurar por um badge ou texto que diga "Vencedor" ou similar.
+    # ESTRATÉGIA 1: Extrair do placar final (MAIS CONFIÁVEL)
+    # Usa o mesmo método que scrape_live_game_data() usa para placar
+    lmt_container = soup.find("div", id="lmt-match-preview")
+    if lmt_container:
+        try:
+            score_elements = lmt_container.select(".sr-lmt-1-sbr__score")
+            if len(score_elements) >= 2:
+                home_goals_raw = score_elements[0].get_text(strip=True)
+                away_goals_raw = score_elements[1].get_text(strip=True)
+                
+                # Validar placar antes de usar
+                from utils.validators import validate_score
+                validated_score = validate_score(home_goals_raw, away_goals_raw)
+                if validated_score:
+                    home_goals, away_goals = validated_score
+                    
+                    # Determinar resultado pelo placar
+                    from utils.logger import log_with_context
+                    if home_goals > away_goals:
+                        result = "home"
+                        log_with_context(
+                            "info",
+                            f"Resultado extraído do placar: {home_goals}-{away_goals} → home",
+                            ext_id=ext_id,
+                            stage="scrape_result",
+                            status="success",
+                            extra_fields={"score": f"{home_goals}-{away_goals}", "result": result, "strategy": "placar_final"}
+                        )
+                        return result
+                    elif away_goals > home_goals:
+                        result = "away"
+                        log_with_context(
+                            "info",
+                            f"Resultado extraído do placar: {home_goals}-{away_goals} → away",
+                            ext_id=ext_id,
+                            stage="scrape_result",
+                            status="success",
+                            extra_fields={"score": f"{home_goals}-{away_goals}", "result": result, "strategy": "placar_final"}
+                        )
+                        return result
+                    else:
+                        result = "draw"
+                        log_with_context(
+                            "info",
+                            f"Resultado extraído do placar: {home_goals}-{away_goals} → draw",
+                            ext_id=ext_id,
+                            stage="scrape_result",
+                            status="success",
+                            extra_fields={"score": f"{home_goals}-{away_goals}", "result": result, "strategy": "placar_final"}
+                        )
+                        return result
+                else:
+                    logger.debug(f"Placar inválido ignorado para {ext_id}: {home_goals_raw}-{away_goals_raw}")
+        except (ValueError, IndexError, AttributeError) as e:
+            logger.debug(f"Erro ao extrair placar do lmt-container: {e}")
+
+    # ESTRATÉGIA 2: Buscar em elementos de resultado final
+    # Procurar por padrões de placar em vários elementos
+    result_elements = soup.select(
+        '.final-score, .match-result, [class*="result"], [class*="final"], '
+        '.score, [class*="score"], .sr-lmt-1-sbr__score'
+    )
+    for elem in result_elements:
+        text = elem.get_text(strip=True)
+        # Procurar padrão "2 - 1", "2:1", "2 x 1", "2x1"
+        match = re.search(r'(\d+)\s*[-:x]\s*(\d+)', text)
+        if match:
+            try:
+                home_goals_raw = match.group(1)
+                away_goals_raw = match.group(2)
+                
+                # Validar placar antes de usar
+                from utils.validators import validate_score
+                validated_score = validate_score(home_goals_raw, away_goals_raw)
+                if validated_score:
+                    home_goals, away_goals = validated_score
+                    from utils.logger import log_with_context
+                    if home_goals > away_goals:
+                        result = "home"
+                        log_with_context(
+                            "debug",
+                            f"Resultado encontrado em elemento de resultado: {home_goals}-{away_goals} → home",
+                            ext_id=ext_id,
+                            stage="scrape_result",
+                            status="success",
+                            extra_fields={"score": f"{home_goals}-{away_goals}", "result": result, "strategy": "elementos_resultado"}
+                        )
+                        return result
+                    elif away_goals > home_goals:
+                        result = "away"
+                        log_with_context(
+                            "debug",
+                            f"Resultado encontrado em elemento de resultado: {home_goals}-{away_goals} → away",
+                            ext_id=ext_id,
+                            stage="scrape_result",
+                            status="success",
+                            extra_fields={"score": f"{home_goals}-{away_goals}", "result": result, "strategy": "elementos_resultado"}
+                        )
+                        return result
+                    else:
+                        result = "draw"
+                        log_with_context(
+                            "debug",
+                            f"Resultado encontrado em elemento de resultado: {home_goals}-{away_goals} → draw",
+                            ext_id=ext_id,
+                            stage="scrape_result",
+                            status="success",
+                            extra_fields={"score": f"{home_goals}-{away_goals}", "result": result, "strategy": "elementos_resultado"}
+                        )
+                        return result
+            except (ValueError, AttributeError) as e:
+                logger.debug(f"Erro ao validar placar do elemento: {e}")
+                continue
+
+    # ESTRATÉGIA 3: Procurar por um badge ou texto que diga "Vencedor" ou similar (fallback)
     winner_indicators = [
         soup.find(string=lambda text: text and "Vencedor" in text),
         soup.find(string=lambda text: text and "Winner" in text),
@@ -669,26 +909,84 @@ def scrape_game_result(html: str, ext_id: str) -> Optional[str]:
     for indicator in winner_indicators:
         if indicator:
             parent_text = indicator.parent.get_text(strip=True) if indicator.parent else ""
+            from utils.logger import log_with_context
             if "Casa" in parent_text or "Home" in parent_text:
+                log_with_context(
+                    "debug",
+                    "Resultado encontrado via texto 'Vencedor': home",
+                    ext_id=ext_id,
+                    stage="scrape_result",
+                    status="success",
+                    extra_fields={"result": "home", "strategy": "texto_vencedor"}
+                )
                 return "home"
             elif "Fora" in parent_text or "Away" in parent_text:
+                log_with_context(
+                    "debug",
+                    "Resultado encontrado via texto 'Vencedor': away",
+                    ext_id=ext_id,
+                    stage="scrape_result",
+                    status="success",
+                    extra_fields={"result": "away", "strategy": "texto_vencedor"}
+                )
                 return "away"
             elif "Empate" in parent_text or "Draw" in parent_text:
+                log_with_context(
+                    "debug",
+                    "Resultado encontrado via texto 'Vencedor': draw",
+                    ext_id=ext_id,
+                    stage="scrape_result",
+                    status="success",
+                    extra_fields={"result": "draw", "strategy": "texto_vencedor"}
+                )
                 return "draw"
 
-    # Estratégia 2: Procurar por classes CSS comuns em elementos de vencedor.
+    # ESTRATÉGIA 4: Procurar por classes CSS comuns em elementos de vencedor (fallback)
     winner_elements = soup.select('.winner, .vencedor, .champion, [class*="winner"], [class*="vencedor"]')
     for elem in winner_elements:
         elem_text = elem.get_text(strip=True).lower()
+        from utils.logger import log_with_context
         if "casa" in elem_text or "home" in elem_text:
+            log_with_context(
+                "debug",
+                "Resultado encontrado via classe CSS: home",
+                ext_id=ext_id,
+                stage="scrape_result",
+                status="success",
+                extra_fields={"result": "home", "strategy": "classes_css"}
+            )
             return "home"
         elif "fora" in elem_text or "away" in elem_text:
+            log_with_context(
+                "debug",
+                "Resultado encontrado via classe CSS: away",
+                ext_id=ext_id,
+                stage="scrape_result",
+                status="success",
+                extra_fields={"result": "away", "strategy": "classes_css"}
+            )
             return "away"
         elif "empate" in elem_text or "draw" in elem_text:
+            log_with_context(
+                "debug",
+                "Resultado encontrado via classe CSS: draw",
+                ext_id=ext_id,
+                stage="scrape_result",
+                status="success",
+                extra_fields={"result": "draw", "strategy": "classes_css"}
+            )
             return "draw"
 
-    # Estratégia 3: Se nada for encontrado, retorna None.
-    logger.warning(f"Não foi possível determinar o vencedor para o jogo com ext_id: {ext_id}")
+    # Se nenhuma estratégia funcionou, retorna None
+    from utils.logger import log_with_context
+    log_with_context(
+        "warning",
+        "Não foi possível determinar o vencedor após tentar 4 estratégias",
+        ext_id=ext_id,
+        stage="scrape_result",
+        status="failed",
+        extra_fields={"strategies_tried": 4}
+    )
     return None
 
 

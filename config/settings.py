@@ -45,6 +45,26 @@ USER_AGENT = os.getenv(
 )
 
 # ================================
+# Configurações de Timeouts (Centralizados)
+# ================================
+# Timeout para requisições HTTP gerais (requests)
+API_TIMEOUT = float(os.getenv("API_TIMEOUT", "20"))  # Requisições à API do Betnacional
+HTML_TIMEOUT = float(os.getenv("HTML_TIMEOUT", "30"))  # Scraping de páginas HTML
+RESULT_CHECK_TIMEOUT = float(os.getenv("RESULT_CHECK_TIMEOUT", "10"))  # Verificação de resultados
+TELEGRAM_TIMEOUT = float(os.getenv("TELEGRAM_TIMEOUT", "15"))  # Requisições ao Telegram
+HEALTH_CHECK_TIMEOUT = float(os.getenv("HEALTH_CHECK_TIMEOUT", "10"))  # Health checks
+
+# Timeout para Playwright (em milissegundos)
+PLAYWRIGHT_NAVIGATION_TIMEOUT = int(os.getenv("PLAYWRIGHT_NAVIGATION_TIMEOUT", "60000"))  # Navegação (60s)
+PLAYWRIGHT_SELECTOR_TIMEOUT = int(os.getenv("PLAYWRIGHT_SELECTOR_TIMEOUT", "15000"))  # Aguardar seletor (15s)
+PLAYWRIGHT_NETWORKIDLE_TIMEOUT = int(os.getenv("PLAYWRIGHT_NETWORKIDLE_TIMEOUT", "60000"))  # Network idle (60s)
+
+# Compatibilidade: manter REQUESTS_TIMEOUT para não quebrar código existente
+# Se não especificado, usa API_TIMEOUT como padrão
+if not os.getenv("REQUESTS_TIMEOUT"):
+    REQUESTS_TIMEOUT = API_TIMEOUT
+
+# ================================
 # Configurações de Alta Confiança
 # ================================
 HIGH_CONF_THRESHOLD = float(os.getenv("HIGH_CONF_THRESHOLD", "0.60"))
@@ -90,6 +110,12 @@ HIGH_ODD_MAX_PROB = float(os.getenv("HIGH_ODD_MAX_PROB", "0.45"))
 HIGH_ODD_MIN_EV = float(os.getenv("HIGH_ODD_MIN_EV", "-0.15"))
 
 # ================================
+# Configurações de Scraping de Campeonatos
+# ================================
+# Se True, faz scraping apenas em campeonatos importantes
+SCRAPE_IMPORTANT_ONLY = os.getenv("SCRAPE_IMPORTANT_ONLY", "false").lower() == "true"
+
+# ================================
 # Links de Apostas Monitorados
 # ================================
 BETTING_LINKS = {
@@ -112,7 +138,29 @@ BETTING_LINKS = {
 }
 
 def get_all_betting_links() -> list[str]:
-    """Retorna todos os links de apostas, incluindo extras."""
+    """
+    Retorna todos os links de apostas, incluindo extras.
+    
+    Se SCRAPE_IMPORTANT_ONLY=True, retorna apenas links de campeonatos importantes.
+    """
+    from scraping.tournaments import get_important_tournaments, get_all_football_tournaments
+    
+    # Se configurado para apenas importantes, usar mapeamento
+    if SCRAPE_IMPORTANT_ONLY:
+        logger = __import__('utils.logger', fromlist=['logger']).logger
+        try:
+            tournaments = get_all_football_tournaments()
+            important = get_important_tournaments(tournaments)
+            # Retornar URLs dos campeonatos importantes
+            important_urls = [t.get('url') for t in important if t.get('url')]
+            if important_urls:
+                logger.info(f"Modo IMPORTANT_ONLY: usando {len(important_urls)} campeonato(s) importante(s)")
+                return important_urls
+        except Exception as e:
+            logger = __import__('utils.logger', fromlist=['logger']).logger
+            logger.warning(f"Erro ao buscar campeonatos importantes: {e}. Usando links padrão.")
+    
+    # Modo normal: usar BETTING_LINKS
     base = [cfg["link"] for cfg in BETTING_LINKS.values() if "link" in cfg]
     base.extend(EXTRA_LINKS)
     seen, out = set(), []

@@ -1,7 +1,7 @@
 """Envio de mensagens via Telegram."""
 from typing import Optional
 import requests
-from config.settings import TELEGRAM_TOKEN, TELEGRAM_CHAT_ID
+from config.settings import TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, TELEGRAM_TIMEOUT
 from utils.logger import logger
 
 
@@ -53,7 +53,7 @@ def tg_send_message(text: str, parse_mode: Optional[str] = "HTML", message_type:
     if parse_mode:  # só inclui quando tem valor válido
         payload["parse_mode"] = parse_mode
     try:
-        r = requests.post(url, json=payload, timeout=15)
+        r = requests.post(url, json=payload, timeout=TELEGRAM_TIMEOUT)
         if r.status_code != 200:
             error_msg = f"HTTP {r.status_code}: {r.text[:300]}"
             logger.error("Telegram %s: %s", r.status_code, r.text[:300])

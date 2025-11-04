@@ -1,8 +1,8 @@
 """Modelos de banco de dados e setup."""
 from sqlalchemy import (
-    create_engine, Column, Integer, String, Float, Text, DateTime, Boolean, JSON, func, UniqueConstraint, text
+    create_engine, Column, Integer, String, Float, Text, DateTime, Boolean, JSON, func, UniqueConstraint, text, Index, ForeignKey
 )
-from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 from config.settings import DB_URL
 
 Base = declarative_base()
@@ -33,8 +33,18 @@ class Game(Base):
     hit = Column(Boolean, nullable=True)
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, onupdate=func.now())
+    
+    # Relacionamentos
+    tracker = relationship("LiveGameTracker", back_populates="game", uselist=False, cascade="all, delete-orphan")
+    odd_history = relationship("OddHistory", back_populates="game", cascade="all, delete-orphan")
+    
     __table_args__ = (
         UniqueConstraint("ext_id", "start_time", name="uq_game_extid_start"),
+        Index('idx_game_status', 'status'),
+        Index('idx_game_will_bet', 'will_bet'),
+        Index('idx_game_pick', 'pick'),
+        Index('idx_game_outcome', 'outcome'),
+        Index('idx_game_hit', 'hit'),
     )
 
 
@@ -48,7 +58,7 @@ class Stat(Base):
 class LiveGameTracker(Base):
     __tablename__ = "live_game_trackers"
     id = Column(Integer, primary_key=True)
-    game_id = Column(Integer, nullable=False, index=True)  # referência a Game.id
+    game_id = Column(Integer, ForeignKey('games.id', ondelete='CASCADE'), nullable=False, index=True)  # referência a Game.id
     ext_id = Column(String, index=True)
 
     last_analysis_time = Column(DateTime, server_default=func.now())
@@ -69,22 +79,35 @@ class LiveGameTracker(Base):
 
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, onupdate=func.now())
+    
+    # Relacionamentos
+    game = relationship("Game", back_populates="tracker")
 
     __table_args__ = (
         UniqueConstraint("game_id", name="uq_live_tracker_game_id"),
+        Index('idx_tracker_ext_id', 'ext_id'),
+        Index('idx_tracker_last_analysis', 'last_analysis_time'),
     )
 
 
 class OddHistory(Base):
     __tablename__ = "odd_history"
     id = Column(Integer, primary_key=True)
-    game_id = Column(Integer, nullable=False, index=True)  # Referência ao Game.id
+    game_id = Column(Integer, ForeignKey('games.id', ondelete='CASCADE'), nullable=False, index=True)  # Referência ao Game.id
     ext_id = Column(String, index=True)
     timestamp = Column(DateTime, server_default=func.now())
     odds_home = Column(Float)
     odds_draw = Column(Float)
     odds_away = Column(Float)
     created_at = Column(DateTime, server_default=func.now())
+    
+    # Relacionamentos
+    game = relationship("Game", back_populates="odd_history")
+    
+    __table_args__ = (
+        Index('idx_odd_history_ext_id', 'ext_id'),
+        Index('idx_odd_history_timestamp', 'timestamp'),
+    )
 
 
 class AnalyticsEvent(Base):
@@ -94,7 +117,7 @@ class AnalyticsEvent(Base):
     event_type = Column(String, nullable=False, index=True)  # extraction, calculation, decision, telegram, etc
     event_category = Column(String, nullable=False, index=True)  # scraping, betting, notification, etc
     timestamp = Column(DateTime, server_default=func.now(), index=True)
-    game_id = Column(Integer, nullable=True, index=True)  # Referência ao Game.id (pode ser None)
+    game_id = Column(Integer, ForeignKey('games.id', ondelete='SET NULL'), nullable=True, index=True)  # Referência ao Game.id (pode ser None)
     ext_id = Column(String, nullable=True, index=True)
     source_link = Column(Text, nullable=True)
     # Dados do evento (JSON)
@@ -105,6 +128,11 @@ class AnalyticsEvent(Base):
     # Metadados (renomeado de 'metadata' para evitar conflito com SQLAlchemy)
     event_metadata = Column(JSON, nullable=True)  # Informações adicionais
     created_at = Column(DateTime, server_default=func.now())
+    
+    __table_args__ = (
+        Index('idx_analytics_event_type_category', 'event_type', 'event_category'),
+        Index('idx_analytics_timestamp_game', 'timestamp', 'game_id'),
+    )
 
 
 def _safe_add_column(table: str, coldef: str):

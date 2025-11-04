@@ -633,6 +633,263 @@ async def update_games_to_live_status():
             logger.info("✅ %d jogo(s) atualizado(s) para status 'live'", len(games_to_activate))
 
 
+def _get_live_games_within_window(session, now_utc: datetime):
+    """
+    Busca jogos ao vivo que estão dentro da janela de tempo (2h30min após início).
+    
+    Args:
+        session: Sessão do banco de dados
+        now_utc: Timestamp atual em UTC
+    
+    Returns:
+        Lista de jogos ao vivo ou lista vazia
+    """
+    # Verifica se há jogos pré-selecionados antes de iniciar monitoramento
+    preselected_count = session.query(Game).filter(Game.will_bet.is_(True)).count()
+    if preselected_count == 0:
+        logger.debug("⏭️  Nenhum jogo pré-selecionado. Monitoramento ao vivo não executado.")
+        return []
+    
+    # Busca apenas jogos que estão dentro do horário do jogo
+    # Considera janela de 2h30min após o início (jogo normal + prorrogação)
+    game_window_end = now_utc - timedelta(hours=2, minutes=30)
+    
+    # Usar eager loading para evitar N+1 queries
+    from sqlalchemy.orm import joinedload
+    
+    live_games = (
+        session.query(Game)
+        .options(joinedload(Game.tracker))  # Carrega tracker junto com games
+        .filter(
+            Game.status == "live",
+            Game.will_bet.is_(True),  # Só monitora jogos pré-selecionados
+            Game.start_time >= game_window_end,  # Jogo começou há menos de 2h30min
+            Game.start_time <= now_utc  # Jogo já começou
+        )
+        .all()
+    )
+    
+    return live_games
+
+
+def _ensure_tracker_exists(session, game: Game, now_utc: datetime) -> LiveGameTracker:
+    """
+    Garante que o tracker existe para um jogo, criando se necessário.
+    
+    Args:
+        session: Sessão do banco de dados
+        game: Jogo para o qual criar/obter tracker
+        now_utc: Timestamp atual em UTC
+    
+    Returns:
+        LiveGameTracker do jogo
+    """
+    tracker = game.tracker
+    if not tracker:
+        tracker = LiveGameTracker(
+            game_id=game.id,
+            ext_id=game.ext_id,
+            last_analysis_time=now_utc - timedelta(minutes=5)
+        )
+        session.add(tracker)
+        session.commit()
+
+        # Envia mensagem de "Análise em Andamento"
+        tg_send_message(
+            f"🔍 <b>ANÁLISE AO VIVO INICIADA</b>\n"
+            f"Estamos monitorando <b>{game.team_home} vs {game.team_away}</b> em busca de oportunidades de valor.\n"
+            f"Você será notificado assim que uma aposta for validada.",
+            message_type="live_opportunity",
+            game_id=game.id,
+            ext_id=game.ext_id
+        )
+        logger.info(f"🔍 Análise iniciada para jogo {game.id}: {game.team_home} vs {game.team_away}")
+    
+    return tracker
+
+
+async def _update_game_tracker(tracker: LiveGameTracker, game: Game, now_utc: datetime):
+    """
+    Atualiza o tracker com os dados atuais do jogo.
+    
+    Args:
+        tracker: Tracker do jogo
+        game: Jogo sendo monitorado
+        now_utc: Timestamp atual em UTC
+    """
+    # Scrapeia os dados atuais da página do jogo
+    source_url = game.game_url or game.source_link
+    html = await _fetch_requests_async(source_url)
+    live_data = scrape_live_game_data(html, game.ext_id, source_url=source_url)
+
+    # Atualiza as estatísticas no tracker
+    tracker.current_score = live_data["stats"].get("score")
+    tracker.current_minute = live_data["stats"].get("match_time")
+    tracker.stats_snapshot = live_data["stats"]  # Salva snapshot completo
+    tracker.last_analysis_time = now_utc
+    
+    return live_data
+
+
+def _is_game_finished(match_time: str) -> bool:
+    """
+    Verifica se um jogo terminou baseado no tempo do jogo.
+    
+    Args:
+        match_time: String com tempo do jogo (ex: "45'", "FT", "90+")
+    
+    Returns:
+        True se jogo terminou
+    """
+    if not match_time:
+        return False
+    
+    match_time_upper = match_time.upper()
+    game_finished_indicators = ["FT", "FINAL", "FIM", "TERMINADO", "ENDED", "90'", "90+"]
+    return any(indicator in match_time_upper for indicator in game_finished_indicators)
+
+
+async def _handle_finished_game(session, game: Game, tracker: LiveGameTracker, now_utc: datetime):
+    """
+    Processa um jogo que acabou de terminar.
+    
+    Args:
+        session: Sessão do banco de dados
+        game: Jogo terminado
+        tracker: Tracker do jogo
+        now_utc: Timestamp atual em UTC
+    
+    Returns:
+        True se jogo foi processado com sucesso, False caso contrário
+    """
+    logger.info(f"🏁 Jogo {game.id} ({game.team_home} vs {game.team_away}) terminou detectado ao vivo. Buscando resultado...")
+    
+    # Marca como terminado
+    game.status = "ended"
+    session.commit()
+    
+    # Busca resultado final
+    from scraping.fetchers import fetch_game_result
+    outcome = await fetch_game_result(game.ext_id, game.game_url or game.source_link)
+    
+    if outcome:
+        game.outcome = outcome
+        game.hit = (outcome == game.pick) if game.pick else None
+        result_msg = "✅ ACERTOU" if game.hit else "❌ ERROU" if game.hit is False else "⚠️ SEM PALPITE"
+        from utils.logger import log_with_context
+        log_with_context(
+            "info",
+            f"Resultado obtido para jogo: {outcome} | {result_msg}",
+            game_id=game.id,
+            ext_id=game.ext_id,
+            stage="fetch_result",
+            status="success",
+            extra_fields={"outcome": outcome, "hit": game.hit, "result_msg": result_msg}
+        )
+        
+        # Envia notificação de resultado
+        from utils.formatters import fmt_result
+        tg_send_message(fmt_result(game), message_type="result", game_id=game.id, ext_id=game.ext_id)
+        
+        # Tenta enviar resumo diário se todos os jogos do dia terminaram
+        try:
+            await maybe_send_daily_wrapup()
+        except Exception:
+            logger.exception(f"Erro ao verificar resumo diário após jogo {game.id}")
+        
+        session.commit()
+        return True
+    else:
+        logger.warning(f"⚠️ Não foi possível obter resultado para jogo {game.id}, tentando novamente mais tarde")
+        # Agenda watch_game_until_end_job para tentar novamente
+        asyncio.create_task(watch_game_until_end_job(game.id))
+        return False
+
+
+async def _handle_active_game(session, game: Game, tracker: LiveGameTracker, live_data: Dict[str, Any], now_utc: datetime):
+    """
+    Processa um jogo que ainda está em andamento, procurando oportunidades de aposta.
+    
+    Args:
+        session: Sessão do banco de dados
+        game: Jogo em andamento
+        tracker: Tracker do jogo
+        live_data: Dados ao vivo do jogo
+        now_utc: Timestamp atual em UTC
+    """
+    # ETAPA 1: Aplica a lógica de decisão para encontrar oportunidades
+    opportunity = decide_live_bet_opportunity(live_data, game, tracker)
+    
+    # Registra análise de oportunidade (mesmo se não encontrou)
+    from utils.analytics_logger import log_live_opportunity
+    reason = "Oportunidade encontrada" if opportunity else "Nenhuma oportunidade encontrada"
+    log_live_opportunity(game.id, game.ext_id, opportunity, reason=reason, metadata=live_data["stats"])
+
+    # ETAPA 2: Se encontrou uma oportunidade, valida a confiabilidade
+    if opportunity:
+        from betting.live_validator import validate_opportunity_reliability
+        
+        is_reliable, confidence_score, validation_reason = validate_opportunity_reliability(
+            opportunity, live_data, game, tracker
+        )
+        
+        # Adiciona score de confiança à oportunidade
+        opportunity["confidence_score"] = confidence_score
+        opportunity["validation_reason"] = validation_reason
+        
+        # Se não passou na validação, registra e descarta
+        if not is_reliable:
+            log_live_opportunity(
+                game.id, game.ext_id, opportunity,
+                reason=f"Oportunidade rejeitada na validação: {validation_reason}",
+                metadata={
+                    **live_data["stats"],
+                    "confidence_score": confidence_score,
+                    "validation_reason": validation_reason
+                }
+            )
+            logger.info(f"⚠️ Oportunidade rejeitada na validação (score: {confidence_score:.2f}): {validation_reason}")
+            opportunity = None  # Descarta a oportunidade
+        else:
+            logger.info(f"✅ Oportunidade validada com confiança {confidence_score:.2f}: {validation_reason}")
+
+    # ETAPA 3: Se houver uma oportunidade validada, envia o palpite
+    if opportunity:
+        # Prepara estatísticas com informações de validação
+        stats_with_validation = {
+            **live_data["stats"],
+            "confidence_score": opportunity.get("confidence_score", 0.0),
+            "validation_reason": opportunity.get("validation_reason", "")
+        }
+        
+        # Envia mensagem de "Palpite Validado"
+        message = fmt_live_bet_opportunity(game, opportunity, stats_with_validation)
+        tg_send_message(message, message_type="live_opportunity", game_id=game.id, ext_id=game.ext_id)
+
+        # Atualiza o tracker
+        tracker.last_pick_sent = now_utc
+        tracker.last_pick_key = opportunity.get("pick_key", "")
+        cooldown_min = opportunity.get("cooldown_minutes", int(os.getenv("LIVE_COOLDOWN_MIN", "8")))
+        tracker.cooldown_until = now_utc + timedelta(minutes=cooldown_min)
+        tracker.notifications_sent = (tracker.notifications_sent or 0) + 1
+
+        logger.info(f"✅ Oportunidade validada e enviada para jogo {game.id}: {opportunity['option']} @ {opportunity['odd']}")
+    else:
+        # Envia mensagem de "Busca Continua" (opcional, para não spam)
+        # Só envia a mensagem se passou muito tempo desde a última.
+        if (now_utc - tracker.last_analysis_time).total_seconds() > 3600:  # 1 hora
+            tg_send_message(
+                f"🔄 <b>BUSCA CONTINUADA</b>\n"
+                f"Ainda não encontramos uma oportunidade de valor em <b>{game.team_home} vs {game.team_away}</b>.\n"
+                f"Continuaremos monitorando.",
+                message_type="live_opportunity",
+                game_id=game.id,
+                ext_id=game.ext_id
+            )
+            tracker.last_analysis_time = now_utc  # Atualiza para evitar spam
+            session.commit()
+
+
 async def monitor_live_games_job():
     """
     Monitora jogos ao vivo em busca de oportunidades de aposta.
@@ -642,185 +899,49 @@ async def monitor_live_games_job():
     now_utc = datetime.now(pytz.UTC)
 
     with SessionLocal() as session:
-        # 1. Verifica se há jogos pré-selecionados antes de iniciar monitoramento
-        preselected_count = session.query(Game).filter(Game.will_bet.is_(True)).count()
-        if preselected_count == 0:
-            logger.debug("⏭️  Nenhum jogo pré-selecionado. Monitoramento ao vivo não executado.")
-            return
-        
-        # 2. Busca apenas jogos que estão dentro do horário do jogo
-        # Considera janela de 2h30min após o início (jogo normal + prorrogação)
-        game_window_end = now_utc - timedelta(hours=2, minutes=30)
-        
-        live_games = (
-            session.query(Game)
-            .filter(
-                Game.status == "live",
-                Game.will_bet.is_(True),  # Só monitora jogos pré-selecionados
-                Game.start_time >= game_window_end,  # Jogo começou há menos de 2h30min
-                Game.start_time <= now_utc  # Jogo já começou
-            )
-            .all()
-        )
+        # Busca jogos ao vivo
+        live_games = _get_live_games_within_window(session, now_utc)
         
         if not live_games:
             logger.debug("⏭️  Nenhum jogo ao vivo dentro do horário previsto.")
             return
         
-        logger.info("⚽ Iniciando monitoramento de %d jogo(s) ao vivo...", len(live_games))
+        from utils.logger import log_with_context
+        log_with_context(
+            "info",
+            f"Iniciando monitoramento de {len(live_games)} jogo(s) ao vivo",
+            stage="monitor_live_games",
+            status="started",
+            extra_fields={"games_count": len(live_games)}
+        )
 
         for game in live_games:
             try:
-                # 1. Busca ou cria o tracker
-                tracker = session.query(LiveGameTracker).filter_by(game_id=game.id).one_or_none()
-                if not tracker:
-                    tracker = LiveGameTracker(
-                        game_id=game.id,
-                        ext_id=game.ext_id,
-                        last_analysis_time=now_utc - timedelta(minutes=5)
-                    )
-                    session.add(tracker)
-                    session.commit()
-
-                    # Envia mensagem de "Análise em Andamento"
-                    tg_send_message(
-                        f"🔍 <b>ANÁLISE AO VIVO INICIADA</b>\n"
-                        f"Estamos monitorando <b>{game.team_home} vs {game.team_away}</b> em busca de oportunidades de valor.\n"
-                        f"Você será notificado assim que uma aposta for validada.",
-                        message_type="live_opportunity",
-                        game_id=game.id,
-                        ext_id=game.ext_id
-                    )
-                    logger.info(f"🔍 Análise iniciada para jogo {game.id}: {game.team_home} vs {game.team_away}")
-
-                # 2. Scrapeia os dados atuais da página do jogo
-                source_url = game.game_url or game.source_link
-                html = await _fetch_requests_async(source_url)
-                live_data = scrape_live_game_data(html, game.ext_id, source_url=source_url)
-
-                # Atualiza as estatísticas no tracker
-                tracker.current_score = live_data["stats"].get("score")
-                tracker.current_minute = live_data["stats"].get("match_time")
-                tracker.stats_snapshot = live_data["stats"]  # Salva snapshot completo
-                tracker.last_analysis_time = now_utc
-
-                # 2.5. Verifica se o jogo terminou (detecção automática)
-                match_time = tracker.current_minute or ""
-                match_time_upper = match_time.upper()
-                game_finished_indicators = ["FT", "FINAL", "FIM", "TERMINADO", "ENDED", "90'", "90+"]
-                is_finished = any(indicator in match_time_upper for indicator in game_finished_indicators)
+                # 1. Garante que tracker existe
+                tracker = _ensure_tracker_exists(session, game, now_utc)
                 
-                if is_finished and game.status == "live":
-                    logger.info(f"🏁 Jogo {game.id} ({game.team_home} vs {game.team_away}) terminou detectado ao vivo. Buscando resultado...")
-                    # Marca como terminado e busca resultado imediatamente
-                    game.status = "ended"
-                    session.commit()
-                    
-                    # Busca resultado final
-                    from scraping.fetchers import fetch_game_result
-                    outcome = await fetch_game_result(game.ext_id, game.game_url or game.source_link)
-                    
-                    if outcome:
-                        game.outcome = outcome
-                        game.hit = (outcome == game.pick) if game.pick else None
-                        result_msg = "✅ ACERTOU" if game.hit else "❌ ERROU" if game.hit is False else "⚠️ SEM PALPITE"
-                        logger.info(f"🏁 Resultado obtido para jogo {game.id}: {outcome} | {result_msg}")
-                        
-                        # Envia notificação de resultado
-                        from utils.formatters import fmt_result
-                        tg_send_message(fmt_result(game), message_type="result", game_id=game.id, ext_id=game.ext_id)
-                        
-                        # Tenta enviar resumo diário se todos os jogos do dia terminaram
-                        try:
-                            await maybe_send_daily_wrapup()
-                        except Exception:
-                            logger.exception(f"Erro ao verificar resumo diário após jogo {game.id}")
-                    else:
-                        logger.warning(f"⚠️ Não foi possível obter resultado para jogo {game.id}, tentando novamente mais tarde")
-                        # Agenda watch_game_until_end_job para tentar novamente
-                        asyncio.create_task(watch_game_until_end_job(game.id))
-                    
-                    session.commit()
+                # 2. Atualiza tracker com dados atuais
+                live_data = await _update_game_tracker(tracker, game, now_utc)
+                
+                # 3. Verifica se jogo terminou
+                if _is_game_finished(tracker.current_minute or "") and game.status == "live":
+                    await _handle_finished_game(session, game, tracker, now_utc)
                     continue  # Pula para próximo jogo
-
-                # 3. ETAPA 1: Aplica a lógica de decisão para encontrar oportunidades (só se o jogo ainda está rolando)
-                opportunity = decide_live_bet_opportunity(live_data, game, tracker)
                 
-                # Registra análise de oportunidade (mesmo se não encontrou)
-                from utils.analytics_logger import log_live_opportunity
-                reason = "Oportunidade encontrada" if opportunity else "Nenhuma oportunidade encontrada"
-                log_live_opportunity(game.id, game.ext_id, opportunity, reason=reason, metadata=live_data["stats"])
-
-                # 4. ETAPA 2: Se encontrou uma oportunidade, valida a confiabilidade
-                if opportunity:
-                    from betting.live_validator import validate_opportunity_reliability
-                    
-                    is_reliable, confidence_score, validation_reason = validate_opportunity_reliability(
-                        opportunity, live_data, game, tracker
-                    )
-                    
-                    # Adiciona score de confiança à oportunidade
-                    opportunity["confidence_score"] = confidence_score
-                    opportunity["validation_reason"] = validation_reason
-                    
-                    # Se não passou na validação, registra e descarta
-                    if not is_reliable:
-                        log_live_opportunity(
-                            game.id, game.ext_id, opportunity,
-                            reason=f"Oportunidade rejeitada na validação: {validation_reason}",
-                            metadata={
-                                **live_data["stats"],
-                                "confidence_score": confidence_score,
-                                "validation_reason": validation_reason
-                            }
-                        )
-                        logger.info(f"⚠️ Oportunidade rejeitada na validação (score: {confidence_score:.2f}): {validation_reason}")
-                        opportunity = None  # Descarta a oportunidade
-                    else:
-                        logger.info(f"✅ Oportunidade validada com confiança {confidence_score:.2f}: {validation_reason}")
-
-                # 5. Se houver uma oportunidade validada, envia o palpite
-                if opportunity:
-                    # Prepara estatísticas com informações de validação
-                    stats_with_validation = {
-                        **live_data["stats"],
-                        "confidence_score": opportunity.get("confidence_score", 0.0),
-                        "validation_reason": opportunity.get("validation_reason", "")
-                    }
-                    
-                    # Envia mensagem de "Palpite Validado"
-                    message = fmt_live_bet_opportunity(game, opportunity, stats_with_validation)
-                    tg_send_message(message, message_type="live_opportunity", game_id=game.id, ext_id=game.ext_id)
-
-                    # Atualiza o tracker
-                    tracker.last_pick_sent = now_utc
-                    tracker.last_pick_key = opportunity.get("pick_key", "")
-                    cooldown_min = opportunity.get("cooldown_minutes", int(os.getenv("LIVE_COOLDOWN_MIN", "8")))
-                    tracker.cooldown_until = now_utc + timedelta(minutes=cooldown_min)
-                    tracker.notifications_sent = (tracker.notifications_sent or 0) + 1
-
-                    logger.info(f"✅ Oportunidade validada e enviada para jogo {game.id}: {opportunity['option']} @ {opportunity['odd']}")
-                else:
-                    # Envia mensagem de "Busca Continua" (opcional, para não spam)
-                    # Só envia a mensagem se passou muito tempo desde a última.
-                    if (now_utc - tracker.last_analysis_time).total_seconds() > 3600:  # 1 hora
-                        tg_send_message(
-                            f"🔄 <b>BUSCA CONTINUADA</b>\n"
-                            f"Ainda não encontramos uma oportunidade de valor em <b>{game.team_home} vs {game.team_away}</b>.\n"
-                            f"Continuaremos monitorando.",
-                            message_type="live_opportunity",
-                            game_id=game.id,
-                            ext_id=game.ext_id
-                        )
-                        tracker.last_analysis_time = now_utc  # Atualiza para evitar spam
-                        session.commit()
-
+                # 4. Processa jogo ativo
+                await _handle_active_game(session, game, tracker, live_data, now_utc)
                 session.commit()
 
             except Exception as e:
                 logger.exception(f"Erro ao monitorar jogo ao vivo {game.id} ({game.ext_id}): {e}")
 
-    logger.info("⚽ Monitoramento de jogos ao vivo concluído.")
+        from utils.logger import log_with_context
+        log_with_context(
+            "info",
+            "Monitoramento de jogos ao vivo concluído",
+            stage="monitor_live_games",
+            status="completed"
+        )
 
 
 async def send_daily_summary_job():
@@ -1047,6 +1168,61 @@ async def maybe_send_daily_wrapup():
             logger.info(f"📊 Wrap-up do dia enviado | total={total} hits={hits} acc={hits/total*100:.1f}%")
 
 
+async def cleanup_result_cache_job():
+    """
+    Job periódico para limpar entradas expiradas do cache de resultados.
+    Executa a cada hora para manter o cache limpo.
+    """
+    from utils.cache import result_cache
+    
+    try:
+        removed = result_cache.clear_expired()
+        stats = result_cache.get_stats()
+        
+        if removed > 0:
+            logger.info(f"🧹 Cache limpo: {removed} entradas expiradas removidas. "
+                       f"Cache atual: {stats['size']} entradas | "
+                       f"Hit rate: {stats['hit_rate']:.1f}%")
+        else:
+            logger.debug(f"🧹 Verificação de cache: nenhuma entrada expirada. "
+                        f"Cache atual: {stats['size']} entradas | "
+                        f"Hit rate: {stats['hit_rate']:.1f}%")
+    except Exception as e:
+        logger.exception(f"Erro ao limpar cache de resultados: {e}")
+
+
+async def health_check_job():
+    """
+    Job periódico para verificar a saúde do sistema e enviar alertas.
+    Executa a cada 30 minutos para monitorar componentes críticos.
+    """
+    from utils.health_check import system_health
+    
+    try:
+        logger.debug("🏥 Executando health checks do sistema...")
+        results = system_health.check_and_alert()
+        
+        # Log resumo do status
+        if results["overall"]:
+            logger.debug("✅ Sistema saudável: todos os componentes funcionando")
+        else:
+            unhealthy = []
+            if not results["api"]["healthy"]:
+                unhealthy.append("API")
+            if not results["database"]["healthy"]:
+                unhealthy.append("Banco")
+            if not results["telegram"]["healthy"]:
+                unhealthy.append("Telegram")
+            
+            logger.warning(f"⚠️ Sistema com problemas: {', '.join(unhealthy)}")
+        
+        # Log detalhado apenas em modo debug
+        logger.debug(f"Status detalhado: {system_health.get_status_summary()}")
+        
+    except Exception as e:
+        logger.exception(f"Erro ao executar health checks: {e}")
+
+
 def setup_scheduler():
     """
     Registra todos os jobs no AsyncIOScheduler.
@@ -1107,6 +1283,30 @@ def setup_scheduler():
         max_instances=1,
         misfire_grace_time=60,
     )
+    
+    # --- Limpeza periódica do cache de resultados ---
+    scheduler.add_job(
+        cleanup_result_cache_job,
+        trigger=IntervalTrigger(hours=1),  # A cada 1 hora
+        id="cache_cleanup",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+        misfire_grace_time=300,
+    )
+    logger.info("🧹 Limpeza de cache de resultados agendada a cada 1 hora")
+    
+    # --- Health checks do sistema ---
+    scheduler.add_job(
+        health_check_job,
+        trigger=IntervalTrigger(minutes=30),  # A cada 30 minutos
+        id="health_check",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+        misfire_grace_time=300,
+    )
+    logger.info("🏥 Health checks do sistema agendados a cada 30 minutos")
 
     # --- Reavaliação horária dos jogos do dia ---
     scheduler.add_job(

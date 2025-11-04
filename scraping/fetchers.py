@@ -3,7 +3,8 @@ import asyncio
 import requests
 from typing import Optional
 from config.settings import (
-    HAS_PLAYWRIGHT, SCRAPE_BACKEND, REQUESTS_TIMEOUT, USER_AGENT
+    HAS_PLAYWRIGHT, SCRAPE_BACKEND, REQUESTS_TIMEOUT, HTML_TIMEOUT, USER_AGENT,
+    PLAYWRIGHT_NAVIGATION_TIMEOUT, PLAYWRIGHT_SELECTOR_TIMEOUT, PLAYWRIGHT_NETWORKIDLE_TIMEOUT
 )
 from utils.logger import logger
 from scraping.betnacional import try_parse_events
@@ -13,14 +14,47 @@ HEADERS = {"User-Agent": USER_AGENT}
 
 def fetch_requests(url: str) -> str:
     """Baixa uma página usando requests (síncrono)."""
-    r = requests.get(url, headers=HEADERS, timeout=REQUESTS_TIMEOUT)
+    r = requests.get(url, headers=HEADERS, timeout=HTML_TIMEOUT)
     r.raise_for_status()
     return r.text
 
 
 async def _fetch_requests_async(url: str) -> str:
-    """Wrapper assíncrono para não travar o loop ao usar requests."""
-    return await asyncio.to_thread(fetch_requests, url)
+    """
+    Wrapper assíncrono para requests.get com rate limiting e retry.
+    """
+    from utils.rate_limiter import html_rate_limiter, retry_with_backoff
+    
+    async def _fetch():
+        # Usar rate limiter antes de fazer requisição
+        await html_rate_limiter.acquire()
+        
+        # Executar requisição em thread separada
+        return await asyncio.to_thread(fetch_requests, url)
+    
+    # Tentar com retry
+    try:
+        return await retry_with_backoff(
+            _fetch,
+            max_retries=3,
+            initial_delay=1.0,
+            max_delay=20.0,
+            exponential_base=2.0,
+            exceptions=(requests.exceptions.RequestException, Exception),
+            rate_limiter=None  # Já usamos dentro de _fetch
+        )
+    except Exception as e:
+        from utils.error_handler import log_error_with_context
+        log_error_with_context(
+            e,
+            context={
+                "url": url,
+                "stage": "fetch_requests_async",
+                "has_retry": True
+            },
+            level="warning",
+            reraise=True
+        )
 
 
 async def fetch_playwright(url: str) -> str:
@@ -31,7 +65,7 @@ async def fetch_playwright(url: str) -> str:
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         page = await browser.new_page(user_agent=USER_AGENT)
-        await page.goto(url, wait_until="networkidle", timeout=60_000)
+        await page.goto(url, wait_until="networkidle", timeout=PLAYWRIGHT_NETWORKIDLE_TIMEOUT)
         html = await page.content()
         await browser.close()
         return html
@@ -62,12 +96,12 @@ async def _fetch_with_playwright(url: str, wait_for_selector: str = None, wait_t
         )
         page = await context.new_page()
         try:
-            await page.goto(url, wait_until="networkidle", timeout=60000)
+            await page.goto(url, wait_until="networkidle", timeout=PLAYWRIGHT_NETWORKIDLE_TIMEOUT)
             
             # Aguarda seletor específico se fornecido
             if wait_for_selector:
                 try:
-                    await page.wait_for_selector(wait_for_selector, timeout=15000)
+                    await page.wait_for_selector(wait_for_selector, timeout=PLAYWRIGHT_SELECTOR_TIMEOUT)
                 except:
                     pass  # Continua mesmo se não encontrar
             
@@ -95,14 +129,31 @@ async def fetch_events_from_link(url: str, backend: str):
     def _other(b: str) -> str:
         return "requests" if b == "playwright" else "playwright"
 
-    logger.info("🔎 Varredura iniciada para %s", url)
+    from utils.logger import log_with_context
+    log_with_context(
+        "info",
+        f"Varredura iniciada para {url}",
+        url=url,
+        stage="fetch_events",
+        status="started"
+    )
     
     # ETAPA 1: Tentar API XHR primeiro (mais eficiente)
     ids = extract_ids_from_url(url)
     if ids:
         sport_id, category_id, tournament_id = ids
-        logger.info("📡 Tentando buscar via API XHR (sport_id=%d, category_id=%d, tournament_id=%d)", 
-                   sport_id, category_id, tournament_id)
+        log_with_context(
+            "info",
+            f"Tentando buscar via API XHR (sport_id={sport_id}, category_id={category_id}, tournament_id={tournament_id})",
+            url=url,
+            stage="api_xhr",
+            status="attempting",
+            extra_fields={
+                "sport_id": sport_id,
+                "category_id": category_id,
+                "tournament_id": tournament_id
+            }
+        )
         
         try:
             json_data = await fetch_events_from_api_async(sport_id, category_id, tournament_id)
@@ -110,13 +161,33 @@ async def fetch_events_from_link(url: str, backend: str):
                 evs = parse_events_from_api(json_data, url)
                 if evs:
                     log_extraction(url, len(evs), "api_xhr", success=True, metadata={"method": "api"})
+                    log_with_context(
+                        "info",
+                        f"Eventos extraídos via API XHR: {len(evs)} eventos",
+                        url=url,
+                        stage="api_xhr",
+                        status="success",
+                        extra_fields={"events_count": len(evs), "method": "api"}
+                    )
                     return evs
                 logger.info("API retornou dados mas nenhum evento válido encontrado")
             else:
                 logger.info("API não retornou dados, tentando fallback HTML...")
         except Exception as e:
-            error_msg = str(e)[:500]
-            logger.warning("Erro ao buscar via API XHR: %s. Tentando fallback HTML...", error_msg)
+            from utils.error_handler import log_error_with_context
+            log_error_with_context(
+                e,
+                context={
+                    "url": url,
+                    "sport_id": sport_id,
+                    "category_id": category_id,
+                    "tournament_id": tournament_id,
+                    "stage": "api_xhr"
+                },
+                level="warning",
+                reraise=False
+            )
+            logger.info("Tentando fallback HTML...")
     
     # ETAPA 2: Fallback para HTML scraping
     backend_sel = backend if backend != "auto" else _backend_auto()
@@ -134,8 +205,19 @@ async def fetch_events_from_link(url: str, backend: str):
                 return evs
             logger.info("Nenhum evento com backend=%s; tentando fallback…", b)
         except Exception as e:
+            from utils.error_handler import log_error_with_context
             error_msg = str(e)[:500]  # Limita tamanho
-            logger.warning("Falha ao buscar %s com %s (tentativa %d): %s", url, b, attempt+1, e)
+            log_error_with_context(
+                e,
+                context={
+                    "url": url,
+                    "backend": b,
+                    "attempt": attempt + 1,
+                    "stage": "html_scraping"
+                },
+                level="warning",
+                reraise=False
+            )
             if attempt == 1:  # Última tentativa falhou
                 log_extraction(url, 0, b, success=False, error=error_msg, metadata={"attempt": attempt + 1})
 
@@ -144,13 +226,98 @@ async def fetch_events_from_link(url: str, backend: str):
 
 
 async def fetch_game_result(ext_id: str, source_link: str) -> Optional[str]:
-    """Busca o resultado de um jogo específico."""
-    from scraping.betnacional import scrape_game_result
+    """
+    Busca o resultado de um jogo específico.
     
+    Usa cache para evitar múltiplas requisições para o mesmo jogo.
+    Tenta primeiro via API XHR (se disponível), depois fallback para HTML scraping.
+    
+    Args:
+        ext_id: ID externo do jogo (event_id)
+        source_link: URL do jogo
+    
+    Returns:
+        "home", "draw", ou "away" se encontrou resultado, None caso contrário
+    """
+    from scraping.betnacional import (
+        scrape_game_result, extract_event_id_from_url,
+        fetch_event_odds_from_api, parse_event_odds_from_api
+    )
+    from utils.cache import result_cache
+    
+    # ETAPA 0: Verificar cache primeiro
+    cached_result = result_cache.get(ext_id)
+    if cached_result:
+        logger.info(f"✅ Resultado encontrado no cache para jogo {ext_id}: {cached_result}")
+        return cached_result
+    
+    # ETAPA 1: Tentar buscar via API XHR primeiro
+    event_id = None
     try:
-        html = await _fetch_with_playwright(source_link) if HAS_PLAYWRIGHT else await _fetch_requests_async(source_link)
-        return scrape_game_result(html, ext_id)
+        # Tentar extrair event_id da URL
+        if source_link:
+            event_id = extract_event_id_from_url(source_link)
+        # Se não conseguir, tentar usar ext_id diretamente
+        if not event_id and ext_id:
+            try:
+                event_id = int(ext_id)
+            except (ValueError, TypeError):
+                pass
+        
+        if event_id:
+            logger.info(f"📡 Tentando buscar resultado via API para evento {event_id}")
+            try:
+                json_data = fetch_event_odds_from_api(event_id)
+                if json_data:
+                    # Verificar se conseguimos extrair resultado da API
+                    events = json_data.get('events', [])
+                    if events:
+                        event = events[0]
+                        event_status_id = event.get('event_status_id', 0)
+                        
+                        # event_status_id: 0 = agendado, 1 = ao vivo, 2 = finalizado
+                        if event_status_id == 2:
+                            # Jogo terminado - tentar extrair resultado
+                            # Verificar se há informações de resultado no evento
+                            # Por enquanto, a API não retorna resultado diretamente,
+                            # mas podemos verificar se há placar ou outras informações
+                            # Se não encontrar, fazer fallback para HTML scraping
+                            logger.debug(f"API indica que jogo {event_id} terminou (status_id=2), mas resultado não disponível na API. Tentando HTML...")
+                        elif event_status_id == 1:
+                            logger.debug(f"Jogo {event_id} ainda está ao vivo (status_id=1). Não é possível obter resultado ainda.")
+                            return None
+                        else:
+                            logger.debug(f"Jogo {event_id} ainda não começou (status_id={event_status_id}). Não é possível obter resultado ainda.")
+                            return None
+            except Exception as e:
+                logger.debug(f"Erro ao buscar resultado via API: {e}. Tentando HTML scraping...")
     except Exception as e:
-        logger.exception("Erro ao buscar resultado do jogo %s: %s", ext_id, e)
-        return None
+        logger.debug(f"Erro ao processar API: {e}. Tentando HTML scraping...")
+    
+    # ETAPA 2: Fallback para HTML scraping
+    try:
+        logger.debug(f"🌐 Buscando resultado via HTML scraping para jogo {ext_id}")
+        html = await _fetch_with_playwright(source_link) if HAS_PLAYWRIGHT else await _fetch_requests_async(source_link)
+        result = scrape_game_result(html, ext_id)
+        if result:
+            logger.info(f"✅ Resultado encontrado via HTML: {result}")
+            # Salvar no cache
+            result_cache.set(ext_id, result)
+            return result
+        else:
+            logger.warning(f"⚠️ Resultado não encontrado no HTML para jogo {ext_id}")
+    except Exception as e:
+        from utils.error_handler import log_error_with_context
+        log_error_with_context(
+            e,
+            context={
+                "ext_id": ext_id,
+                "source_link": source_link,
+                "stage": "fetch_game_result"
+            },
+            level="error",
+            reraise=False
+        )
+    
+    return None
 
