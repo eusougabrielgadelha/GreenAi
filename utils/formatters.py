@@ -65,9 +65,11 @@ def fmt_morning_summary(date_local: datetime, analyzed: int, chosen: List[Dict[s
                 elif g.get("pick") == "away":
                     pick_odd = g.get('odds_away', 0)
                 
+                odds_home = float(g.get('odds_home', 0) or 0.0)
+                odds_away = float(g.get('odds_away', 0) or 0.0)
                 msg += f"  {confidence} <b>{g.get('team_home')[:20]}</b> vs <b>{g.get('team_away')[:20]}</b>\n"
-                msg += f"     → {pick_str} @ {pick_odd:.2f}\n"
-                msg += f"     → Prob: {prob*100:.0f}% | EV: {g.get('pick_ev')*100:+.1f}%\n\n"
+                msg += f"     → Odds: {odds_home:.2f} / {odds_away:.2f}\n"
+                msg += f"     → {pick_str} @ {pick_odd:.2f} | Prob: {prob*100:.0f}% | EV: {g.get('pick_ev')*100:+.1f}%\n\n"
     else:
         msg += "ℹ️ <i>Nenhum jogo atende aos critérios hoje.</i>\n\n"
     
@@ -108,12 +110,22 @@ def fmt_result(g: Game) -> str:
 
     msg = f"{emoji} <b>RESULTADO - {status}</b>\n"
     msg += "━━━━━━━━━━━━━━━━━━━━\n\n"
-    msg += f"⚽ <b>{g.team_home}</b> vs <b>{g.team_away}</b>\n"
+    msg += f"⚽ <b>{g.team_home}</b> vs <b>{g.team_away}</b>\n\n"
+
+    # Odds dos dois times
+    odds_home = float(g.odds_home or 0.0)
+    odds_away = float(g.odds_away or 0.0)
+    odds_draw = float(g.odds_draw or 0.0)
+    msg += f"💰 <b>ODDS</b>\n"
+    msg += f"├ {g.team_home}: <b>{odds_home:.2f}</b>\n"
+    msg += f"├ Empate: <b>{odds_draw:.2f}</b>\n"
+    msg += f"└ {g.team_away}: <b>{odds_away:.2f}</b>\n\n"
 
     # Mapeia resultado para texto legível
     outcome_map = {"home": g.team_home, "draw": "Empate", "away": g.team_away}
     pick_map = {"home": g.team_home, "draw": "Empate", "away": g.team_away}
 
+    msg += f"📊 <b>RESULTADO</b>\n"
     msg += f"├ Palpite: <b>{pick_map.get(g.pick, g.pick)}</b>\n"
     msg += f"├ Resultado: <b>{outcome_map.get(g.outcome, g.outcome or '—')}</b>\n"
     msg += f"└ EV estimado: {g.pick_ev*100:+.1f}%"
@@ -135,6 +147,15 @@ def fmt_pick_now(g: Game) -> str:
     msg += f"⚽ <b>JOGO</b>\n"
     msg += f"<b>{g.team_home}</b> vs <b>{g.team_away}</b>\n"
     msg += f"🕐 Início: {hhmm}h\n\n"
+    
+    # Odds dos dois times
+    odds_home = float(g.odds_home or 0.0)
+    odds_away = float(g.odds_away or 0.0)
+    odds_draw = float(g.odds_draw or 0.0)
+    msg += f"💰 <b>ODDS</b>\n"
+    msg += f"├ {g.team_home}: <b>{odds_home:.2f}</b>\n"
+    msg += f"├ Empate: <b>{odds_draw:.2f}</b>\n"
+    msg += f"└ {g.team_away}: <b>{odds_away:.2f}</b>\n\n"
     
     msg += f"💡 <b>ANÁLISE</b>\n"
     msg += f"├ Aposta: <b>{side}</b>\n"
@@ -176,11 +197,19 @@ def fmt_reminder(g: Game) -> str:
     elif g.pick == "away":
         pick_odd = g.odds_away or 0.0
 
+    odds_home = float(g.odds_home or 0.0)
+    odds_away = float(g.odds_away or 0.0)
+    odds_draw = float(g.odds_draw or 0.0)
+    
     return (
         "🔔 <b>Lembrete</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
         f"⚽ <b>{esc(g.team_home)}</b> vs <b>{esc(g.team_away)}</b>\n"
-        f"🕐 Início: {hhmm}h\n"
+        f"🕐 Início: {hhmm}h\n\n"
+        f"💰 <b>ODDS</b>\n"
+        f"├ {esc(g.team_home)}: <b>{odds_home:.2f}</b>\n"
+        f"├ Empate: <b>{odds_draw:.2f}</b>\n"
+        f"└ {esc(g.team_away)}: <b>{odds_away:.2f}</b>\n\n"
         f"🎯 Pick: <b>{esc(side)}</b> @ {pick_odd:.2f}\n"
         f"📈 Prob.: <b>{(g.pick_prob or 0)*100:.0f}%</b> | EV: <b>{(g.pick_ev or 0)*100:+.1f}%</b>"
     )
@@ -212,8 +241,27 @@ def fmt_watch_upgrade(g: Game) -> str:
     msg += "━━━━━━━━━━━━━━━━━━━━\n\n"
     msg += f"⚽ <b>{g.team_home}</b> vs <b>{g.team_away}</b>\n"
     msg += f"🕐 Início: {hhmm}h\n\n"
+    
+    # Odds dos dois times
+    odds_home = float(g.odds_home or 0.0)
+    odds_away = float(g.odds_away or 0.0)
+    odds_draw = float(g.odds_draw or 0.0)
+    msg += f"💰 <b>ODDS</b>\n"
+    msg += f"├ {g.team_home}: <b>{odds_home:.2f}</b>\n"
+    msg += f"├ Empate: <b>{odds_draw:.2f}</b>\n"
+    msg += f"└ {g.team_away}: <b>{odds_away:.2f}</b>\n\n"
+    
+    # Calcula odd do pick
+    pick_odd = 0.0
+    if g.pick == "home":
+        pick_odd = odds_home
+    elif g.pick == "draw":
+        pick_odd = odds_draw
+    elif g.pick == "away":
+        pick_odd = odds_away
+    
     msg += f"✨ <b>ODDS MELHORARAM!</b>\n"
-    msg += f"├ Nova aposta: <b>{side}</b>\n"
+    msg += f"├ Nova aposta: <b>{side}</b> @ {pick_odd:.2f}\n"
     msg += f"├ Probabilidade: <b>{g.pick_prob*100:.0f}%</b>\n"
     msg += f"└ Valor esperado: <b>{g.pick_ev*100:+.1f}%</b>\n"
     msg += f"\n💚 <i>Agora atende aos critérios de aposta!</i>"
@@ -288,9 +336,11 @@ def fmt_dawn_games_summary(games: List[Game], date) -> str:
         prob = float(g.pick_prob or 0.0)
         confidence = "🔥" if prob > 0.6 else "⭐" if prob > 0.4 else "💡"
         
+        odds_home = float(g.odds_home or 0.0)
+        odds_away = float(g.odds_away or 0.0)
         msg += f"{confidence} <b>{esc(g.team_home)}</b> vs <b>{esc(g.team_away)}</b>\n"
-        msg += f"   🕐 {hhmm}h | Pick: <b>{pick_str}</b> @ {pick_odd:.2f}\n"
-        msg += f"   📊 Prob: {prob*100:.0f}% | EV: {g.pick_ev*100:+.1f}%\n\n"
+        msg += f"   🕐 {hhmm}h | Odds: {odds_home:.2f} / {odds_away:.2f}\n"
+        msg += f"   🎯 Pick: <b>{pick_str}</b> @ {pick_odd:.2f} | Prob: {prob*100:.0f}% | EV: {g.pick_ev*100:+.1f}%\n\n"
     
     return msg
 
@@ -345,9 +395,11 @@ def fmt_today_games_summary(games: List[Game], date, analyzed: int) -> str:
                 prob = float(g.pick_prob or 0.0)
                 confidence = "🔥" if prob > 0.6 else "⭐" if prob > 0.4 else "💡"
                 
+                odds_home = float(g.odds_home or 0.0)
+                odds_away = float(g.odds_away or 0.0)
                 msg += f"  {confidence} <b>{esc(g.team_home)}</b> vs <b>{esc(g.team_away)}</b>\n"
-                msg += f"     → {pick_str} @ {pick_odd:.2f}\n"
-                msg += f"     → Prob: {prob*100:.0f}% | EV: {g.pick_ev*100:+.1f}%\n\n"
+                msg += f"     → Odds: {odds_home:.2f} / {odds_away:.2f}\n"
+                msg += f"     → {pick_str} @ {pick_odd:.2f} | Prob: {prob*100:.0f}% | EV: {g.pick_ev*100:+.1f}%\n\n"
     else:
         msg += "ℹ️ <i>Nenhum jogo atende aos critérios hoje.</i>\n\n"
     
