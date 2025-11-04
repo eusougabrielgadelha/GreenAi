@@ -333,7 +333,7 @@ async def fetch_game_result(ext_id: str, source_link: str) -> Optional[str]:
     
     if not is_xhr_disabled():
         event_id = None
-    try:
+        try:
         # Tentar extrair event_id da URL
         if source_link:
             event_id = extract_event_id_from_url(source_link)
