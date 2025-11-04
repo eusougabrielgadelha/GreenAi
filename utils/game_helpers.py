@@ -4,6 +4,9 @@ from sqlalchemy.exc import IntegrityError
 
 if TYPE_CHECKING:
     from models.database import Game
+else:
+    # Importação real para uso em runtime (evita import circular)
+    from models.database import Game
 
 from config.settings import (
     is_high_conf as is_high_conf_config,
@@ -23,7 +26,7 @@ def upsert_game_from_event(
     reason: str,
     will: bool,
     status: str = "scheduled"
-) -> Optional[Game]:
+) -> Optional["Game"]:
     """
     Função helper para UPSERT de jogos.
     Retorna o Game criado/atualizado ou None em caso de erro.
@@ -104,9 +107,8 @@ def upsert_game_from_event(
     return g
 
 
-def is_high_conf(game: "Game") -> bool:
+def is_high_conf(game: Game) -> bool:
     """Alta confiança baseada em pick_prob (fallback para campos legados)."""
-    from models.database import Game
     val = (
         getattr(game, "pick_prob", None)
         or getattr(game, "pick_confidence", None)
@@ -116,12 +118,12 @@ def is_high_conf(game: "Game") -> bool:
     return is_high_conf_config(val)
 
 
-def was_high_conf_notified(game: "Game") -> bool:
+def was_high_conf_notified(game: Game) -> bool:
     """Verifica se jogo já foi notificado."""
     return was_high_conf_notified_config(game.pick_reason or "")
 
 
-def mark_high_conf_notified(game: "Game") -> None:
+def mark_high_conf_notified(game: Game) -> None:
     """Marca jogo como notificado."""
     game.pick_reason = mark_high_conf_notified_config(game.pick_reason or "")
 
