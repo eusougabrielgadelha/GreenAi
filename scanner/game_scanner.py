@@ -166,17 +166,25 @@ async def scan_games_for_date(
                         g.team_home, g.team_away, g.pick, g.pick_prob * 100, g.pick_ev * 100
                     )
                     
-                    # Envio imediato do sinal (APENAS alta confiança) - mantido para compatibilidade
+                    # Envio imediato do sinal (APENAS alta confiança) - usando banco de dados para rastrear
                     try:
-                        if (g.pick_prob or 0.0) >= HIGH_CONF_THRESHOLD and not was_high_conf_notified(g.pick_reason or ""):
+                        from utils.notification_tracker import should_notify_pick, mark_pick_notified
+                        
+                        should_notify, reason = should_notify_pick(g, check_high_conf=True)
+                        
+                        if should_notify:
                             tg_send_message(fmt_pick_now(g), message_type="pick_now", game_id=g.id, ext_id=g.ext_id)
+                            # Marca como notificado no banco de dados (persiste após reiniciar)
+                            mark_pick_notified(g, session)
+                            # Mantém compatibilidade com sistema antigo (pick_reason)
                             g.pick_reason = mark_high_conf_notified(g.pick_reason or "")
                             session.commit()
+                            logger.info(f"✅ Palpite notificado para jogo {g.id} ({g.ext_id}) - {g.team_home} vs {g.team_away}")
                         else:
                             # Registra que o sinal foi suprimido
                             from utils.analytics_logger import log_signal_suppression
-                            suppression_reason = "Já foi notificado" if was_high_conf_notified(g.pick_reason or "") else f"Probabilidade abaixo do threshold ({g.pick_prob or 0.0:.3f} < {HIGH_CONF_THRESHOLD})"
-                            log_signal_suppression(g.ext_id, suppression_reason, g.pick_prob or 0.0, g.pick_ev or 0.0, game_id=g.id)
+                            log_signal_suppression(g.ext_id, reason, g.pick_prob or 0.0, g.pick_ev or 0.0, game_id=g.id)
+                            logger.debug(f"⏭️  Palpite suprimido para jogo {g.id}: {reason}")
                     except Exception:
                         logger.exception("Falha ao enviar sinal imediato do jogo id=%s", g.id)
                     

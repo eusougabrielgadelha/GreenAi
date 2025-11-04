@@ -273,12 +273,22 @@ async def night_scan_for_early_games():
                         getattr(ev, "start_local_str", "?")
                     )
 
-                    # Envio do pick — SOMENTE se alta confiança e sem duplicar
+                    # Envio do pick — SOMENTE se alta confiança e sem duplicar (usando banco de dados)
                     try:
-                        if (g.pick_prob or 0.0) >= HIGH_CONF_THRESHOLD and not was_high_conf_notified(g.pick_reason or ""):
+                        from utils.notification_tracker import should_notify_pick, mark_pick_notified
+                        
+                        should_notify, reason = should_notify_pick(g, check_high_conf=True)
+                        
+                        if should_notify:
                             tg_send_message(fmt_pick_now(g), message_type="pick_now", game_id=g.id, ext_id=g.ext_id)
+                            # Marca como notificado no banco de dados (persiste após reiniciar)
+                            mark_pick_notified(g, session)
+                            # Mantém compatibilidade com sistema antigo (pick_reason)
                             g.pick_reason = mark_high_conf_notified(g.pick_reason or "")
                             session.commit()
+                            logger.info(f"✅ Palpite notificado (madrugada) para jogo {g.id} ({g.ext_id})")
+                        else:
+                            logger.debug(f"⏭️  Palpite suprimido (madrugada) para jogo {g.id}: {reason}")
                     except Exception:
                         logger.exception("Falha ao enviar pick noturno id=%s", g.id)
 
@@ -455,12 +465,22 @@ async def rescan_watchlist_job():
                 # Salva histórico de odds quando promove
                 save_odd_history(session, g)
 
-                # NOTIFICAÇÃO — só envia se ALTA CONFIANÇA e sem duplicar
+                # NOTIFICAÇÃO — só envia se ALTA CONFIANÇA e sem duplicar (usando banco de dados)
                 try:
-                    if (g.pick_prob or 0.0) >= HIGH_CONF_THRESHOLD and not was_high_conf_notified(g.pick_reason or ""):
+                    from utils.notification_tracker import should_notify_pick, mark_pick_notified
+                    
+                    should_notify, reason = should_notify_pick(g, check_high_conf=True)
+                    
+                    if should_notify:
                         tg_send_message(fmt_watch_upgrade(g), message_type="watch_upgrade", game_id=g.id, ext_id=g.ext_id)
+                        # Marca como notificado no banco de dados (persiste após reiniciar)
+                        mark_pick_notified(g, session)
+                        # Mantém compatibilidade com sistema antigo (pick_reason)
                         g.pick_reason = mark_high_conf_notified(g.pick_reason or "")
                         session.commit()
+                        logger.info(f"✅ Palpite notificado (watchlist upgrade) para jogo {g.id} ({g.ext_id})")
+                    else:
+                        logger.debug(f"⏭️  Palpite suprimido (watchlist upgrade) para jogo {g.id}: {reason}")
                 except Exception:
                     logger.exception("Falha ao notificar upgrade watchlist id=%s", g.id)
 
@@ -551,11 +571,19 @@ async def hourly_rescan_job():
                     # histórico antes da notificação
                     save_odd_history(session, game)
 
-                    # notifica uma única vez
+                    # notifica uma única vez (usando banco de dados)
                     try:
-                        tg_send_message(fmt_pick_now(game), message_type="pick_now", game_id=game.id, ext_id=game.ext_id)
-                        game.pick_reason = mark_high_conf_notified(game.pick_reason or "")
-                        session.commit()
+                        from utils.notification_tracker import should_notify_pick, mark_pick_notified
+                        
+                        should_notify, reason = should_notify_pick(game, check_high_conf=True)
+                        if should_notify:
+                            tg_send_message(fmt_pick_now(game), message_type="pick_now", game_id=game.id, ext_id=game.ext_id)
+                            mark_pick_notified(game, session)
+                            game.pick_reason = mark_high_conf_notified(game.pick_reason or "")
+                            session.commit()
+                            logger.info(f"✅ Palpite notificado (hourly rescan) para jogo {game.id} ({game.ext_id})")
+                        else:
+                            logger.debug(f"⏭️  Palpite suprimido (hourly rescan) para jogo {game.id}: {reason}")
                     except Exception:
                         logger.exception("Falha ao notificar alta confiança (hourly) id=%s", game.id)
 
@@ -583,15 +611,22 @@ async def hourly_rescan_job():
                     # Salva histórico
                     save_odd_history(session, game)
 
-                    # Não notificar upgrades "médios": só notificamos se for alta confiança e ainda não notificado
-                    if (game.pick_prob or 0.0) >= HIGH_CONF_THRESHOLD and not was_high_conf_notified(game.pick_reason or ""):
-                        try:
+                    # Não notificar upgrades "médios": só notificamos se for alta confiança e ainda não notificado (usando banco de dados)
+                    try:
+                        from utils.notification_tracker import should_notify_pick, mark_pick_notified
+                        
+                        should_notify, reason = should_notify_pick(game, check_high_conf=True)
+                        if should_notify:
                             tg_send_message(fmt_pick_now(game), message_type="pick_now", game_id=game.id, ext_id=game.ext_id)
+                            mark_pick_notified(game, session)
                             game.pick_reason = mark_high_conf_notified(game.pick_reason or "")
                             session.commit()
                             asyncio.create_task(_schedule_all_for_game(game))
-                        except Exception:
-                            logger.exception("Falha ao notificar upgrade (alta confiança) id=%s", game.id)
+                            logger.info(f"✅ Palpite notificado (upgrade horário) para jogo {game.id} ({game.ext_id})")
+                        else:
+                            logger.debug(f"⏭️  Palpite suprimido (upgrade horário) para jogo {game.id}: {reason}")
+                    except Exception:
+                        logger.exception("Falha ao notificar upgrade (alta confiança) id=%s", game.id)
                     else:
                         logger.info(
                             "📈 Jogo %s atualizado por EV, sem notificação (prob=%.3f; high_notified=%s)",

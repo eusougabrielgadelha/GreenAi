@@ -28,6 +28,7 @@ class Game(Base):
     pick_prob = Column(Float)
     pick_ev = Column(Float)
     will_bet = Column(Boolean, default=False)
+    pick_notified_at = Column(DateTime, nullable=True, index=True)  # Quando foi enviada a notificação do palpite
     status = Column(String, default="scheduled")  # scheduled|live|ended
     outcome = Column(String, nullable=True)  # home|draw|away
     hit = Column(Boolean, nullable=True)
@@ -45,6 +46,7 @@ class Game(Base):
         Index('idx_game_pick', 'pick'),
         Index('idx_game_outcome', 'outcome'),
         Index('idx_game_hit', 'hit'),
+        Index('idx_game_pick_notified', 'pick_notified_at'),
     )
 
 
@@ -229,6 +231,7 @@ def init_database():
     _safe_add_column("live_game_trackers", "notifications_sent INTEGER")
     _safe_add_column("live_game_trackers", "last_pick_key TEXT")
     _safe_add_column("live_game_trackers", "last_pick_sent DATETIME")
+    _safe_add_column("games", "pick_notified_at DATETIME")  # Rastrear quando palpite foi notificado
     # Migração: renomear coluna 'metadata' para 'event_metadata' em analytics_events
     _safe_migrate_metadata_column()
 
