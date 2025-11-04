@@ -87,11 +87,28 @@ def fetch_events_from_api(sport_id: int, category_id: int = 0, tournament_id: in
     detector = get_bypass_detector()
     session = detector.create_stealth_session(use_cookies=True)
     
+    # Verificar se precisa fazer warm-up da sessão (se não há cookies)
+    from utils.cookie_manager import get_cookie_manager
+    manager = get_cookie_manager()
+    stats = manager.get_stats()
+    if stats['valid_cookies'] == 0:
+        logger.debug("Nenhum cookie válido, fazendo warm-up de sessão...")
+        # Tentar fazer warm-up síncrono (visitando página principal)
+        try:
+            warmup_url = "https://betnacional.bet.br/"
+            warmup_response = session.get(warmup_url, timeout=10)
+            if warmup_response.status_code == 200:
+                from utils.cookie_manager import update_cookies_from_response
+                update_cookies_from_response(warmup_response)
+                logger.debug("Warm-up de sessão bem-sucedido")
+        except Exception as e:
+            logger.debug(f"Erro durante warm-up: {e}")
+    
     # Usar headers otimizados com rotação de User-Agent
     headers = get_enhanced_headers_for_api()
     
     try:
-        # Fazer requisição com bypass automático
+        # Fazer requisição com bypass automático (has_fallback=True reduz verbosidade)
         response = detector.make_request_with_bypass(
             session=session,
             url=api_url,
@@ -99,11 +116,13 @@ def fetch_events_from_api(sport_id: int, category_id: int = 0, tournament_id: in
             params=params,
             headers=headers,
             max_retries=3,
-            use_cookies=True
+            use_cookies=True,
+            has_fallback=True  # Há fallback HTML disponível
         )
         
         if response is None:
-            logger.warning("Falha ao fazer requisição com bypass, retornando None")
+            # Não logar warning quando há fallback - apenas debug
+            logger.debug("Falha ao fazer requisição com bypass, retornando None (fallback HTML disponível)")
             return None
         
         response.raise_for_status()
@@ -331,13 +350,30 @@ def fetch_event_odds_from_api(event_id: int, language_id: int = 1,
     detector = get_bypass_detector()
     session = detector.create_stealth_session(use_cookies=True)
     
+    # Verificar se precisa fazer warm-up da sessão (se não há cookies)
+    from utils.cookie_manager import get_cookie_manager
+    manager = get_cookie_manager()
+    stats = manager.get_stats()
+    if stats['valid_cookies'] == 0:
+        logger.debug("Nenhum cookie válido, fazendo warm-up de sessão...")
+        # Tentar fazer warm-up síncrono (visitando página principal)
+        try:
+            warmup_url = "https://betnacional.bet.br/"
+            warmup_response = session.get(warmup_url, timeout=10)
+            if warmup_response.status_code == 200:
+                from utils.cookie_manager import update_cookies_from_response
+                update_cookies_from_response(warmup_response)
+                logger.debug("Warm-up de sessão bem-sucedido")
+        except Exception as e:
+            logger.debug(f"Erro durante warm-up: {e}")
+    
     # Usar headers otimizados com referer realista
     referer = get_realistic_referer(f"https://betnacional.bet.br/event/1/1/{event_id}")
     headers = get_enhanced_headers_for_api()
     headers['Referer'] = referer
     
     try:
-        # Fazer requisição com bypass automático
+        # Fazer requisição com bypass automático (has_fallback=True reduz verbosidade)
         response = detector.make_request_with_bypass(
             session=session,
             url=api_url,
@@ -345,11 +381,13 @@ def fetch_event_odds_from_api(event_id: int, language_id: int = 1,
             params=params,
             headers=headers,
             max_retries=3,
-            use_cookies=True
+            use_cookies=True,
+            has_fallback=True  # Há fallback HTML disponível
         )
         
         if response is None:
-            logger.warning("Falha ao fazer requisição com bypass, retornando None")
+            # Não logar warning quando há fallback - apenas debug
+            logger.debug("Falha ao fazer requisição com bypass, retornando None (fallback HTML disponível)")
             return None
         
         response.raise_for_status()

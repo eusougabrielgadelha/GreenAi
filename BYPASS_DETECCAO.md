@@ -416,6 +416,20 @@ O sistema está **totalmente integrado** e funciona automaticamente:
 
 **Não é necessário mudar código existente!** O bypass funciona de forma transparente.
 
+## 🔇 Redução de Verbosidade
+
+**Melhoria Implementada:**
+
+Quando há fallback HTML disponível, os logs de bloqueio são reduzidos:
+- **WARNING** → **DEBUG** para bloqueios detectados
+- **INFO** → **DEBUG** para estratégias de contorno
+- **ERROR** → **DEBUG** para falhas finais
+
+**Benefícios:**
+- Logs mais limpos e fáceis de ler
+- Informações ainda disponíveis em DEBUG quando necessário
+- Foco em erros críticos sem fallback
+
 ---
 
 ## ✅ Status

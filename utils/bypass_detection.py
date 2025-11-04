@@ -208,24 +208,30 @@ class BypassDetector:
         
         return False, ""
     
-    def handle_blockage(self, reason: str, session: Session) -> bool:
+    def handle_blockage(self, reason: str, session: Session, has_fallback: bool = True) -> bool:
         """
         Tenta contornar um bloqueio detectado.
         
         Args:
             reason: Razão do bloqueio
             session: Sessão HTTP atual
+            has_fallback: Se True, há fallback disponível (reduz verbosidade)
         
         Returns:
             True se conseguiu contornar, False caso contrário
         """
-        logger.warning(f"Bloqueio detectado: {reason}. Tentando contornar...")
+        # Reduzir verbosidade quando há fallback
+        if has_fallback:
+            logger.debug(f"Bloqueio detectado: {reason}. Tentando contornar... (fallback disponível)")
+        else:
+            logger.warning(f"Bloqueio detectado: {reason}. Tentando contornar...")
         
         self.failure_count += 1
         
         # Estratégia 1: Rotacionar User-Agent após múltiplas falhas
         if self.failure_count >= 3:
-            logger.info("Rotacionando User-Agent após múltiplas falhas")
+            if not has_fallback:
+                logger.info("Rotacionando User-Agent após múltiplas falhas")
             from utils.anti_block import user_agent_rotator
             new_ua = user_agent_rotator.get_next()
             session.headers['User-Agent'] = new_ua
@@ -235,13 +241,23 @@ class BypassDetector:
         # Estratégia 2: Aguardar mais tempo
         if "429" in reason or "rate limit" in reason.lower():
             wait_time = random.uniform(30, 60)
-            logger.info(f"Aguardando {wait_time:.1f}s devido a rate limit...")
+            if not has_fallback:
+                logger.info(f"Aguardando {wait_time:.1f}s devido a rate limit...")
             time.sleep(wait_time)
             return True
         
-        # Estratégia 3: Limpar cookies e recomeçar
+        # Estratégia 3: Aguardar antes de retry (para 403)
+        if "403" in reason:
+            wait_time = random.uniform(5, 10)
+            if not has_fallback:
+                logger.debug(f"Aguardando {wait_time:.1f}s antes de retry (403)...")
+            time.sleep(wait_time)
+            return True
+        
+        # Estratégia 4: Limpar cookies e recomeçar
         if self.failure_count >= 5:
-            logger.info("Limpar cookies e recomeçar sessão")
+            if not has_fallback:
+                logger.info("Limpar cookies e recomeçar sessão")
             from utils.cookie_manager import get_cookie_manager
             manager = get_cookie_manager()
             manager.clear_cookies()
@@ -259,7 +275,8 @@ class BypassDetector:
         params: Optional[Dict] = None,
         headers: Optional[Dict] = None,
         max_retries: int = 3,
-        use_cookies: bool = True
+        use_cookies: bool = True,
+        has_fallback: bool = True
     ) -> Optional[Response]:
         """
         Faz uma requisição HTTP com múltiplas estratégias de bypass.
@@ -308,16 +325,23 @@ class BypassDetector:
                 is_blocked, reason = self.detect_blockage(response)
                 
                 if is_blocked:
-                    logger.warning(f"Bloqueio detectado na tentativa {attempt + 1}: {reason}")
+                    # Reduzir verbosidade quando há fallback
+                    if has_fallback:
+                        logger.debug(f"Bloqueio detectado na tentativa {attempt + 1}: {reason} (fallback disponível)")
+                    else:
+                        logger.warning(f"Bloqueio detectado na tentativa {attempt + 1}: {reason}")
                     
                     # Tentar contornar
-                    if self.handle_blockage(reason, session):
+                    if self.handle_blockage(reason, session, has_fallback=has_fallback):
                         continue  # Tentar novamente
                     else:
                         if attempt < max_retries - 1:
                             continue  # Tentar novamente sem contornar
                         else:
-                            logger.error(f"Falha após {max_retries} tentativas")
+                            if not has_fallback:
+                                logger.error(f"Falha após {max_retries} tentativas")
+                            else:
+                                logger.debug(f"Falha após {max_retries} tentativas (fallback disponível)")
                             return None
                 
                 # Sucesso - atualizar cookies e retornar
@@ -462,7 +486,8 @@ def make_bypass_request(
     params: Optional[Dict] = None,
     headers: Optional[Dict] = None,
     use_cookies: bool = True,
-    max_retries: int = 3
+    max_retries: int = 3,
+    has_fallback: bool = True
 ) -> Optional[Response]:
     """
     Função helper para fazer requisições com bypass automático.
@@ -474,6 +499,7 @@ def make_bypass_request(
         headers: Headers customizados
         use_cookies: Usar cookies persistentes
         max_retries: Número máximo de tentativas
+        has_fallback: Se True, há fallback disponível (reduz verbosidade)
     
     Returns:
         Response ou None
@@ -488,6 +514,7 @@ def make_bypass_request(
         params=params,
         headers=headers,
         max_retries=max_retries,
-        use_cookies=use_cookies
+        use_cookies=use_cookies,
+        has_fallback=has_fallback
     )
 
