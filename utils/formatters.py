@@ -219,10 +219,19 @@ def fmt_watch_add(ev, ev_date_local: datetime, best_ev: float, pprob: float) -> 
     """Formatação elegante para adição à watchlist"""
     hhmm = ev_date_local.strftime("%H:%M")
     
+    # Odds dos dois times
+    odds_home = float(getattr(ev, 'odds_home', 0) or 0.0)
+    odds_away = float(getattr(ev, 'odds_away', 0) or 0.0)
+    odds_draw = float(getattr(ev, 'odds_draw', 0) or 0.0)
+    
     msg = f"👀 <b>ADICIONADO À WATCHLIST</b>\n"
     msg += "━━━━━━━━━━━━━━━━━━━━\n\n"
     msg += f"⚽ <b>{ev.team_home}</b> vs <b>{ev.team_away}</b>\n"
     msg += f"🕐 Início: {hhmm}h\n\n"
+    msg += f"💰 <b>ODDS</b>\n"
+    msg += f"├ {ev.team_home}: <b>{odds_home:.2f}</b>\n"
+    msg += f"├ Empate: <b>{odds_draw:.2f}</b>\n"
+    msg += f"└ {ev.team_away}: <b>{odds_away:.2f}</b>\n\n"
     msg += f"📊 <b>MÉTRICAS ATUAIS</b>\n"
     msg += f"├ EV: {best_ev*100:.1f}%\n"
     msg += f"├ Probabilidade: {pprob*100:.0f}%\n"
