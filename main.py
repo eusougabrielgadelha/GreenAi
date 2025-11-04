@@ -76,10 +76,39 @@ from scheduler.jobs import scheduler, setup_scheduler
 # Runner
 # ================================
 async def main():
+    """
+    Função principal que inicializa o sistema e recupera jogos pendentes.
+    """
+    logger.info("🚀 Iniciando sistema BetAuto...")
+    
+    # 1. Recuperar jogos pendentes antes de iniciar scheduler
+    logger.info("🔄 Recuperando jogos pendentes do banco de dados...")
+    try:
+        from utils.game_recovery import recover_pending_games, get_pending_games_summary
+        
+        # Mostrar resumo antes de recuperar
+        summary = get_pending_games_summary()
+        if summary["total_pending"] > 0:
+            logger.info(
+                f"📊 Jogos pendentes encontrados: {summary['live_pending']} ao vivo, "
+                f"{summary['scheduled_pending']} agendados, {summary['finished_no_result']} sem resultado"
+            )
+        
+        # Recuperar jogos pendentes
+        await recover_pending_games()
+    except Exception as e:
+        logger.exception(f"Erro ao recuperar jogos pendentes: {e}")
+    
+    # 2. Configurar scheduler
     setup_scheduler()
-    # dispara uma varredura no boot para testar
-    from scheduler.jobs import morning_scan_and_publish
-    await morning_scan_and_publish()
+    
+    # 3. Disparar varredura inicial (opcional - pode ser comentado se não quiser varrer no boot)
+    # from scheduler.jobs import morning_scan_and_publish
+    # await morning_scan_and_publish()
+    
+    logger.info("✅ Sistema inicializado e pronto")
+    
+    # 4. Aguardar sinal de parada
     loop = asyncio.get_running_loop()
     stop = asyncio.Event()
     def _sig(*_):

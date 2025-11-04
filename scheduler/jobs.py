@@ -178,65 +178,7 @@ async def night_scan_for_early_games():
                         continue
 
                     # UPSERT seguro
-                    g = session.query(Game).filter_by(ext_id=ev.ext_id, start_time=start_utc).one_or_none()
-                    if g:
-                        g.source_link = url
-                        g.game_url = getattr(ev, "game_url", None) or g.game_url
-                        g.competition = ev.competition or g.competition
-                        g.team_home = ev.team_home or g.team_home
-                        g.team_away = ev.team_away or g.team_away
-                        g.odds_home = ev.odds_home
-                        g.odds_draw = ev.odds_draw
-                        g.odds_away = ev.odds_away
-                        g.pick = pick
-                        g.pick_prob = pprob
-                        g.pick_ev = pev
-                        g.pick_reason = reason
-                        g.will_bet = will
-                        g.status = "scheduled"
-                        session.commit()
-                    else:
-                        g = Game(
-                            ext_id=ev.ext_id,
-                            source_link=url,
-                            game_url=getattr(ev, "game_url", None),
-                            competition=ev.competition,
-                            team_home=ev.team_home,
-                            team_away=ev.team_away,
-                            start_time=start_utc,
-                            odds_home=ev.odds_home,
-                            odds_draw=ev.odds_draw,
-                            odds_away=ev.odds_away,
-                            pick=pick,
-                            pick_prob=pprob,
-                            pick_ev=pev,
-                            will_bet=will,
-                            pick_reason=reason,
-                            status="scheduled",
-                        )
-                        session.add(g)
-                        try:
-                            session.commit()
-                        except IntegrityError:
-                            session.rollback()
-                            g = session.query(Game).filter_by(ext_id=ev.ext_id, start_time=start_utc).one_or_none()
-                            if g:
-                                g.source_link = url
-                                g.game_url = getattr(ev, "game_url", None) or g.game_url
-                                g.competition = ev.competition or g.competition
-                                g.team_home = ev.team_home or g.team_home
-                                g.team_away = ev.team_away or g.team_away
-                                g.odds_home = ev.odds_home
-                                g.odds_draw = ev.odds_draw
-                                g.odds_away = ev.odds_away
-                                g.pick = pick
-                                g.pick_prob = pprob
-                                g.pick_ev = pev
-                                g.pick_reason = reason
-                                g.will_bet = will
-                                g.status = "scheduled"
-                                session.commit()
-
+                    # Jogo já foi salvo acima (salva todos os jogos)
                     stored_total += 1
                     session.refresh(g)
 

@@ -75,24 +75,15 @@ async def scan_games_for_date(
                     )
                     
                     free_pass = is_high_conf(pprob)
-                    if not (will or free_pass):
-                        # Watchlist: adiciona se estiver próximo do threshold
-                        if (pev >= (MIN_EV - WATCHLIST_DELTA)) and (pprob >= (MIN_PROB - 0.05)):
-                            minutes_until = int((start_utc - datetime.now(pytz.UTC)).total_seconds() / 60)
-                            if minutes_until >= WATCHLIST_MIN_LEAD_MIN:
-                                from utils.analytics_logger import log_watchlist_action
-                                wl_add(session, ev.ext_id, url, start_utc)
-                                log_watchlist_action(
-                                    "add", ev.ext_id,
-                                    f"Próximo do threshold (EV={pev:.3f}, prob={pprob:.3f})",
-                                    metadata={"odds_home": ev.odds_home, "odds_draw": ev.odds_draw, "odds_away": ev.odds_away}
-                                )
-                                logger.info("👀 Adicionado à watchlist: %s vs %s", ev.team_home, ev.team_away)
-                        continue
                     
-                    # Upsert do jogo
+                    # SALVAR TODOS OS JOGOS NO BANCO (mesmo os não selecionados)
+                    # Isso garante que o sistema tenha histórico completo e possa recuperar após reiniciar
+                    should_save = will or free_pass
+                    
+                    # Upsert do jogo (salva sempre, mas will_bet só é True se selecionado)
                     g = session.query(Game).filter_by(ext_id=ev.ext_id, start_time=start_utc).one_or_none()
                     if g:
+                        # Atualiza jogo existente
                         g.source_link = url
                         g.game_url = getattr(ev, "game_url", None) or g.game_url
                         g.competition = ev.competition or g.competition
@@ -104,11 +95,17 @@ async def scan_games_for_date(
                         g.pick = pick
                         g.pick_prob = pprob
                         g.pick_ev = pev
-                        g.will_bet = True
                         g.pick_reason = reason
-                        g.status = "live" if getattr(ev, "is_live", False) else "scheduled"
+                        # Atualiza will_bet se agora foi selecionado
+                        if should_save:
+                            g.will_bet = True
+                        # Se já estava marcado como will_bet=True, mantém
+                        # Preserva status se já for "live" ou "ended"
+                        if g.status not in ("live", "ended"):
+                            g.status = "live" if getattr(ev, "is_live", False) else "scheduled"
                         session.commit()
                     else:
+                        # Cria novo jogo (sempre salva, mesmo se não selecionado)
                         g = Game(
                             ext_id=ev.ext_id,
                             source_link=url,
@@ -123,7 +120,7 @@ async def scan_games_for_date(
                             pick=pick,
                             pick_prob=pprob,
                             pick_ev=pev,
-                            will_bet=True,
+                            will_bet=should_save,  # True se selecionado, False caso contrário
                             pick_reason=reason,
                             status="live" if getattr(ev, "is_live", False) else "scheduled",
                         )
@@ -132,8 +129,44 @@ async def scan_games_for_date(
                             session.commit()
                         except IntegrityError:
                             session.rollback()
+                            # Se falhou por constraint único, tenta atualizar
+                            g = session.query(Game).filter_by(ext_id=ev.ext_id, start_time=start_utc).one_or_none()
+                            if g:
+                                g.source_link = url
+                                g.game_url = getattr(ev, "game_url", None) or g.game_url
+                                g.competition = ev.competition or g.competition
+                                g.team_home = ev.team_home or g.team_home
+                                g.team_away = ev.team_away or g.team_away
+                                g.odds_home = ev.odds_home
+                                g.odds_draw = ev.odds_draw
+                                g.odds_away = ev.odds_away
+                                g.pick = pick
+                                g.pick_prob = pprob
+                                g.pick_ev = pev
+                                g.pick_reason = reason
+                                if should_save:
+                                    g.will_bet = True
+                                session.commit()
                             continue
                     
+                    # Se não foi selecionado, adiciona à watchlist se próximo do threshold
+                    if not should_save:
+                        # Watchlist: adiciona se estiver próximo do threshold
+                        if (pev >= (MIN_EV - WATCHLIST_DELTA)) and (pprob >= (MIN_PROB - 0.05)):
+                            minutes_until = int((start_utc - datetime.now(pytz.UTC)).total_seconds() / 60)
+                            if minutes_until >= WATCHLIST_MIN_LEAD_MIN:
+                                from utils.analytics_logger import log_watchlist_action
+                                wl_add(session, ev.ext_id, url, start_utc)
+                                log_watchlist_action(
+                                    "add", ev.ext_id,
+                                    f"Próximo do threshold (EV={pev:.3f}, prob={pprob:.3f})",
+                                    metadata={"odds_home": ev.odds_home, "odds_draw": ev.odds_draw, "odds_away": ev.odds_away}
+                                )
+                                logger.info("👀 Adicionado à watchlist: %s vs %s", ev.team_home, ev.team_away)
+                        # Jogo foi salvo mas não foi selecionado - não conta como "stored" para relatório
+                        continue  # Pula processamento adicional se não foi selecionado
+                    
+                    # Jogo foi selecionado (will_bet=True) - processar normalmente
                     stored_total += 1
                     session.refresh(g)
                     
