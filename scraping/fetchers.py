@@ -212,10 +212,7 @@ async def fetch_game_result(ext_id: str, source_link: str) -> Optional[str]:
     Returns:
         "home", "draw", ou "away" se encontrou resultado, None caso contrário
     """
-    from scraping.betnacional import (
-        scrape_game_result, extract_event_id_from_url,
-        fetch_event_odds_from_api, parse_event_odds_from_api
-    )
+    from scraping.betnacional import scrape_game_result
     from utils.cache import result_cache
     
     # ETAPA 0: Verificar cache primeiro
