@@ -341,8 +341,8 @@ async def fetch_game_result(ext_id: str, source_link: str) -> Optional[str]:
             if not event_id and ext_id:
                 try:
                     event_id = int(ext_id)
-            except (ValueError, TypeError):
-                pass
+                except (ValueError, TypeError):
+                    pass
             
             if event_id:
                 logger.info(f"📡 Tentando buscar resultado via API para evento {event_id}")
