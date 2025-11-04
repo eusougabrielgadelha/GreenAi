@@ -19,7 +19,7 @@ except Exception:
 # ================================
 # Configurações de Timezone
 # ================================
-APP_TZ = os.getenv("APP_TZ", "America/Sao_Paulo")
+APP_TZ = os.getenv("APP_TZ", "America/Fortaleza")
 ZONE = pytz.timezone(APP_TZ)
 MORNING_HOUR = int(os.getenv("MORNING_HOUR", "6"))
 

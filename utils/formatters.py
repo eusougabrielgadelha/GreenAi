@@ -3,8 +3,8 @@ import html
 import random
 from datetime import datetime
 from typing import Any, Dict, List
-from models.database import Game, SessionLocal
-from config.settings import ZONE
+from models.database import Game, SessionLocal, CombinedBet
+from config.settings import ZONE, HIGH_CONF_THRESHOLD
 from utils.stats import global_accuracy, get_weekly_stats, to_aware_utc, get_lifetime_accuracy, get_daily_summary
 
 
@@ -383,6 +383,60 @@ def fmt_dawn_games_summary(games: List[Game], date) -> str:
         msg += f"{confidence} <b>{esc(g.team_home)}</b> vs <b>{esc(g.team_away)}</b>\n"
         msg += f"   🕐 {hhmm}h | Odds: {odds_home:.2f} / {odds_away:.2f}\n"
         msg += f"   🎯 Pick: <b>{pick_str}</b> @ {pick_odd:.2f} | Prob: {prob*100:.0f}% | EV: {g.pick_ev*100:+.1f}%\n\n"
+    
+    return msg
+
+
+def fmt_combined_bet(combined_bet: CombinedBet, games: List[Game]) -> str:
+    """
+    Formata mensagem de aposta combinada para Telegram.
+    """
+    bet_date_local = combined_bet.bet_date.astimezone(ZONE)
+    date_str = bet_date_local.strftime("%d/%m/%Y")
+    day_name = ["Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado", "Domingo"][bet_date_local.weekday()]
+    
+    msg = "🎯 <b>APOSTA COMBINADA - ALTA CONFIANÇA</b>\n"
+    msg += f"<i>{day_name}, {date_str}</i>\n"
+    msg += "━━━━━━━━━━━━━━━━━━━━\n\n"
+    
+    msg += f"📊 <b>RESUMO</b>\n"
+    msg += f"├ Total de jogos: <b>{combined_bet.total_games}</b>\n"
+    msg += f"├ Confiança média: <b>{combined_bet.avg_confidence*100:.0f}%</b>\n"
+    msg += f"└ Odd combinada: <b>{combined_bet.combined_odd:.2f}</b>\n\n"
+    
+    msg += f"💰 <b>EXEMPLO DE APOSTA</b>\n"
+    msg += f"├ Valor apostado: <b>R$ {combined_bet.example_stake:.2f}</b>\n"
+    msg += f"└ Retorno potencial: <b>R$ {combined_bet.potential_return:.2f}</b>\n\n"
+    
+    msg += f"⚽ <b>JOGOS INCLUÍDOS</b>\n\n"
+    
+    # Ordena jogos por horário
+    games_sorted = sorted(games, key=lambda g: g.start_time)
+    
+    pick_map = {"home": "Casa", "draw": "Empate", "away": "Fora"}
+    
+    for idx, game in enumerate(games_sorted, 1):
+        hhmm = game.start_time.astimezone(ZONE).strftime("%H:%M")
+        pick_str = pick_map.get(game.pick, game.pick or "—")
+        
+        # Determina odd do pick
+        if game.pick == "home":
+            pick_odd = float(game.odds_home or 0.0)
+        elif game.pick == "draw":
+            pick_odd = float(game.odds_draw or 0.0)
+        else:
+            pick_odd = float(game.odds_away or 0.0)
+        
+        # Ícone de confiança
+        prob = float(game.pick_prob or 0.0)
+        confidence_icon = "🔥" if prob >= HIGH_CONF_THRESHOLD else "⭐"
+        
+        msg += f"{confidence_icon} <b>{idx}.</b> {esc(game.team_home)} vs {esc(game.team_away)}\n"
+        msg += f"   🕐 {hhmm}h | Pick: <b>{pick_str}</b> @ {pick_odd:.2f}\n"
+        msg += f"   📈 Prob: {prob*100:.0f}% | EV: {game.pick_ev*100:+.1f}%\n\n"
+    
+    msg += "━━━━━━━━━━━━━━━━━━━━\n"
+    msg += "💡 <i>Esta aposta combina todos os jogos de alta confiança do dia.</i>\n"
     
     return msg
 

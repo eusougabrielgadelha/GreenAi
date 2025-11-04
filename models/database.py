@@ -135,6 +135,33 @@ class AnalyticsEvent(Base):
     )
 
 
+class CombinedBet(Base):
+    """Apostas combinadas com múltiplos jogos de alta confiança."""
+    __tablename__ = "combined_bets"
+    id = Column(Integer, primary_key=True)
+    bet_date = Column(DateTime, nullable=False, index=True)  # Data da aposta (dia dos jogos)
+    game_ids = Column(JSON, nullable=False)  # Lista de IDs dos jogos incluídos [1, 2, 3]
+    picks = Column(JSON, nullable=False)  # Lista de picks correspondentes ["home", "draw", "away"]
+    odds = Column(JSON, nullable=False)  # Lista de odds correspondentes [1.5, 2.0, 1.8]
+    combined_odd = Column(Float, nullable=False)  # Odd combinada (multiplicação de todas)
+    example_stake = Column(Float, default=10.0)  # Valor de exemplo da aposta (padrão R$ 10)
+    potential_return = Column(Float, nullable=False)  # Retorno potencial (combined_odd * example_stake)
+    avg_confidence = Column(Float, nullable=True)  # Média de confiança (pick_prob) dos jogos
+    total_games = Column(Integer, nullable=False)  # Número de jogos na aposta
+    sent_at = Column(DateTime, nullable=True)  # Quando foi enviada a notificação
+    status = Column(String, default="pending")  # pending | completed | won | lost
+    outcome = Column(JSON, nullable=True)  # Resultados dos jogos após finalização {"game_id": "home", ...}
+    hit = Column(Boolean, nullable=True)  # True se acertou, False se errou, None se ainda pendente
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, onupdate=func.now())
+    
+    __table_args__ = (
+        Index('idx_combined_bet_date', 'bet_date'),
+        Index('idx_combined_bet_status', 'status'),
+        Index('idx_combined_bet_hit', 'hit'),
+    )
+
+
 def _safe_add_column(table: str, coldef: str):
     """Adiciona coluna de forma segura (evita erro se já existir)."""
     try:
@@ -193,6 +220,7 @@ def init_database():
     Base.metadata.create_all(engine)
     Base.metadata.create_all(engine, tables=[OddHistory.__table__], checkfirst=True)
     Base.metadata.create_all(engine, tables=[AnalyticsEvent.__table__], checkfirst=True)
+    Base.metadata.create_all(engine, tables=[CombinedBet.__table__], checkfirst=True)
 
     # Migrações rápidas
     _safe_add_column("games", "game_url TEXT")

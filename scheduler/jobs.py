@@ -18,7 +18,7 @@ from config.settings import (
 )
 from utils.logger import logger
 from utils.stats import to_aware_utc, save_odd_history
-from utils.formatters import fmt_pick_now, fmt_watch_upgrade, fmt_live_bet_opportunity, format_night_scan_summary
+from utils.formatters import fmt_pick_now, fmt_watch_upgrade, fmt_live_bet_opportunity, format_night_scan_summary, fmt_combined_bet
 from models.database import Game, LiveGameTracker, SessionLocal
 from scraping.fetchers import fetch_events_from_link, fetch_game_result, _fetch_requests_async
 from scraping.betnacional import parse_local_datetime, scrape_live_game_data
@@ -791,6 +791,20 @@ async def _handle_finished_game(session, game: Game, tracker: LiveGameTracker, n
         from utils.formatters import fmt_result
         tg_send_message(fmt_result(game), message_type="result", game_id=game.id, ext_id=game.ext_id)
         
+        # Atualiza resultado de apostas combinadas que incluíam este jogo
+        try:
+            from betting.combined_bets import update_combined_bet_result
+            # Busca apostas combinadas pendentes que incluem este jogo
+            pending_bets = session.query(CombinedBet).filter(
+                CombinedBet.status == "pending"
+            ).all()
+            
+            for bet in pending_bets:
+                if game.id in bet.game_ids:
+                    update_combined_bet_result(bet, session)
+        except Exception:
+            logger.exception(f"Erro ao atualizar apostas combinadas após jogo {game.id}")
+        
         # Tenta enviar resumo diário se todos os jogos do dia terminaram
         try:
             await maybe_send_daily_wrapup()
@@ -1005,6 +1019,60 @@ async def send_dawn_games_job():
         logger.info("✅ Mensagem 'Jogos da Madrugada' enviada com sucesso")
     else:
         logger.info("⏭️  Nenhum jogo da madrugada encontrado. Mensagem não enviada.")
+
+
+async def send_combined_bet_job():
+    """
+    Job que envia aposta combinada com todos os jogos de alta confiança do dia.
+    Executa diariamente às 08:00 para enviar a aposta combinada do dia.
+    """
+    from betting.combined_bets import (
+        get_high_confidence_games_for_date,
+        create_combined_bet,
+        calculate_combined_odd,
+        calculate_potential_return,
+        calculate_avg_confidence
+    )
+    
+    now_utc = datetime.now(pytz.UTC)
+    today_utc = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+    
+    with SessionLocal() as session:
+        # Busca jogos de alta confiança do dia
+        games = get_high_confidence_games_for_date(today_utc, session)
+        
+        if not games:
+            logger.info("📊 Nenhum jogo de alta confiança encontrado para aposta combinada hoje.")
+            return
+        
+        # Cria aposta combinada
+        combined_bet = create_combined_bet(
+            games=games,
+            bet_date=today_utc,
+            example_stake=10.0,
+            session=session
+        )
+        
+        if not combined_bet:
+            logger.error("❌ Erro ao criar aposta combinada.")
+            return
+        
+        # Formata e envia mensagem
+        message = fmt_combined_bet(combined_bet, games)
+        
+        # Envia notificação
+        tg_send_message(
+            message,
+            message_type="combined_bet",
+            game_id=None,  # Não é um jogo específico
+            ext_id=f"combined_{combined_bet.id}"
+        )
+        
+        # Atualiza sent_at
+        combined_bet.sent_at = now_utc
+        session.commit()
+        
+        logger.info(f"✅ Aposta combinada enviada: {len(games)} jogos, odd {combined_bet.combined_odd:.2f}, retorno R$ {combined_bet.potential_return:.2f}")
 
 
 async def send_today_games_job():
@@ -1379,6 +1447,19 @@ def setup_scheduler():
         misfire_grace_time=300,
     )
     logger.info("🌅 Envio de jogos de hoje agendado para %02d:00", send_today_hour)
+
+    # --- Envio de aposta combinada (08h) ---
+    combined_bet_hour = int(os.getenv("COMBINED_BET_HOUR", "8"))
+    scheduler.add_job(
+        send_combined_bet_job,
+        trigger=CronTrigger(hour=combined_bet_hour, minute=0),
+        id="send_combined_bet",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+        misfire_grace_time=300,
+    )
+    logger.info("🎯 Envio de aposta combinada agendado para %02d:00", combined_bet_hour)
 
     # --- Resumo diário (opcional, via env) ---
     daily_summary_hour = os.getenv("DAILY_SUMMARY_HOUR", "")
