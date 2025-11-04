@@ -148,10 +148,7 @@ async def fetch_events_from_link(url: str, backend: str):
     Prioriza API XHR (mais eficiente), depois fallback para HTML scraping.
     """
     from utils.analytics_logger import log_extraction
-    from scraping.betnacional import (
-        extract_ids_from_url, fetch_events_from_api_async, 
-        parse_events_from_api, try_parse_events
-    )
+    from scraping.betnacional import try_parse_events
     
     def _other(b: str) -> str:
         return "requests" if b == "playwright" else "playwright"
@@ -165,70 +162,9 @@ async def fetch_events_from_link(url: str, backend: str):
         status="started"
     )
     
-    # ETAPA 1: Tentar API XHR primeiro (mais eficiente) - APENAS SE NÃO ESTIVER DESABILITADO
-    from utils.xhr_status import is_xhr_disabled, disable_xhr
-    
-    if not is_xhr_disabled():
-        ids = extract_ids_from_url(url)
-        if ids:
-            sport_id, category_id, tournament_id = ids
-            log_with_context(
-                "info",
-                f"Tentando buscar via API XHR (sport_id={sport_id}, category_id={category_id}, tournament_id={tournament_id})",
-                url=url,
-                stage="api_xhr",
-                status="attempting",
-                extra_fields={
-                    "sport_id": sport_id,
-                    "category_id": category_id,
-                    "tournament_id": tournament_id
-                }
-            )
-            
-            try:
-                json_data = await fetch_events_from_api_async(sport_id, category_id, tournament_id)
-                if json_data:
-                    evs = parse_events_from_api(json_data, url)
-                    if evs:
-                        log_extraction(url, len(evs), "api_xhr", success=True, metadata={"method": "api"})
-                        log_with_context(
-                            "info",
-                            f"Eventos extraídos via API XHR: {len(evs)} eventos",
-                            url=url,
-                            stage="api_xhr",
-                            status="success",
-                            extra_fields={"events_count": len(evs), "method": "api"}
-                        )
-                        return evs
-                    logger.info("API retornou dados mas nenhum evento válido encontrado")
-                else:
-                    # API não retornou dados - desabilitar XHR permanentemente
-                    disable_xhr("API não retornou dados")
-                    logger.info("API não retornou dados, desabilitando XHR e usando HTML scraping...")
-            except Exception as e:
-                # API falhou - desabilitar XHR permanentemente
-                disable_xhr(f"Erro na API: {type(e).__name__}")
-                from utils.error_handler import log_error_with_context
-                log_error_with_context(
-                    e,
-                    context={
-                        "url": url,
-                        "sport_id": sport_id,
-                        "category_id": category_id,
-                        "tournament_id": tournament_id,
-                        "stage": "api_xhr"
-                    },
-                    level="warning",
-                    reraise=False
-                )
-                logger.info("Erro na API, desabilitando XHR e usando HTML scraping...")
-    else:
-        # XHR já está desabilitado - pular direto para HTML scraping
-        logger.debug("XHR desabilitado, usando HTML scraping diretamente")
-    
-    # ETAPA 2: Fallback para HTML scraping
+    # Usar APENAS HTML scraping (XHR desativado)
     backend_sel = backend if backend != "auto" else _backend_auto()
-    logger.info("🌐 Fallback para HTML scraping — backend=%s", backend_sel)
+    logger.info("🌐 Usando HTML scraping — backend=%s (XHR desativado)", backend_sel)
 
     for attempt, b in enumerate([backend_sel, _other(backend_sel)]):
         try:
