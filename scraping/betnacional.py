@@ -1329,14 +1329,24 @@ def scrape_live_game_data(html: str, ext_id: str, source_url: str = None) -> Dic
     market_name_map = {
         "Resultado Final": "match_result",
         "Ambos os Times Marcam": "btts",
+        "Total": "total_goals",
         "Total de Gols": "total_goals",
         "Placar Exato": "correct_score",
-        "Gols Exatos": "correct_score",  # Sinônimo de Placar Exato
+        "Gols Exatos": "exact_goals",  # Total de gols exatos (1, 2, 3, 4, 5+)
         "Handicap Asiático": "asian_handicap",
         "Handicap": "asian_handicap",  # Forma abreviada
         "Marcar A Qualquer Momento (Tempo Regulamentar)": "anytime_scorer",
         "Escanteio - Resultado Final": "corners_result",
         "Cartão - Resultado Final": "cards_result",
+        "Escanteio - Handicap Asiático": "corners_handicap",
+        "Dupla Hipótese": "double_chance",
+        "2º Gol": "next_goal",
+        "Empate Anula Aposta": "draw_no_bet",
+        "Ímpar/Par": "odd_even",
+        "Atlético De Madrid - Total": "team_total_home",
+        "Union Saint-Gilloise - Total": "team_total_away",
+        "Atlético De Madrid - Gols Exatos": "team_exact_goals_home",
+        "Union Saint-Gilloise - Gols Exatos": "team_exact_goals_away",
     }
 
     market_containers = soup.select('div[data-testid^="outcomes-by-market"]')
@@ -1347,27 +1357,67 @@ def scrape_live_game_data(html: str, ext_id: str, source_url: str = None) -> Dic
 
         market_display_name = market_name_elem.get_text(strip=True)
         market_key = market_name_map.get(market_display_name)
+        
+        # Se não encontrou no mapa, tenta padrões genéricos
         if not market_key:
-            continue
+            if "Placar" in market_display_name and "Exato" in market_display_name:
+                market_key = "correct_score"
+            elif "Gols" in market_display_name and "Exatos" in market_display_name:
+                market_key = "exact_goals"
+            elif "Handicap" in market_display_name:
+                market_key = "asian_handicap"
+            elif "Total" in market_display_name:
+                market_key = "total_goals"
+            else:
+                continue  # Ignora mercados não mapeados
 
         # Extrai todas as opções e odds deste mercado
         options = {}
         option_elements = container.select('div[data-testid^="odd-"]')
+        
         for opt_elem in option_elements:
-            option_text_elem = opt_elem.select_one('span:not([class*="font-bold"])')
+            # Verificar se está suspenso (não disponível)
+            if opt_elem.get('data-testid', '').startswith('suspended-outcome-'):
+                continue
+            
+            # Buscar texto da opção (nome do resultado)
+            option_text_elem = opt_elem.find('span', class_=lambda x: x and 'text-bold' in x)
+            if not option_text_elem:
+                # Tentar buscar qualquer span com texto
+                option_text_elem = opt_elem.find('span', class_=lambda x: x and 'text-text-light-primary' in str(x))
+            if not option_text_elem:
+                # Última tentativa: buscar qualquer span dentro de div com flex items-center
+                option_text_elem = opt_elem.select_one('span.text-text-light-primary, span.text-text-light-secondary')
+            
             if not option_text_elem:
                 continue
 
             option_text = option_text_elem.get_text(strip=True)
-
-            odd_elem = opt_elem.select_one('span._col-accentOdd2')
+            
+            # Buscar valor da odd
+            # Padrão: span com classe _col-accentOdd2 ou similar
+            odd_elem = opt_elem.select_one('span._col-accentOdd2, span[class*="accentOdd"]')
             if not odd_elem:
+                # Tentar buscar dentro de span com transform
+                odd_elem = opt_elem.select_one('span[class*="transform-translateY"]')
+            if not odd_elem:
+                # Última tentativa: buscar qualquer número no elemento
+                import re
+                text = opt_elem.get_text()
+                numbers = re.findall(r'\d+\.?\d*', text)
+                if numbers:
+                    try:
+                        odd_value = float(numbers[-1])  # Pega o último número (geralmente é a odd)
+                        options[option_text] = odd_value
+                    except ValueError:
+                        continue
                 continue
 
             try:
-                odd_value = float(odd_elem.get_text(strip=True))
+                odd_text = odd_elem.get_text(strip=True)
+                odd_value = float(odd_text)
                 options[option_text] = odd_value
-            except ValueError:
+            except (ValueError, AttributeError):
                 continue
 
         if options:
