@@ -12,7 +12,8 @@ class UserAgentRotator:
     """Rotaciona User-Agents para simular diferentes navegadores."""
     
     USER_AGENTS = [
-        # Chrome no Windows
+        # Chrome no Windows (versões mais recentes)
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36',
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
@@ -68,6 +69,7 @@ def get_browser_headers(user_agent: Optional[str] = None, referer: str = "https:
     if "Chrome/" in user_agent:
         try:
             chrome_part = user_agent.split("Chrome/")[1].split(" ")[0]
+            # Extrair versão completa (ex: 142.0.0.0 -> 142)
             chrome_version = chrome_part.split(".")[0]
         except:
             pass
@@ -84,7 +86,7 @@ def get_browser_headers(user_agent: Optional[str] = None, referer: str = "https:
         'sec-ch-ua-platform': '"Windows"',
         'sec-fetch-dest': 'empty',
         'sec-fetch-mode': 'cors',
-        'sec-fetch-site': 'cross-site',
+        'sec-fetch-site': 'same-site',
         'Connection': 'keep-alive',
         'Cache-Control': 'no-cache',
         'Pragma': 'no-cache',
@@ -189,9 +191,69 @@ api_throttle = RequestThrottle(min_delay=1.5, max_delay=3.0, jitter=0.5)
 html_throttle = RequestThrottle(min_delay=2.0, max_delay=4.0, jitter=1.0)
 
 
+def generate_sentry_trace() -> str:
+    """
+    Gera um header sentry-trace dinâmico que simula o comportamento do Sentry SDK.
+    
+    Formato: {trace_id}-{span_id}-{sampled}
+    - trace_id: 32 caracteres hexadecimais
+    - span_id: 16 caracteres hexadecimais
+    - sampled: 0 ou 1
+    
+    Returns:
+        String com header sentry-trace
+    """
+    # Gerar trace_id (32 caracteres hex)
+    trace_id = ''.join(random.choices('0123456789abcdef', k=32))
+    
+    # Gerar span_id (16 caracteres hex)
+    span_id = ''.join(random.choices('0123456789abcdef', k=16))
+    
+    # Sampled: 0 ou 1 (50% de chance de estar sampled)
+    sampled = random.choice(['0', '1'])
+    
+    return f"{trace_id}-{span_id}-{sampled}"
+
+
+def generate_sentry_baggage(trace_id: Optional[str] = None) -> str:
+    """
+    Gera um header baggage do Sentry com informações do ambiente.
+    
+    Args:
+        trace_id: ID do trace (se None, gera um novo)
+    
+    Returns:
+        String com header baggage
+    """
+    if not trace_id:
+        trace_id = ''.join(random.choices('0123456789abcdef', k=32))
+    
+    # Informações do Sentry (baseado no exemplo fornecido)
+    sentry_environment = 'production'
+    sentry_release = '3.28.1'
+    sentry_public_key = '4de4f26e4dce052125e7ea124a3c310c'
+    sentry_sample_rate = '0.05'
+    sentry_transaction = '%2Fevents%2F%5BsportId%5D%2F%5BcategoryId%5D%2F%5BtournamentId%5D'
+    sentry_sampled = random.choice(['true', 'false'])
+    
+    baggage = (
+        f"sentry-environment={sentry_environment},"
+        f"sentry-release={sentry_release},"
+        f"sentry-public_key={sentry_public_key},"
+        f"sentry-trace_id={trace_id},"
+        f"sentry-sample_rate={sentry_sample_rate},"
+        f"sentry-transaction={sentry_transaction},"
+        f"sentry-sampled={sentry_sampled}"
+    )
+    
+    return baggage
+
+
 def get_enhanced_headers_for_api(user_agent: Optional[str] = None) -> Dict[str, str]:
     """
     Gera headers otimizados especificamente para requisições da API XHR.
+    
+    Inclui headers do Sentry para simular comportamento real do navegador.
     
     Args:
         user_agent: User-Agent customizado
@@ -199,7 +261,22 @@ def get_enhanced_headers_for_api(user_agent: Optional[str] = None) -> Dict[str, 
     Returns:
         Dict com headers completos
     """
-    return get_browser_headers(user_agent, referer="https://betnacional.bet.br/")
+    headers = get_browser_headers(user_agent, referer="https://betnacional.bet.br/")
+    
+    # Adicionar headers do Sentry (importantes para passar despercebido)
+    sentry_trace = generate_sentry_trace()
+    # Extrair trace_id do sentry-trace para usar no baggage
+    trace_id = sentry_trace.split('-')[0]
+    sentry_baggage = generate_sentry_baggage(trace_id)
+    
+    headers['sentry-trace'] = sentry_trace
+    headers['baggage'] = sentry_baggage
+    
+    # Ajustar sec-fetch-site para 'same-site' ou 'cross-site' dependendo da URL
+    # Para API da betnacional, é same-site se vier do mesmo domínio
+    headers['sec-fetch-site'] = 'same-site'
+    
+    return headers
 
 
 def should_rotate_user_agent(failure_count: int = 0) -> bool:
