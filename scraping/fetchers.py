@@ -334,7 +334,7 @@ async def fetch_game_result(ext_id: str, source_link: str) -> Optional[str]:
     if not is_xhr_disabled():
         event_id = None
         try:
-        # Tentar extrair event_id da URL
+            # Tentar extrair event_id da URL
         if source_link:
             event_id = extract_event_id_from_url(source_link)
         # Se não conseguir, tentar usar ext_id diretamente
@@ -369,6 +369,12 @@ async def fetch_game_result(ext_id: str, source_link: str) -> Optional[str]:
                         else:
                             logger.debug(f"Jogo {event_id} ainda não começou (status_id={event_status_id}). Não é possível obter resultado ainda.")
                             return None
+                    else:
+                        # API não retornou eventos - desabilitar XHR
+                        disable_xhr("API não retornou eventos para resultado")
+                else:
+                    # API não retornou dados - desabilitar XHR
+                    disable_xhr("API não retornou dados para resultado")
             except Exception as e:
                 # API falhou - desabilitar XHR
                 disable_xhr(f"Erro na API ao buscar resultado: {type(e).__name__}")
