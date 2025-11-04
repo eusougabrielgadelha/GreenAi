@@ -1234,7 +1234,6 @@ def scrape_live_game_data(html: str, ext_id: str, source_url: str = None) -> Dic
                     if time_cell:
                         time_text = time_cell.get_text(strip=True)
                         # Remover ícones e extrair apenas números
-                        import re
                         time_match = re.search(r'(\d+)', time_text)
                         if time_match:
                             data["stats"]["match_time"] = time_match.group(1)
@@ -1402,7 +1401,6 @@ def scrape_live_game_data(html: str, ext_id: str, source_url: str = None) -> Dic
                 odd_elem = opt_elem.select_one('span[class*="transform-translateY"]')
             if not odd_elem:
                 # Última tentativa: buscar qualquer número no elemento
-                import re
                 text = opt_elem.get_text()
                 numbers = re.findall(r'\d+\.?\d*', text)
                 if numbers:
