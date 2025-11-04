@@ -1201,12 +1201,12 @@ def scrape_live_game_data(html: str, ext_id: str, source_url: str = None) -> Dic
     """
     Extrai TUDO de uma página de jogo ao vivo: estatísticas e odds dos principais mercados.
     
-    Prioriza API XHR se disponível, depois fallback para HTML scraping.
+    Usa APENAS HTML scraping (XHR desativado).
     
     Args:
-        html: HTML da página (usado como fallback)
+        html: HTML da página
         ext_id: ID externo do evento
-        source_url: URL de origem do evento (opcional, usado para extrair event_id)
+        source_url: URL de origem do evento (não usado, mantido para compatibilidade)
     """
     # Usar APENAS HTML scraping (XHR desativado)
     logger.debug(f"🌐 Usando HTML scraping para evento {ext_id} (XHR desativado)")

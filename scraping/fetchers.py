@@ -145,7 +145,7 @@ async def _fetch_with_playwright(url: str, wait_for_selector: str = None, wait_t
 async def fetch_events_from_link(url: str, backend: str):
     """
     Busca eventos de uma URL do BetNacional.
-    Prioriza API XHR (mais eficiente), depois fallback para HTML scraping.
+    Usa APENAS HTML scraping (XHR desativado).
     """
     from utils.analytics_logger import log_extraction
     from scraping.betnacional import try_parse_events
@@ -203,7 +203,7 @@ async def fetch_game_result(ext_id: str, source_link: str) -> Optional[str]:
     Busca o resultado de um jogo específico.
     
     Usa cache para evitar múltiplas requisições para o mesmo jogo.
-    Tenta primeiro via API XHR (se disponível), depois fallback para HTML scraping.
+    Usa APENAS HTML scraping (XHR desativado).
     
     Args:
         ext_id: ID externo do jogo (event_id)
