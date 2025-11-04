@@ -99,8 +99,8 @@ class AnalyticsEvent(Base):
     # Status e resultado
     success = Column(Boolean, default=True)
     reason = Column(Text, nullable=True)  # Motivo da supressão/envio/não envio
-    # Metadados
-    metadata = Column(JSON, nullable=True)  # Informações adicionais
+    # Metadados (renomeado de 'metadata' para evitar conflito com SQLAlchemy)
+    event_metadata = Column(JSON, nullable=True)  # Informações adicionais
     created_at = Column(DateTime, server_default=func.now())
 
 
@@ -111,6 +111,50 @@ def _safe_add_column(table: str, coldef: str):
             conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {coldef}"))
     except Exception:
         pass  # já existe
+
+
+def _safe_migrate_metadata_column():
+    """Migra coluna 'metadata' para 'event_metadata' se necessário."""
+    try:
+        with engine.begin() as conn:
+            # Verifica se a coluna 'metadata' existe e 'event_metadata' não existe
+            result = conn.execute(text("""
+                SELECT name FROM sqlite_master 
+                WHERE type='table' AND name='analytics_events'
+            """))
+            if result.fetchone():
+                # Verifica se metadata existe
+                result = conn.execute(text("PRAGMA table_info(analytics_events)"))
+                columns = {row[1]: row for row in result.fetchall()}
+                
+                if 'metadata' in columns and 'event_metadata' not in columns:
+                    # Renomeia a coluna usando SQLite ALTER TABLE (SQLite 3.25.0+)
+                    conn.execute(text("""
+                        ALTER TABLE analytics_events 
+                        RENAME COLUMN metadata TO event_metadata
+                    """))
+    except Exception as e:
+        # Se falhar, tenta método alternativo para SQLite antigo
+        try:
+            with engine.begin() as conn:
+                # Verifica se precisa migrar
+                result = conn.execute(text("PRAGMA table_info(analytics_events)"))
+                columns = {row[1]: row for row in result.fetchall()}
+                
+                if 'metadata' in columns and 'event_metadata' not in columns:
+                    # Método alternativo: criar nova tabela, copiar dados, renomear
+                    conn.execute(text("""
+                        CREATE TABLE analytics_events_new AS 
+                        SELECT 
+                            id, event_type, event_category, timestamp, game_id, ext_id,
+                            source_link, event_data, success, reason, 
+                            metadata AS event_metadata, created_at
+                        FROM analytics_events
+                    """))
+                    conn.execute(text("DROP TABLE analytics_events"))
+                    conn.execute(text("ALTER TABLE analytics_events_new RENAME TO analytics_events"))
+        except Exception:
+            pass  # Ignora erro se não conseguir migrar
 
 
 def init_database():
@@ -126,6 +170,8 @@ def init_database():
     _safe_add_column("live_game_trackers", "notifications_sent INTEGER")
     _safe_add_column("live_game_trackers", "last_pick_key TEXT")
     _safe_add_column("live_game_trackers", "last_pick_sent DATETIME")
+    # Migração: renomear coluna 'metadata' para 'event_metadata' em analytics_events
+    _safe_migrate_metadata_column()
 
 
 # Inicializa o banco ao importar o módulo

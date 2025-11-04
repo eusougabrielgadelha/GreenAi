@@ -43,7 +43,7 @@ def log_event(
                 event_data=event_data or {},
                 success=success,
                 reason=reason,
-                metadata=metadata or {}
+                event_metadata=metadata or {}  # Renomeado de 'metadata' para evitar conflito com SQLAlchemy
             )
             session.add(event)
             session.commit()
