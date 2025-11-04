@@ -289,16 +289,31 @@ def fmt_live_bet_opportunity(g: Game, opportunity: Dict[str, Any], stats: Dict[s
     est_p = opportunity.get("p_est", 0.0)
 
     msg = (
-        f"{urgency} <b>OPORTUNIDADE AO VIVO</b>\n"
+        f"{urgency} <b>OPORTUNIDADE AO VIVO VALIDADA</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
         f"⚽ <b>{g.team_home}</b> vs <b>{g.team_away}</b>\n"
         f"├ ⏱ {match_time} | Placar: {stats.get('score','—')}\n"
     )
     if 'last_event' in stats:
         msg += f"├ 📝 Último evento: {stats['last_event']}\n"
+    
+    # Mostra score de confiança se disponível
+    confidence_score = stats.get('confidence_score')
+    if confidence_score is not None:
+        confidence_emoji = "🔥" if confidence_score >= 0.80 else "⭐" if confidence_score >= 0.70 else "💡"
+        msg += f"├ {confidence_emoji} Confiança: <b>{confidence_score*100:.0f}%</b>\n"
+        validation_reason = stats.get('validation_reason', '')
+        if validation_reason:
+            # Mostra apenas os primeiros fatores de validação
+            factors = validation_reason.split(' - ')[-1] if ' - ' in validation_reason else validation_reason
+            if len(factors) > 60:
+                factors = factors[:57] + "..."
+            msg += f"└ ✓ {factors}\n\n"
+        else:
+            msg += "\n"
 
     msg += (
-        f"\n💰 <b>APOSTA</b>\n"
+        f"💰 <b>APOSTA</b>\n"
         f"├ {pick_line}\n"
         f"├ Prob. estimada: <b>{est_p*100:.0f}%</b>\n"
         f"├ Aporte sugerido: <b>{stake:.2f}</b>\n"

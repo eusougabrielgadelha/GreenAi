@@ -741,18 +741,53 @@ async def monitor_live_games_job():
                     session.commit()
                     continue  # Pula para próximo jogo
 
-                # 3. Aplica a lógica de decisão (só se o jogo ainda está rolando)
+                # 3. ETAPA 1: Aplica a lógica de decisão para encontrar oportunidades (só se o jogo ainda está rolando)
                 opportunity = decide_live_bet_opportunity(live_data, game, tracker)
                 
                 # Registra análise de oportunidade (mesmo se não encontrou)
                 from utils.analytics_logger import log_live_opportunity
-                reason = "Oportunidade encontrada e enviada" if opportunity else "Nenhuma oportunidade encontrada"
+                reason = "Oportunidade encontrada" if opportunity else "Nenhuma oportunidade encontrada"
                 log_live_opportunity(game.id, game.ext_id, opportunity, reason=reason, metadata=live_data["stats"])
 
-                # 4. Se houver uma oportunidade, envia o palpite
+                # 4. ETAPA 2: Se encontrou uma oportunidade, valida a confiabilidade
                 if opportunity:
+                    from betting.live_validator import validate_opportunity_reliability
+                    
+                    is_reliable, confidence_score, validation_reason = validate_opportunity_reliability(
+                        opportunity, live_data, game, tracker
+                    )
+                    
+                    # Adiciona score de confiança à oportunidade
+                    opportunity["confidence_score"] = confidence_score
+                    opportunity["validation_reason"] = validation_reason
+                    
+                    # Se não passou na validação, registra e descarta
+                    if not is_reliable:
+                        log_live_opportunity(
+                            game.id, game.ext_id, opportunity,
+                            reason=f"Oportunidade rejeitada na validação: {validation_reason}",
+                            metadata={
+                                **live_data["stats"],
+                                "confidence_score": confidence_score,
+                                "validation_reason": validation_reason
+                            }
+                        )
+                        logger.info(f"⚠️ Oportunidade rejeitada na validação (score: {confidence_score:.2f}): {validation_reason}")
+                        opportunity = None  # Descarta a oportunidade
+                    else:
+                        logger.info(f"✅ Oportunidade validada com confiança {confidence_score:.2f}: {validation_reason}")
+
+                # 5. Se houver uma oportunidade validada, envia o palpite
+                if opportunity:
+                    # Prepara estatísticas com informações de validação
+                    stats_with_validation = {
+                        **live_data["stats"],
+                        "confidence_score": opportunity.get("confidence_score", 0.0),
+                        "validation_reason": opportunity.get("validation_reason", "")
+                    }
+                    
                     # Envia mensagem de "Palpite Validado"
-                    message = fmt_live_bet_opportunity(game, opportunity, live_data["stats"])
+                    message = fmt_live_bet_opportunity(game, opportunity, stats_with_validation)
                     tg_send_message(message, message_type="live_opportunity", game_id=game.id, ext_id=game.ext_id)
 
                     # Atualiza o tracker

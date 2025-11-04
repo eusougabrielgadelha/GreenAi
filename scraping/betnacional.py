@@ -389,6 +389,16 @@ def scrape_live_game_data(html: str, ext_id: str) -> Dict[str, Any]:
             last_event_element = lmt_container.select_one(".sr-lmt-1-evt__text-content")
             if last_event_element:
                 data["stats"]["last_event"] = last_event_element.get_text(" ", strip=True)
+            
+            # Tenta extrair estatísticas adicionais (chutes, posse, cartões, escanteios)
+            # Nota: Estrutura pode variar, então tentamos múltiplas estratégias
+            try:
+                from betting.live_validator import expand_live_game_stats
+                expanded = expand_live_game_stats(str(lmt_container))
+                if expanded:
+                    data["stats"].update(expanded)
+            except Exception:
+                pass  # Não crítico se não conseguir extrair
 
         except Exception as e:
             logger.error(f"Erro ao extrair estatísticas do jogo ao vivo {ext_id}: {e}")
