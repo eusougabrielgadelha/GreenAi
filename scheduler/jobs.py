@@ -700,6 +700,7 @@ async def monitor_live_games_job():
                 # Atualiza as estatísticas no tracker
                 tracker.current_score = live_data["stats"].get("score")
                 tracker.current_minute = live_data["stats"].get("match_time")
+                tracker.stats_snapshot = live_data["stats"]  # Salva snapshot completo
                 tracker.last_analysis_time = now_utc
 
                 # 2.5. Verifica se o jogo terminou (detecção automática)

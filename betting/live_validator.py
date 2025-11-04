@@ -176,7 +176,130 @@ def validate_opportunity_reliability(
             rejection_reasons.append("Cartão recente pode mudar dinâmica do jogo")
     
     # ============================================
-    # FATOR 6: Análise de Mercado (Disponibilidade)
+    # FATOR 6: Análise de Estatísticas do Jogo
+    # ============================================
+    stats_score = 0.0
+    
+    # Verifica se há estatísticas disponíveis
+    shots_home = stats.get("shots_home")
+    shots_away = stats.get("shots_away")
+    possession_home = stats.get("possession_home")
+    corners_home = stats.get("corners_home")
+    corners_away = stats.get("corners_away")
+    
+    if market_key == "match_result":
+        # Para Resultado Final, analisa estatísticas que confirmam dominância
+        leader = opportunity.get("option", "")
+        if leader in ["Casa", "Fora"]:
+            # Verifica se o time líder tem mais chutes/posse/escanteios
+            if shots_home is not None and shots_away is not None:
+                if leader == "Casa" and shots_home > shots_away:
+                    stats_score += 0.05
+                    confidence_factors.append(("Líder com mais chutes", 0.05))
+                elif leader == "Fora" and shots_away > shots_home:
+                    stats_score += 0.05
+                    confidence_factors.append(("Líder com mais chutes", 0.05))
+            
+            if possession_home is not None:
+                if leader == "Casa" and possession_home > 50:
+                    stats_score += 0.03
+                    confidence_factors.append(("Líder com mais posse", 0.03))
+                elif leader == "Fora" and possession_home < 50:
+                    stats_score += 0.03
+                    confidence_factors.append(("Líder com mais posse", 0.03))
+            
+            if corners_home is not None and corners_away is not None:
+                if leader == "Casa" and corners_home > corners_away:
+                    stats_score += 0.02
+                    confidence_factors.append(("Líder com mais escanteios", 0.02))
+                elif leader == "Fora" and corners_away > corners_home:
+                    stats_score += 0.02
+                    confidence_factors.append(("Líder com mais escanteios", 0.02))
+    
+    elif market_key == "btts" and opportunity.get("option") == "Não":
+        # Para BTTS NÃO, verifica se há poucos chutes (confirma que não vai ter gol)
+        if shots_home is not None and shots_away is not None:
+            total_shots = shots_home + shots_away
+            if total_shots < 10:  # Poucos chutes no total
+                stats_score += 0.08
+                confidence_factors.append(("Poucos chutes no jogo", 0.08))
+            elif total_shots < 15:
+                stats_score += 0.04
+                confidence_factors.append(("Chutes moderados", 0.04))
+    
+    # ============================================
+    # FATOR 7: Análise de Momentum
+    # ============================================
+    momentum_score = 0.0
+    
+    # Verifica eventos recentes e padrão do jogo
+    last_event = stats.get("last_event", "")
+    home_goals = stats.get("home_goals", 0)
+    away_goals = stats.get("away_goals", 0)
+    
+    if market_key == "match_result":
+        leader = opportunity.get("option", "")
+        goal_diff = abs(home_goals - away_goals)
+        
+        # Se o último evento foi gol do líder, confirma momentum
+        if last_event:
+            if leader == "Casa" and ("gol" in last_event.lower() or "goal" in last_event.lower()):
+                if home_goals > away_goals:
+                    momentum_score += 0.08
+                    confidence_factors.append(("Momentum confirmado pelo último gol", 0.08))
+            elif leader == "Fora" and ("gol" in last_event.lower() or "goal" in last_event.lower()):
+                if away_goals > home_goals:
+                    momentum_score += 0.08
+                    confidence_factors.append(("Momentum confirmado pelo último gol", 0.08))
+        
+        # Se há vantagem de múltiplos gols, momentum é mais forte
+        if goal_diff >= 2:
+            momentum_score += 0.05
+            confidence_factors.append(("Vantagem significativa", 0.05))
+    
+    # ============================================
+    # FATOR 8: Análise de Tendência de Odds
+    # ============================================
+    trend_score = 0.0
+    
+    with SessionLocal() as session:
+        # Busca últimas 3 odds registradas
+        recent_odds = (
+            session.query(OddHistory)
+            .filter(OddHistory.game_id == game.id)
+            .order_by(OddHistory.timestamp.desc())
+            .limit(3)
+            .all()
+        )
+        
+        if len(recent_odds) >= 2:
+            current_odd = opportunity.get("odd", 0.0)
+            market_key = opportunity.get("market_key", "")
+            
+            if market_key == "match_result":
+                option = opportunity.get("option", "")
+                # Compara odd atual com odds anteriores
+                prev_odds = []
+                for oh in recent_odds[1:]:  # Pula a mais recente (já temos a atual)
+                    if option == "Casa":
+                        prev_odds.append(oh.odds_home or 0.0)
+                    elif option == "Fora":
+                        prev_odds.append(oh.odds_away or 0.0)
+                    else:
+                        prev_odds.append(oh.odds_draw or 0.0)
+                
+                # Verifica tendência: se odd está diminuindo consistentemente
+                if len(prev_odds) >= 1 and prev_odds[0] > 0:
+                    if current_odd < prev_odds[0]:
+                        # Odd está caindo (mercado confirma)
+                        trend_score = 0.10
+                        confidence_factors.append(("Tendência de odds favorável", trend_score))
+                    elif current_odd > prev_odds[0] * 1.15:
+                        # Odd aumentou muito - pode indicar problema
+                        rejection_reasons.append("Tendência de odds desfavorável (aumento significativo)")
+    
+    # ============================================
+    # FATOR 9: Análise de Mercado (Disponibilidade)
     # ============================================
     market_score = 0.0
     market_key = opportunity.get("market_key", "")
@@ -198,6 +321,9 @@ def validate_opportunity_reliability(
         stability_score +
         edge_score +
         event_score +
+        stats_score +
+        momentum_score +
+        trend_score +
         market_score
     )
     
@@ -210,7 +336,7 @@ def validate_opportunity_reliability(
     if rejection_reasons:
         # Se houver motivos de rejeição críticos, pode rejeitar mesmo com score alto
         critical_rejections = [r for r in rejection_reasons if any(
-            word in r.lower() for word in ["aumentou significativamente", "incerto", "requerido"]
+            word in r.lower() for word in ["aumentou significativamente", "incerto", "requerido", "desfavorável"]
         )]
         if critical_rejections:
             reason = "; ".join(rejection_reasons)
@@ -260,20 +386,18 @@ def expand_live_game_stats(html: str) -> Dict[str, Any]:
     """
     Expande a extração de estatísticas do jogo ao vivo.
     Tenta extrair dados adicionais como:
-    - Chutes (total, no gol)
+    - Chutes (total, no gol, fora)
     - Posse de bola
-    - Cartões
+    - Cartões (amarelos, vermelhos)
     - Escanteios
     - Faltas
-    - Etc.
+    - Finalizações perigosas
     """
     from bs4 import BeautifulSoup
+    import re
     
     soup = BeautifulSoup(html, "html.parser")
     expanded_stats = {}
-    
-    # Tenta encontrar containers de estatísticas
-    # Nota: Estrutura pode variar, então tentamos múltiplas estratégias
     
     # Estratégia 1: Procurar por elementos com classes relacionadas a estatísticas
     stat_containers = soup.select('[class*="stat"], [class*="Stat"], [data-testid*="stat"], [data-testid*="Stat"]')
@@ -283,31 +407,131 @@ def expand_live_game_stats(html: str) -> Dict[str, Any]:
         
         # Chutes
         if "chute" in text or "shot" in text:
-            numbers = [int(x) for x in text.split() if x.isdigit()]
+            numbers = re.findall(r'\d+', text)
             if numbers:
-                expanded_stats["shots"] = numbers[0] if numbers else None
+                try:
+                    expanded_stats["shots_home"] = int(numbers[0]) if len(numbers) > 0 else None
+                    expanded_stats["shots_away"] = int(numbers[1]) if len(numbers) > 1 else None
+                    expanded_stats["shots_total"] = (int(numbers[0]) + int(numbers[1])) if len(numbers) > 1 else int(numbers[0])
+                except (ValueError, IndexError):
+                    pass
+        
+        # Chutes no gol
+        if "chute no gol" in text or "shot on target" in text or "on target" in text:
+            numbers = re.findall(r'\d+', text)
+            if numbers:
+                try:
+                    expanded_stats["shots_on_target_home"] = int(numbers[0]) if len(numbers) > 0 else None
+                    expanded_stats["shots_on_target_away"] = int(numbers[1]) if len(numbers) > 1 else None
+                except (ValueError, IndexError):
+                    pass
         
         # Posse de bola
         if "posse" in text or "possession" in text:
-            numbers = [int(x) for x in text.split() if x.isdigit()]
+            numbers = re.findall(r'\d+', text)
             if numbers:
-                expanded_stats["possession"] = numbers[0] if numbers else None
+                try:
+                    possession_home = int(numbers[0]) if len(numbers) > 0 else None
+                    possession_away = int(numbers[1]) if len(numbers) > 1 else None
+                    if possession_home is not None:
+                        expanded_stats["possession_home"] = possession_home
+                        expanded_stats["possession_away"] = possession_away if possession_away is not None else (100 - possession_home)
+                except (ValueError, IndexError):
+                    pass
         
-        # Cartões
-        if "cartão" in text or "card" in text or "amarelo" in text or "yellow" in text:
-            # Tenta extrair número de cartões
-            numbers = [int(x) for x in text.split() if x.isdigit()]
+        # Cartões amarelos
+        if "cartão amarelo" in text or "yellow card" in text or ("amarelo" in text and "cartão" in text):
+            numbers = re.findall(r'\d+', text)
             if numbers:
-                expanded_stats["yellow_cards"] = numbers[0] if numbers else None
+                try:
+                    expanded_stats["yellow_cards_home"] = int(numbers[0]) if len(numbers) > 0 else None
+                    expanded_stats["yellow_cards_away"] = int(numbers[1]) if len(numbers) > 1 else None
+                    expanded_stats["yellow_cards_total"] = (int(numbers[0]) + int(numbers[1])) if len(numbers) > 1 else int(numbers[0])
+                except (ValueError, IndexError):
+                    pass
+        
+        # Cartões vermelhos
+        if "cartão vermelho" in text or "red card" in text or ("vermelho" in text and "cartão" in text):
+            numbers = re.findall(r'\d+', text)
+            if numbers:
+                try:
+                    expanded_stats["red_cards_home"] = int(numbers[0]) if len(numbers) > 0 else None
+                    expanded_stats["red_cards_away"] = int(numbers[1]) if len(numbers) > 1 else None
+                    expanded_stats["red_cards_total"] = (int(numbers[0]) + int(numbers[1])) if len(numbers) > 1 else int(numbers[0])
+                except (ValueError, IndexError):
+                    pass
         
         # Escanteios
         if "escanteio" in text or "corner" in text:
-            numbers = [int(x) for x in text.split() if x.isdigit()]
+            numbers = re.findall(r'\d+', text)
             if numbers:
-                expanded_stats["corners"] = numbers[0] if numbers else None
+                try:
+                    expanded_stats["corners_home"] = int(numbers[0]) if len(numbers) > 0 else None
+                    expanded_stats["corners_away"] = int(numbers[1]) if len(numbers) > 1 else None
+                    expanded_stats["corners_total"] = (int(numbers[0]) + int(numbers[1])) if len(numbers) > 1 else int(numbers[0])
+                except (ValueError, IndexError):
+                    pass
+        
+        # Faltas
+        if "falta" in text or "foul" in text:
+            numbers = re.findall(r'\d+', text)
+            if numbers:
+                try:
+                    expanded_stats["fouls_home"] = int(numbers[0]) if len(numbers) > 0 else None
+                    expanded_stats["fouls_away"] = int(numbers[1]) if len(numbers) > 1 else None
+                except (ValueError, IndexError):
+                    pass
     
-    # Estratégia 2: Procurar por tabelas ou listas de estatísticas
-    # (pode ser implementada conforme necessário)
+    # Estratégia 2: Procurar por tabelas de estatísticas
+    stat_tables = soup.select('table[class*="stat"], table[class*="Stat"], [data-testid*="stats-table"]')
+    for table in stat_tables:
+        rows = table.select('tr')
+        for row in rows:
+            cells = row.select('td, th')
+            if len(cells) >= 3:
+                label_text = cells[0].get_text(strip=True).lower()
+                home_value = cells[1].get_text(strip=True)
+                away_value = cells[2].get_text(strip=True)
+                
+                # Extrai números
+                home_num = re.findall(r'\d+', home_value)
+                away_num = re.findall(r'\d+', away_value)
+                
+                if home_num and away_num:
+                    try:
+                        if "chute" in label_text or "shot" in label_text:
+                            expanded_stats["shots_home"] = int(home_num[0])
+                            expanded_stats["shots_away"] = int(away_num[0])
+                        elif "posse" in label_text or "possession" in label_text:
+                            expanded_stats["possession_home"] = int(home_num[0])
+                            expanded_stats["possession_away"] = int(away_num[0])
+                        elif "escanteio" in label_text or "corner" in label_text:
+                            expanded_stats["corners_home"] = int(home_num[0])
+                            expanded_stats["corners_away"] = int(away_num[0])
+                        elif "cartão" in label_text or "card" in label_text:
+                            if "amarelo" in label_text or "yellow" in label_text:
+                                expanded_stats["yellow_cards_home"] = int(home_num[0])
+                                expanded_stats["yellow_cards_away"] = int(away_num[0])
+                            elif "vermelho" in label_text or "red" in label_text:
+                                expanded_stats["red_cards_home"] = int(home_num[0])
+                                expanded_stats["red_cards_away"] = int(away_num[0])
+                    except (ValueError, IndexError):
+                        pass
+    
+    # Estratégia 3: Procurar por elementos de progresso/barra (posse de bola)
+    progress_bars = soup.select('[class*="progress"], [class*="bar"], [style*="width"]')
+    for bar in progress_bars:
+        parent_text = bar.parent.get_text(strip=True).lower() if bar.parent else ""
+        if "posse" in parent_text or "possession" in parent_text:
+            # Tenta extrair porcentagem do style ou do texto
+            style = bar.get("style", "")
+            width_match = re.search(r'width[:\s]+(\d+)%', style)
+            if width_match:
+                try:
+                    expanded_stats["possession_home"] = int(width_match.group(1))
+                    expanded_stats["possession_away"] = 100 - int(width_match.group(1))
+                except (ValueError, IndexError):
+                    pass
     
     return expanded_stats
 

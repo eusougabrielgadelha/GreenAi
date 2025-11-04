@@ -59,6 +59,9 @@ class LiveGameTracker(Base):
 
     current_score = Column(String, nullable=True)  # "1 - 0"
     current_minute = Column(String, nullable=True)  # "45'+2'", "HT", "FT"
+    
+    # Estatísticas expandidas (JSON para flexibilidade)
+    stats_snapshot = Column(JSON, nullable=True)  # Snapshot das estatísticas no momento da última análise
 
     game_url = Column(Text, nullable=True)  # deep link do evento
     cooldown_until = Column(DateTime, nullable=True)

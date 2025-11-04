@@ -84,13 +84,37 @@ Com base na estrutura do HTML, podemos tentar extrair:
 - Gol recente pode confirmar tendência
 - Cartão recente pode indicar mudança de dinâmica
 
-#### 6. 📊 Disponibilidade do Mercado (0-5% confiança)
+#### 6. 📊 Análise de Estatísticas do Jogo (0-10% confiança)
+- **Resultado Final**: Verifica se líder tem mais chutes/posse/escanteios
+- **BTTS NÃO**: Verifica se há poucos chutes no total
+
+#### 7. 🔥 Análise de Momentum (0-13% confiança)
+- Confirmação de momentum pelo último gol
+- Vantagem de múltiplos gols
+
+#### 8. 📈 Análise de Tendência de Odds (0-10% confiança)
+- Compara com últimas 3 odds registradas
+- Detecta tendência favorável/desfavorável
+
+#### 9. 📊 Disponibilidade do Mercado (0-5% confiança)
 - Mercado completo e disponível → confiança adicional
 
 **Score Final:**
 - Soma todos os fatores (máximo 1.0)
+  - Total possível: ~1.48 (mas normalizado para 1.0)
 - Requer `LIVE_MIN_CONFIDENCE_SCORE` (padrão: 0.70) para aprovar
 - Rejeições críticas podem descartar mesmo com score alto
+
+**Fatores Totais Implementados:**
+1. Movimento de Odds: 0-30%
+2. Contexto do Placar e Tempo: 0-40%
+3. Estabilidade: 0-15%
+4. Edge e Probabilidade: 0-30%
+5. Eventos Recentes: 0-10%
+6. Estatísticas do Jogo: 0-10%
+7. Momentum: 0-13%
+8. Tendência de Odds: 0-10%
+9. Disponibilidade do Mercado: 0-5%
 
 ---
 
@@ -173,13 +197,43 @@ LIVE_SAME_PICK_COOLDOWN_MIN=20
 
 ---
 
+## ✅ Análises Implementadas (Expandidas)
+
+### 1. **Estatísticas Avançadas do Jogo** ✅
+- ✅ Chutes por time (total, no gol)
+- ✅ Posse de bola (%)
+- ✅ Cartões (amarelos, vermelhos) por time
+- ✅ Escanteios por time
+- ✅ Faltas por time
+
+**Fatores de Validação:**
+- **Resultado Final**: Verifica se o time líder tem mais chutes/posse/escanteios (confirma dominância)
+- **BTTS NÃO**: Verifica se há poucos chutes no total (confirma que não vai ter gol)
+
+### 2. **Análise de Momentum** ✅
+- ✅ Sequência de eventos recentes
+- ✅ Confirmação de momentum pelo último gol
+- ✅ Vantagem de múltiplos gols
+
+**Fatores de Validação:**
+- Se o último evento foi gol do líder → confirma momentum (+0.08)
+- Se há vantagem de múltiplos gols → momentum mais forte (+0.05)
+
+### 3. **Análise de Tendência de Odds** ✅
+- ✅ Comparação com últimas 3 odds registradas
+- ✅ Detecção de tendência favorável/desfavorável
+
+**Fatores de Validação:**
+- Se odd está diminuindo consistentemente → tendência favorável (+0.10)
+- Se odd aumentou >15% → pode rejeitar (tendência desfavorável)
+
 ## 🔮 Análises Futuras Possíveis
 
-### 1. **Estatísticas Avançadas do Jogo**
-- Chutes por time (total, no gol, fora)
-- Posse de bola
+### 1. **Estatísticas Adicionais**
 - Finalizações perigosas
 - xG (Expected Goals)
+- Passes completados
+- Dribles bem-sucedidos
 
 ### 2. **Análise de Momentum**
 - Sequência de eventos recentes

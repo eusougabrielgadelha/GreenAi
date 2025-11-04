@@ -297,6 +297,24 @@ def fmt_live_bet_opportunity(g: Game, opportunity: Dict[str, Any], stats: Dict[s
     if 'last_event' in stats:
         msg += f"├ 📝 Último evento: {stats['last_event']}\n"
     
+    # Mostra estatísticas adicionais se disponíveis
+    shots_home = stats.get('shots_home')
+    shots_away = stats.get('shots_away')
+    possession_home = stats.get('possession_home')
+    corners_home = stats.get('corners_home')
+    corners_away = stats.get('corners_away')
+    
+    stats_line = []
+    if shots_home is not None and shots_away is not None:
+        stats_line.append(f"Chutes: {shots_home}-{shots_away}")
+    if possession_home is not None:
+        stats_line.append(f"Posse: {possession_home}%")
+    if corners_home is not None and corners_away is not None:
+        stats_line.append(f"Escanteios: {corners_home}-{corners_away}")
+    
+    if stats_line:
+        msg += f"├ 📊 {' | '.join(stats_line)}\n"
+    
     # Mostra score de confiança se disponível
     confidence_score = stats.get('confidence_score')
     if confidence_score is not None:
