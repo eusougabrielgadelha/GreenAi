@@ -336,49 +336,49 @@ async def fetch_game_result(ext_id: str, source_link: str) -> Optional[str]:
         try:
             # Tentar extrair event_id da URL
             if source_link:
-            event_id = extract_event_id_from_url(source_link)
-        # Se não conseguir, tentar usar ext_id diretamente
-        if not event_id and ext_id:
+                event_id = extract_event_id_from_url(source_link)
+            # Se não conseguir, tentar usar ext_id diretamente
+            if not event_id and ext_id:
             try:
                 event_id = int(ext_id)
             except (ValueError, TypeError):
                 pass
-        
-        if event_id:
-            logger.info(f"📡 Tentando buscar resultado via API para evento {event_id}")
-            try:
-                json_data = fetch_event_odds_from_api(event_id)
-                if json_data:
-                    # Verificar se conseguimos extrair resultado da API
-                    events = json_data.get('events', [])
-                    if events:
-                        event = events[0]
-                        event_status_id = event.get('event_status_id', 0)
-                        
-                        # event_status_id: 0 = agendado, 1 = ao vivo, 2 = finalizado
-                        if event_status_id == 2:
-                            # Jogo terminado - tentar extrair resultado
-                            # Verificar se há informações de resultado no evento
-                            # Por enquanto, a API não retorna resultado diretamente,
-                            # mas podemos verificar se há placar ou outras informações
-                            # Se não encontrar, fazer fallback para HTML scraping
-                            logger.debug(f"API indica que jogo {event_id} terminou (status_id=2), mas resultado não disponível na API. Tentando HTML...")
-                        elif event_status_id == 1:
-                            logger.debug(f"Jogo {event_id} ainda está ao vivo (status_id=1). Não é possível obter resultado ainda.")
-                            return None
+            
+            if event_id:
+                logger.info(f"📡 Tentando buscar resultado via API para evento {event_id}")
+                try:
+                    json_data = fetch_event_odds_from_api(event_id)
+                    if json_data:
+                        # Verificar se conseguimos extrair resultado da API
+                        events = json_data.get('events', [])
+                        if events:
+                            event = events[0]
+                            event_status_id = event.get('event_status_id', 0)
+                            
+                            # event_status_id: 0 = agendado, 1 = ao vivo, 2 = finalizado
+                            if event_status_id == 2:
+                                # Jogo terminado - tentar extrair resultado
+                                # Verificar se há informações de resultado no evento
+                                # Por enquanto, a API não retorna resultado diretamente,
+                                # mas podemos verificar se há placar ou outras informações
+                                # Se não encontrar, fazer fallback para HTML scraping
+                                logger.debug(f"API indica que jogo {event_id} terminou (status_id=2), mas resultado não disponível na API. Tentando HTML...")
+                            elif event_status_id == 1:
+                                logger.debug(f"Jogo {event_id} ainda está ao vivo (status_id=1). Não é possível obter resultado ainda.")
+                                return None
+                            else:
+                                logger.debug(f"Jogo {event_id} ainda não começou (status_id={event_status_id}). Não é possível obter resultado ainda.")
+                                return None
                         else:
-                            logger.debug(f"Jogo {event_id} ainda não começou (status_id={event_status_id}). Não é possível obter resultado ainda.")
-                            return None
+                            # API não retornou eventos - desabilitar XHR
+                            disable_xhr("API não retornou eventos para resultado")
                     else:
-                        # API não retornou eventos - desabilitar XHR
-                        disable_xhr("API não retornou eventos para resultado")
-                else:
-                    # API não retornou dados - desabilitar XHR
-                    disable_xhr("API não retornou dados para resultado")
-            except Exception as e:
-                # API falhou - desabilitar XHR
-                disable_xhr(f"Erro na API ao buscar resultado: {type(e).__name__}")
-                logger.debug(f"Erro ao buscar resultado via API: {e}. Desabilitando XHR e usando HTML scraping...")
+                        # API não retornou dados - desabilitar XHR
+                        disable_xhr("API não retornou dados para resultado")
+                except Exception as e:
+                    # API falhou - desabilitar XHR
+                    disable_xhr(f"Erro na API ao buscar resultado: {type(e).__name__}")
+                    logger.debug(f"Erro ao buscar resultado via API: {e}. Desabilitando XHR e usando HTML scraping...")
         except Exception as e:
             logger.debug(f"Erro ao processar API: {e}. Tentando HTML scraping...")
     else:
