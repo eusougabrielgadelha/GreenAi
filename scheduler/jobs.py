@@ -160,8 +160,75 @@ async def night_scan_for_early_games():
                     if not will and free_pass:
                         will = True
                         reason = (reason or "Passe livre") + " | HIGH_TRUST"
-
-                    if not will:
+                    
+                    should_save = will  # Para madrugada, só salva se will=True (já inclui free_pass)
+                    
+                    # SALVAR TODOS OS JOGOS NO BANCO (mesmo os não selecionados)
+                    # Upsert do jogo (salva sempre, mas will_bet só é True se selecionado)
+                    g = session.query(Game).filter_by(ext_id=ev.ext_id, start_time=start_utc).one_or_none()
+                    if g:
+                        # Atualiza jogo existente
+                        g.source_link = url
+                        g.game_url = getattr(ev, "game_url", None) or g.game_url
+                        g.competition = ev.competition or g.competition
+                        g.team_home = ev.team_home or g.team_home
+                        g.team_away = ev.team_away or g.team_away
+                        g.odds_home = ev.odds_home
+                        g.odds_draw = ev.odds_draw
+                        g.odds_away = ev.odds_away
+                        g.pick = pick
+                        g.pick_prob = pprob
+                        g.pick_ev = pev
+                        g.pick_reason = reason
+                        if should_save:
+                            g.will_bet = True
+                        if g.status not in ("live", "ended"):
+                            g.status = "scheduled"
+                        session.commit()
+                    else:
+                        # Cria novo jogo (sempre salva, mesmo se não selecionado)
+                        g = Game(
+                            ext_id=ev.ext_id,
+                            source_link=url,
+                            game_url=getattr(ev, "game_url", None),
+                            competition=ev.competition,
+                            team_home=ev.team_home,
+                            team_away=ev.team_away,
+                            start_time=start_utc,
+                            odds_home=ev.odds_home,
+                            odds_draw=ev.odds_draw,
+                            odds_away=ev.odds_away,
+                            pick=pick,
+                            pick_prob=pprob,
+                            pick_ev=pev,
+                            will_bet=should_save,  # True se selecionado, False caso contrário
+                            pick_reason=reason,
+                            status="scheduled",
+                        )
+                        session.add(g)
+                        try:
+                            session.commit()
+                        except IntegrityError:
+                            session.rollback()
+                            g = session.query(Game).filter_by(ext_id=ev.ext_id, start_time=start_utc).one_or_none()
+                            if g:
+                                g.source_link = url
+                                g.game_url = getattr(ev, "game_url", None) or g.game_url
+                                g.competition = ev.competition or g.competition
+                                g.team_home = ev.team_home or g.team_home
+                                g.team_away = ev.team_away or g.team_away
+                                g.odds_home = ev.odds_home
+                                g.odds_draw = ev.odds_draw
+                                g.odds_away = ev.odds_away
+                                g.pick = pick
+                                g.pick_prob = pprob
+                                g.pick_ev = pev
+                                g.pick_reason = reason
+                                if should_save:
+                                    g.will_bet = True
+                                session.commit()
+                    
+                    if not should_save:
                         # Ainda assim, avaliar ADD na watchlist
                         now_utc = datetime.now(pytz.UTC)
                         lead_ok = (start_utc - now_utc) >= timedelta(minutes=WATCHLIST_MIN_LEAD_MIN)
@@ -175,10 +242,9 @@ async def night_scan_for_early_games():
                                     "👀 Adicionado à WATCHLIST (madrugada): %s vs %s | EV=%.3f | prob=%.3f | start=%s",
                                     ev.team_home, ev.team_away, pev, pprob, start_utc.isoformat()
                                 )
-                        continue
-
-                    # UPSERT seguro
-                    # Jogo já foi salvo acima (salva todos os jogos)
+                        continue  # Pula processamento adicional se não foi selecionado
+                    
+                    # Jogo foi selecionado (will_bet=True) - processar normalmente
                     stored_total += 1
                     session.refresh(g)
 
