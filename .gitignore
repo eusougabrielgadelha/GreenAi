@@ -67,6 +67,11 @@ test_structure.py
 backup/
 arquivos_antigos/
 
+# Arquivos de documentação de desenvolvimento (podem ser úteis mas não essenciais)
+# Descomente se quiser ignorar:
+# CORRECAO_VPS.md
+# VERIFICACAO_TELEGRAM.md
+
 # Playwright
 .playwright/
 

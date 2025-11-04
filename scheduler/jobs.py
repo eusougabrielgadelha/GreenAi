@@ -44,13 +44,12 @@ async def send_reminder_job(game_id: int):
         g = s.get(Game, game_id)
         if not g or not g.will_bet:
             return
-        tg_send_message(fmt_reminder(g))
+        tg_send_message(fmt_reminder(g), message_type="reminder", game_id=g.id, ext_id=g.ext_id)
         logger.info("🔔 Lembrete enviado para jogo id=%s", game_id)
 
 
 async def _schedule_all_for_game(g: Game):
     """Agenda lembrete T-15, alerta 'começa já já' e watcher."""
-    from main import watch_game_until_end_job
     
     try:
         now_utc = datetime.now(pytz.UTC)
@@ -78,7 +77,10 @@ async def _schedule_all_for_game(g: Game):
                     f"🚨 <b>Começa já já</b> ({local_kick})\n"
                     f"{g.team_home} vs {g.team_away}\n"
                     f"Pick: <b>{g.pick.upper()}</b>",
-                    parse_mode="HTML"
+                    parse_mode="HTML",
+                    message_type="reminder",
+                    game_id=g.id,
+                    ext_id=g.ext_id
                 )
             except Exception:
                 logger.exception("Falha ao enviar alerta 'começa agora' id=%s", g.id)
@@ -273,7 +275,7 @@ async def night_scan_for_early_games():
                     # Envio do pick — SOMENTE se alta confiança e sem duplicar
                     try:
                         if (g.pick_prob or 0.0) >= HIGH_CONF_THRESHOLD and not was_high_conf_notified(g.pick_reason or ""):
-                            tg_send_message(fmt_pick_now(g))
+                            tg_send_message(fmt_pick_now(g), message_type="pick_now", game_id=g.id, ext_id=g.ext_id)
                             g.pick_reason = mark_high_conf_notified(g.pick_reason or "")
                             session.commit()
                     except Exception:
@@ -294,7 +296,7 @@ async def night_scan_for_early_games():
     # Resumo da varredura noturna
     if early_games:
         msg = format_night_scan_summary(tomorrow, analyzed_total, early_games)
-        tg_send_message(msg)
+        tg_send_message(msg, message_type="summary")
 
     logger.info("🌙 Varredura noturna concluída — analisados=%d | selecionados=%d",
                 analyzed_total, len(early_games))
@@ -455,7 +457,7 @@ async def rescan_watchlist_job():
                 # NOTIFICAÇÃO — só envia se ALTA CONFIANÇA e sem duplicar
                 try:
                     if (g.pick_prob or 0.0) >= HIGH_CONF_THRESHOLD and not was_high_conf_notified(g.pick_reason or ""):
-                        tg_send_message(fmt_watch_upgrade(g))
+                        tg_send_message(fmt_watch_upgrade(g), message_type="watch_upgrade", game_id=g.id, ext_id=g.ext_id)
                         g.pick_reason = mark_high_conf_notified(g.pick_reason or "")
                         session.commit()
                 except Exception:
@@ -550,7 +552,7 @@ async def hourly_rescan_job():
 
                     # notifica uma única vez
                     try:
-                        tg_send_message(fmt_pick_now(game))
+                        tg_send_message(fmt_pick_now(game), message_type="pick_now", game_id=game.id, ext_id=game.ext_id)
                         game.pick_reason = mark_high_conf_notified(game.pick_reason or "")
                         session.commit()
                     except Exception:
@@ -583,7 +585,7 @@ async def hourly_rescan_job():
                     # Não notificar upgrades "médios": só notificamos se for alta confiança e ainda não notificado
                     if (game.pick_prob or 0.0) >= HIGH_CONF_THRESHOLD and not was_high_conf_notified(game.pick_reason or ""):
                         try:
-                            tg_send_message(fmt_pick_now(game))
+                            tg_send_message(fmt_pick_now(game), message_type="pick_now", game_id=game.id, ext_id=game.ext_id)
                             game.pick_reason = mark_high_conf_notified(game.pick_reason or "")
                             session.commit()
                             asyncio.create_task(_schedule_all_for_game(game))
@@ -626,7 +628,10 @@ async def monitor_live_games_job():
                     tg_send_message(
                         f"🔍 <b>ANÁLISE AO VIVO INICIADA</b>\n"
                         f"Estamos monitorando <b>{game.team_home} vs {game.team_away}</b> em busca de oportunidades de valor.\n"
-                        f"Você será notificado assim que uma aposta for validada."
+                        f"Você será notificado assim que uma aposta for validada.",
+                        message_type="live_opportunity",
+                        game_id=game.id,
+                        ext_id=game.ext_id
                     )
                     logger.info(f"🔍 Análise iniciada para jogo {game.id}: {game.team_home} vs {game.team_away}")
 
@@ -663,7 +668,7 @@ async def monitor_live_games_job():
                         
                         # Envia notificação de resultado
                         from utils.formatters import fmt_result
-                        tg_send_message(fmt_result(game))
+                        tg_send_message(fmt_result(game), message_type="result", game_id=game.id, ext_id=game.ext_id)
                         
                         # Tenta enviar resumo diário se todos os jogos do dia terminaram
                         try:
@@ -673,7 +678,6 @@ async def monitor_live_games_job():
                     else:
                         logger.warning(f"⚠️ Não foi possível obter resultado para jogo {game.id}, tentando novamente mais tarde")
                         # Agenda watch_game_until_end_job para tentar novamente
-                        from main import watch_game_until_end_job
                         asyncio.create_task(watch_game_until_end_job(game.id))
                     
                     session.commit()
@@ -681,12 +685,17 @@ async def monitor_live_games_job():
 
                 # 3. Aplica a lógica de decisão (só se o jogo ainda está rolando)
                 opportunity = decide_live_bet_opportunity(live_data, game, tracker)
+                
+                # Registra análise de oportunidade (mesmo se não encontrou)
+                from utils.analytics_logger import log_live_opportunity
+                reason = "Oportunidade encontrada e enviada" if opportunity else "Nenhuma oportunidade encontrada"
+                log_live_opportunity(game.id, game.ext_id, opportunity, reason=reason, metadata=live_data["stats"])
 
                 # 4. Se houver uma oportunidade, envia o palpite
                 if opportunity:
                     # Envia mensagem de "Palpite Validado"
                     message = fmt_live_bet_opportunity(game, opportunity, live_data["stats"])
-                    tg_send_message(message)
+                    tg_send_message(message, message_type="live_opportunity", game_id=game.id, ext_id=game.ext_id)
 
                     # Atualiza o tracker
                     tracker.last_pick_sent = now_utc
@@ -703,7 +712,10 @@ async def monitor_live_games_job():
                         tg_send_message(
                             f"🔄 <b>BUSCA CONTINUADA</b>\n"
                             f"Ainda não encontramos uma oportunidade de valor em <b>{game.team_home} vs {game.team_away}</b>.\n"
-                            f"Continuaremos monitorando."
+                            f"Continuaremos monitorando.",
+                            message_type="live_opportunity",
+                            game_id=game.id,
+                            ext_id=game.ext_id
                         )
                         tracker.last_analysis_time = now_utc  # Atualiza para evitar spam
                         session.commit()
@@ -729,9 +741,34 @@ async def send_daily_summary_job():
         
         # Resumo do dia atual
         summary_msg = fmt_daily_summary(session, datetime.now(ZONE))
-        tg_send_message(summary_msg)
+        tg_send_message(summary_msg, message_type="summary")
         
         logger.info("📊 Resumo diário enviado com sucesso.")
+
+
+async def generate_daily_analytics_report_job():
+    """
+    Job que gera e envia o relatório de analytics do dia anterior.
+    Executa antes do ciclo reiniciar (5 minutos antes da varredura matinal).
+    """
+    from utils.analytics_report import generate_and_save_daily_report
+    from datetime import datetime, timedelta
+    
+    # Gera relatório do dia anterior
+    yesterday = (datetime.now(ZONE) - timedelta(days=1)).date()
+    logger.info("📊 Gerando relatório de analytics para %s...", yesterday.strftime("%d/%m/%Y"))
+    
+    try:
+        report = await asyncio.to_thread(generate_and_save_daily_report, yesterday)
+        
+        # Envia via Telegram (opcional, pode ser muito longo)
+        # Se quiser enviar, descomente as linhas abaixo
+        # from notifications.telegram import tg_send_message
+        # tg_send_message(f"<pre>{report}</pre>", parse_mode="HTML", message_type="analytics_report")
+        
+        logger.info("✅ Relatório de analytics gerado com sucesso para %s", yesterday.strftime("%d/%m/%Y"))
+    except Exception as e:
+        logger.exception("Erro ao gerar relatório de analytics: %s", e)
 
 
 async def collect_tomorrow_games_job():
@@ -760,6 +797,88 @@ async def send_today_games_job():
     
     await send_today_games()
     logger.info("✅ Mensagem 'Jogos de Hoje' enviada com sucesso")
+
+
+async def morning_scan_and_publish():
+    """
+    Varredura matinal completa:
+    1. Coleta jogos de hoje (scan_games_for_date)
+    2. Envia resumo de jogos da madrugada (se houver)
+    3. Envia resumo de jogos de hoje
+    """
+    from scanner.game_scanner import scan_games_for_date
+    
+    logger.info("🌅 Iniciando varredura matinal completa...")
+    
+    # 1. Coleta jogos de hoje
+    result = await scan_games_for_date(date_offset=0, send_summary=False)
+    logger.info("✅ Varredura concluída: %d analisados, %d selecionados", result["analyzed"], result["selected"])
+    
+    # 2. Envia resumo de jogos da madrugada (00h-06h)
+    from scanner.game_scanner import send_dawn_games
+    await send_dawn_games()
+    
+    # 3. Envia resumo de jogos de hoje (06h-23h)
+    from scanner.game_scanner import send_today_games
+    await send_today_games()
+    
+    logger.info("✅ Varredura matinal concluída.")
+
+
+async def watch_game_until_end_job(game_id: int):
+    """
+    Monitora um jogo específico até que ele termine, verificando o resultado.
+    Tenta atualizar o status do jogo e notificar o resultado.
+    """
+    logger.info("👀 Iniciando monitoramento do jogo id=%s até o fim...", game_id)
+    
+    with SessionLocal() as session:
+        game = session.query(Game).filter_by(id=game_id).one_or_none()
+        if not game:
+            logger.warning("⚠️ Jogo id=%s não encontrado. Encerrando monitoramento.", game_id)
+            return
+        
+        # Verifica se o jogo já terminou
+        if game.status == "ended" and game.outcome:
+            logger.info("✅ Jogo id=%s já finalizado. Resultado: %s", game_id, game.outcome)
+            return
+        
+        # Tenta obter o resultado
+        try:
+            outcome = await fetch_game_result(game.ext_id, game.game_url or game.source_link)
+            
+            if outcome:
+                game.outcome = outcome
+                game.status = "ended"
+                game.hit = (outcome == game.pick) if game.pick else None
+                
+                result_msg = "✅ ACERTOU" if game.hit else "❌ ERROU" if game.hit is False else "⚠️ SEM PALPITE"
+                logger.info("🏁 Resultado obtido para jogo id=%s: %s | %s", game_id, outcome, result_msg)
+                
+                # Envia notificação de resultado
+                from utils.formatters import fmt_result
+                tg_send_message(
+                    fmt_result(game),
+                    message_type="result",
+                    game_id=game.id,
+                    ext_id=game.ext_id
+                )
+                
+                session.commit()
+                
+                # Tenta enviar resumo diário se todos os jogos do dia terminaram
+                try:
+                    await maybe_send_daily_wrapup()
+                except Exception:
+                    logger.exception("Erro ao verificar resumo diário após jogo id=%s", game_id)
+            else:
+                logger.warning("⚠️ Não foi possível obter resultado para jogo id=%s. Tentando novamente mais tarde...", game_id)
+                # Agenda nova tentativa em alguns minutos
+                import asyncio
+                await asyncio.sleep(300)  # 5 minutos
+                await watch_game_until_end_job(game_id)
+        except Exception as e:
+            logger.exception("Erro ao monitorar jogo id=%s: %s", game_id, e)
 
 
 async def maybe_send_daily_wrapup():
@@ -821,8 +940,26 @@ def setup_scheduler():
     """
     Registra todos os jobs no AsyncIOScheduler.
     """
-    # Importações locais para evitar dependências circulares
-    from main import morning_scan_and_publish
+    
+    # --- Relatório de Analytics (antes do ciclo reiniciar) ---
+    # Executa 5 minutos antes da varredura matinal
+    if MORNING_HOUR >= 1:
+        report_hour = MORNING_HOUR
+        report_minute = 55  # 5 minutos antes
+    else:
+        report_hour = 23
+        report_minute = 55
+    
+    scheduler.add_job(
+        generate_daily_analytics_report_job,
+        trigger=CronTrigger(hour=report_hour, minute=report_minute),
+        id="daily_analytics_report",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+        misfire_grace_time=300,
+    )
+    logger.info("📊 Relatório de analytics agendado para %02d:%02d (antes do ciclo)", report_hour, report_minute)
     
     # --- Varredura matinal (diária) ---
     scheduler.add_job(

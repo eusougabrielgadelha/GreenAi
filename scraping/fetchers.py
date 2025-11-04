@@ -69,6 +69,8 @@ async def fetch_events_from_link(url: str, backend: str):
     Baixa a página (via requests ou playwright) e parseia os eventos.
     Tenta o backend escolhido; se falhar ou vier vazio, tenta o outro.
     """
+    from utils.analytics_logger import log_extraction
+    
     def _other(b: str) -> str:
         return "requests" if b == "playwright" else "playwright"
 
@@ -83,11 +85,16 @@ async def fetch_events_from_link(url: str, backend: str):
                 html = await _fetch_requests_async(url)
             evs = try_parse_events(html, url)
             if evs:
+                log_extraction(url, len(evs), b, success=True, metadata={"attempt": attempt + 1})
                 return evs
             logger.info("Nenhum evento com backend=%s; tentando fallback…", b)
         except Exception as e:
+            error_msg = str(e)[:500]  # Limita tamanho
             logger.warning("Falha ao buscar %s com %s (tentativa %d): %s", url, b, attempt+1, e)
+            if attempt == 1:  # Última tentativa falhou
+                log_extraction(url, 0, b, success=False, error=error_msg, metadata={"attempt": attempt + 1})
 
+    log_extraction(url, 0, backend_sel, success=False, error="Nenhum evento encontrado após todas as tentativas")
     return []
 
 

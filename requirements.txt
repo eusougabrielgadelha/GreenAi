@@ -32,3 +32,9 @@ SQLAlchemy>=2.0.0,<3.0.0        # ORM para SQLite (modelos: Game, Stat, LiveGame
 # ============================================
 pytz>=2023.3,<2025.0            # Manipulação de timezones (America/Sao_Paulo)
 
+# ============================================
+# Servidor Web (Visualizador de Logs)
+# ============================================
+# NOTA: O visualizador de logs usa apenas Python padrão (http.server)
+# Não são necessárias dependências externas para a opção 1
+

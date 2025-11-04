@@ -84,6 +84,26 @@ class OddHistory(Base):
     created_at = Column(DateTime, server_default=func.now())
 
 
+class AnalyticsEvent(Base):
+    """Eventos de analytics para análise detalhada do sistema."""
+    __tablename__ = "analytics_events"
+    id = Column(Integer, primary_key=True)
+    event_type = Column(String, nullable=False, index=True)  # extraction, calculation, decision, telegram, etc
+    event_category = Column(String, nullable=False, index=True)  # scraping, betting, notification, etc
+    timestamp = Column(DateTime, server_default=func.now(), index=True)
+    game_id = Column(Integer, nullable=True, index=True)  # Referência ao Game.id (pode ser None)
+    ext_id = Column(String, nullable=True, index=True)
+    source_link = Column(Text, nullable=True)
+    # Dados do evento (JSON)
+    event_data = Column(JSON, nullable=True)  # Dados estruturados do evento
+    # Status e resultado
+    success = Column(Boolean, default=True)
+    reason = Column(Text, nullable=True)  # Motivo da supressão/envio/não envio
+    # Metadados
+    metadata = Column(JSON, nullable=True)  # Informações adicionais
+    created_at = Column(DateTime, server_default=func.now())
+
+
 def _safe_add_column(table: str, coldef: str):
     """Adiciona coluna de forma segura (evita erro se já existir)."""
     try:
@@ -97,6 +117,7 @@ def init_database():
     """Inicializa o banco de dados criando todas as tabelas e migrações."""
     Base.metadata.create_all(engine)
     Base.metadata.create_all(engine, tables=[OddHistory.__table__], checkfirst=True)
+    Base.metadata.create_all(engine, tables=[AnalyticsEvent.__table__], checkfirst=True)
 
     # Migrações rápidas
     _safe_add_column("games", "game_url TEXT")

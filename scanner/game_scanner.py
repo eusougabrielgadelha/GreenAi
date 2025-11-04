@@ -80,7 +80,13 @@ async def scan_games_for_date(
                         if (pev >= (MIN_EV - WATCHLIST_DELTA)) and (pprob >= (MIN_PROB - 0.05)):
                             minutes_until = int((start_utc - datetime.now(pytz.UTC)).total_seconds() / 60)
                             if minutes_until >= WATCHLIST_MIN_LEAD_MIN:
+                                from utils.analytics_logger import log_watchlist_action
                                 wl_add(session, ev.ext_id, url, start_utc)
+                                log_watchlist_action(
+                                    "add", ev.ext_id,
+                                    f"Próximo do threshold (EV={pev:.3f}, prob={pprob:.3f})",
+                                    metadata={"odds_home": ev.odds_home, "odds_draw": ev.odds_draw, "odds_away": ev.odds_away}
+                                )
                                 logger.info("👀 Adicionado à watchlist: %s vs %s", ev.team_home, ev.team_away)
                         continue
                     
@@ -163,14 +169,19 @@ async def scan_games_for_date(
                     # Envio imediato do sinal (APENAS alta confiança) - mantido para compatibilidade
                     try:
                         if (g.pick_prob or 0.0) >= HIGH_CONF_THRESHOLD and not was_high_conf_notified(g.pick_reason or ""):
-                            tg_send_message(fmt_pick_now(g))
+                            tg_send_message(fmt_pick_now(g), message_type="pick_now", game_id=g.id, ext_id=g.ext_id)
                             g.pick_reason = mark_high_conf_notified(g.pick_reason or "")
                             session.commit()
+                        else:
+                            # Registra que o sinal foi suprimido
+                            from utils.analytics_logger import log_signal_suppression
+                            suppression_reason = "Já foi notificado" if was_high_conf_notified(g.pick_reason or "") else f"Probabilidade abaixo do threshold ({g.pick_prob or 0.0:.3f} < {HIGH_CONF_THRESHOLD})"
+                            log_signal_suppression(g.ext_id, suppression_reason, g.pick_prob or 0.0, g.pick_ev or 0.0, game_id=g.id)
                     except Exception:
                         logger.exception("Falha ao enviar sinal imediato do jogo id=%s", g.id)
                     
-                    # Agenda lembretes e watchers (importação local para evitar circular)
-                    from main import _schedule_all_for_game
+                    # Agenda lembretes e watchers
+                    from scheduler.jobs import _schedule_all_for_game
                     await _schedule_all_for_game(g)
                     
                 except Exception:
@@ -216,11 +227,11 @@ async def send_dawn_games() -> bool:
         msg = fmt_dawn_games_summary(games, today)
         
         try:
-            tg_send_message(msg, parse_mode="HTML")
+            tg_send_message(msg, parse_mode="HTML", message_type="summary")
         except Exception:
             logger.exception("Falha ao enviar mensagem de jogos da madrugada")
             try:
-                tg_send_message(msg, parse_mode=None)
+                tg_send_message(msg, parse_mode=None, message_type="summary")
             except Exception:
                 logger.exception("Falha ao enviar mensagem de jogos da madrugada (fallback)")
         
@@ -255,11 +266,11 @@ async def send_today_games() -> bool:
         msg = fmt_today_games_summary(games, today, total_analyzed)
         
         try:
-            tg_send_message(msg, parse_mode="HTML")
+            tg_send_message(msg, parse_mode="HTML", message_type="summary")
         except Exception:
             logger.exception("Falha ao enviar mensagem de jogos de hoje")
             try:
-                tg_send_message(msg, parse_mode=None)
+                tg_send_message(msg, parse_mode=None, message_type="summary")
             except Exception:
                 logger.exception("Falha ao enviar mensagem de jogos de hoje (fallback)")
         

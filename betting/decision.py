@@ -13,18 +13,24 @@ def decide_bet(odds_home, odds_draw, odds_away, competition, teams, game_id=None
     Decisão de aposta com EV ajustado pelo movimento de odds.
     Se game_id for fornecido, consulta o histórico para calcular a variação.
     """
+    from utils.analytics_logger import log_calculation, log_decision, log_signal_suppression, log_signal_sent
+    
     MIN_ODD = 1.01
     
     names = ("home", "draw", "away")
     odds = (float(odds_home or 0.0), float(odds_draw or 0.0), float(odds_away or 0.0))
     avail = [(n, o) for n, o in zip(names, odds) if o >= MIN_ODD]
     if len(avail) < 2:
-        return False, "", 0.0, 0.0, "Odds insuficientes (menos de 2 mercados)"
+        reason = "Odds insuficientes (menos de 2 mercados)"
+        log_decision(None, False, "", 0.0, 0.0, reason, game_id=game_id, suppressed=True, suppression_reason=reason)
+        return False, "", 0.0, 0.0, reason
 
     inv = [(n, 1.0 / o) for n, o in avail]
     tot = sum(v for _, v in inv)
     if tot <= 0:
-        return False, "", 0.0, 0.0, "Probabilidades inválidas"
+        reason = "Probabilidades inválidas"
+        log_decision(None, False, "", 0.0, 0.0, reason, game_id=game_id, suppressed=True, suppression_reason=reason)
+        return False, "", 0.0, 0.0, reason
 
     true = {n: v / tot for n, v in inv}  # prob. implícitas normalizadas
     odd_map = dict(avail)
@@ -55,8 +61,19 @@ def decide_bet(odds_home, odds_draw, odds_away, competition, teams, game_id=None
     # 1) Estratégia Padrão: Valor Esperado Positivo (Ajustado)
     pick_ev, best_ev = max(adjusted_ev_map.items(), key=lambda x: x[1])
     pprob_ev = true[pick_ev]
+    
+    # Registra o cálculo
+    log_calculation(
+        None, odds[0], odds[1], odds[2], pick_ev, pprob_ev, best_ev,
+        strategy="EV positivo (ajustado)",
+        game_id=game_id,
+        metadata={"competition": competition, "teams": teams}
+    )
+    
     if best_ev >= MIN_EV and pprob_ev >= MIN_PROB:
         reason = "EV positivo (ajustado por movimento de odds)"
+        log_decision(None, True, pick_ev, pprob_ev, best_ev, reason, game_id=game_id)
+        log_signal_sent(None, reason, pick_ev, pprob_ev, best_ev, game_id=game_id)
         return True, pick_ev, pprob_ev, best_ev, reason
 
     # 2) Estratégia do Favorito "óbvio"
@@ -69,6 +86,8 @@ def decide_bet(odds_home, odds_draw, odds_away, competition, teams, game_id=None
         ev_ok = (ev_fav >= EV_TOL) or FAV_IGNORE_EV
         if prob_ok and gap_ok and ev_ok:
             reason = "Favorito claro (probabilidade)" if FAV_IGNORE_EV else "Favorito claro (regra híbrida)"
+            log_decision(None, True, pick_fav, p1, ev_fav, reason, game_id=game_id)
+            log_signal_sent(None, reason, pick_fav, p1, ev_fav, game_id=game_id)
             return True, pick_fav, p1, ev_fav, reason
 
     # 3) ESTRATÉGIA: Maior Potencial de Ganho (High Odds / High EV)
@@ -84,20 +103,30 @@ def decide_bet(odds_home, odds_draw, odds_away, competition, teams, game_id=None
             # c) EV acima do mínimo configurado (pode ser negativo, ex: -15%)
             if (odd_high >= HIGH_ODD_MIN) and (prob_high <= HIGH_ODD_MAX_PROB) and (ev_high >= HIGH_ODD_MIN_EV):
                 reason = f"Maior Potencial de Ganho (Odd: {odd_high:.2f}, EV Ajustado: {ev_high*100:.1f}%)"
+                log_decision(None, True, pick_high, prob_high, ev_high, reason, game_id=game_id)
+                log_signal_sent(None, reason, pick_high, prob_high, ev_high, game_id=game_id)
                 return True, pick_high, prob_high, ev_high, reason
 
     # Camada de Filtro de Confiança (Reforçada)
     # Prioridade 1: Qualquer mercado com probabilidade > 50%
     if pprob_ev > 0.50:
-        return True, pick_ev, pprob_ev, best_ev, "Favorito claro (probabilidade > 50%)"
+        reason = "Favorito claro (probabilidade > 50%)"
+        log_decision(None, True, pick_ev, pprob_ev, best_ev, reason, game_id=game_id)
+        log_signal_sent(None, reason, pick_ev, pprob_ev, best_ev, game_id=game_id)
+        return True, pick_ev, pprob_ev, best_ev, reason
 
     # Prioridade 2: Mercado com alta probabilidade (40%+), mesmo com EV negativo
     if pprob_ev >= 0.40:
         if best_ev >= -0.08:  # Aceita até -8% de EV
-            return True, pick_ev, pprob_ev, best_ev, "Alta confiança (probabilidade > 40%)"
+            reason = "Alta confiança (probabilidade > 40%)"
+            log_decision(None, True, pick_ev, pprob_ev, best_ev, reason, game_id=game_id)
+            log_signal_sent(None, reason, pick_ev, pprob_ev, best_ev, game_id=game_id)
+            return True, pick_ev, pprob_ev, best_ev, reason
 
     # Se nenhuma estratégia foi acionada, retorna o motivo da falha da estratégia 1.
     reason = f"EV baixo (<{int(MIN_EV*100)}%)" if best_ev < MIN_EV else f"Probabilidade baixa (<{int(MIN_PROB*100)}%)"
+    log_decision(None, False, "", pprob_ev, best_ev, reason, game_id=game_id, suppressed=True, suppression_reason=reason)
+    log_signal_suppression(None, reason, pprob_ev, best_ev, game_id=game_id)
     return False, "", pprob_ev, best_ev, reason
 
 
