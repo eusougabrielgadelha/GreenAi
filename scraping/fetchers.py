@@ -328,8 +328,11 @@ async def fetch_game_result(ext_id: str, source_link: str) -> Optional[str]:
         logger.info(f"✅ Resultado encontrado no cache para jogo {ext_id}: {cached_result}")
         return cached_result
     
-    # ETAPA 1: Tentar buscar via API XHR primeiro
-    event_id = None
+    # ETAPA 1: Tentar buscar via API XHR primeiro - APENAS SE NÃO ESTIVER DESABILITADO
+    from utils.xhr_status import is_xhr_disabled, disable_xhr
+    
+    if not is_xhr_disabled():
+        event_id = None
     try:
         # Tentar extrair event_id da URL
         if source_link:
@@ -367,9 +370,13 @@ async def fetch_game_result(ext_id: str, source_link: str) -> Optional[str]:
                             logger.debug(f"Jogo {event_id} ainda não começou (status_id={event_status_id}). Não é possível obter resultado ainda.")
                             return None
             except Exception as e:
-                logger.debug(f"Erro ao buscar resultado via API: {e}. Tentando HTML scraping...")
-    except Exception as e:
-        logger.debug(f"Erro ao processar API: {e}. Tentando HTML scraping...")
+                # API falhou - desabilitar XHR
+                disable_xhr(f"Erro na API ao buscar resultado: {type(e).__name__}")
+                logger.debug(f"Erro ao buscar resultado via API: {e}. Desabilitando XHR e usando HTML scraping...")
+        except Exception as e:
+            logger.debug(f"Erro ao processar API: {e}. Tentando HTML scraping...")
+    else:
+        logger.debug("XHR desabilitado, usando HTML scraping diretamente para resultado")
     
     # ETAPA 2: Fallback para HTML scraping
     try:
