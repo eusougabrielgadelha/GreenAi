@@ -14,7 +14,7 @@ HEADERS = {"User-Agent": USER_AGENT}
 
 def fetch_requests(url: str, has_fallback: bool = True) -> str:
     """
-    Baixa uma página usando requests (síncrono) com cookies persistentes e bypass.
+    Baixa uma página usando requests simples (síncrono) - SEM bypass, apenas HTML.
     
     Args:
         url: URL para buscar
@@ -26,48 +26,8 @@ def fetch_requests(url: str, has_fallback: bool = True) -> str:
     Raises:
         Exception: Se a requisição falhar após todas as tentativas
     """
-    from utils.bypass_detection import get_bypass_detector
-    from utils.cookie_manager import get_cookie_manager
-    
-    detector = get_bypass_detector()
-    session = detector.create_stealth_session(use_cookies=True)
-    session.headers.update(HEADERS)
-    
-    # Verificar se há cookies válidos - se não houver, fazer warm-up
-    manager = get_cookie_manager()
-    stats = manager.get_stats()
-    if stats['valid_cookies'] == 0:
-        logger.debug("Nenhum cookie válido, fazendo warm-up antes da requisição...")
-        try:
-            warmup_url = "https://betnacional.bet.br/"
-            warmup_response = session.get(warmup_url, timeout=10)
-            if warmup_response.status_code == 200:
-                from utils.cookie_manager import update_cookies_from_response
-                update_cookies_from_response(warmup_response)
-                logger.debug("Warm-up bem-sucedido, cookies obtidos")
-            else:
-                logger.warning(f"Warm-up retornou status {warmup_response.status_code}")
-        except Exception as e:
-            logger.debug(f"Erro durante warm-up: {e}")
-    
-    # Fazer requisição com bypass automático
-    response = detector.make_request_with_bypass(
-        session=session,
-        url=url,
-        method="GET",
-        params=None,
-        headers=None,
-        max_retries=3,
-        use_cookies=True,
-        has_fallback=has_fallback
-    )
-    
-    if response is None:
-        error_msg = f"Falha ao fazer requisição com bypass para {url}"
-        if has_fallback:
-            error_msg += " (fallback disponível)"
-        raise Exception(error_msg)
-    
+    # Usar requests simples sem bypass
+    response = requests.get(url, headers=HEADERS, timeout=HTML_TIMEOUT)
     response.raise_for_status()
     return response.text
 
