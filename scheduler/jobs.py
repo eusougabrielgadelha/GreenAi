@@ -557,8 +557,9 @@ async def hourly_rescan_job():
                 prev_high = (game.pick_prob or 0.0) >= HIGH_CONF_THRESHOLD
                 new_high = (pprob or 0.0) >= HIGH_CONF_THRESHOLD
 
-                # 1) Se virou ALTA CONFIANÇA agora (transição) e ainda não foi notificado -> dispara
-                if new_high and (not prev_high) and not was_high_conf_notified(game.pick_reason or ""):
+                # 1) Se virou ALTA CONFIANÇA agora (transição) e ainda não foi notificado -> dispara (usando banco de dados)
+                from utils.notification_tracker import was_pick_notified
+                if new_high and (not prev_high) and not was_pick_notified(game):
                     game.odds_home = ev.odds_home
                     game.odds_draw = ev.odds_draw
                     game.odds_away = ev.odds_away
