@@ -421,6 +421,15 @@ def parse_event_odds_from_api(json_data: Dict[str, Any]) -> Dict[str, Any]:
                 logger.debug(f"Erro ao converter odd {outcome_id}: {e}")
                 pass
     
+    # Mapeamento de market_id para tipo de mercado
+    # Baseado na estrutura da API BetNacional
+    MARKET_ID_MAP = {
+        1: {"key": "match_result", "display_name": "Resultado Final"},
+        # Placar Exato / Gols Exatos geralmente são market_id 2 ou 3
+        # Handicap Asiático geralmente é market_id 4 ou 5
+        # Vamos processar dinamicamente todos os mercados
+    }
+    
     # Converter markets para formato esperado
     # Market 1 = Resultado Final (1x2)
     if 1 in markets_dict:
@@ -441,8 +450,69 @@ def parse_event_odds_from_api(json_data: Dict[str, Any]) -> Dict[str, Any]:
                 "options": match_result
             }
     
-    # Adicionar outros mercados conforme necessário
-    # Por enquanto, focamos no mercado 1x2 (market_id=1)
+    # Processar outros mercados dinamicamente
+    # Identificar Placar Exato, Gols Exatos e Handicap Asiático pelos outcome_ids
+    
+    for market_id, market_data in markets_dict.items():
+        if market_id == 1:  # Já processado acima
+            continue
+        
+        odds = market_data.get('odds', {})
+        if not odds:
+            continue
+        
+        # Tentar identificar o tipo de mercado pelos outcome_ids
+        outcome_ids = list(odds.keys())
+        
+        # PLACAR EXATO / GOLS EXATOS
+        # Geralmente tem outcome_ids como "0-0", "1-0", "0-1", "2-1", etc.
+        if any('-' in oid or 'x' in oid.lower() for oid in outcome_ids):
+            # Verificar se é formato de placar (ex: "0-0", "1-0", "2-1")
+            score_pattern = re.compile(r'^\d+[-x]\d+$', re.IGNORECASE)
+            if any(score_pattern.match(oid) for oid in outcome_ids):
+                correct_score = {}
+                for oid, odd_val in odds.items():
+                    # Normalizar formato: "0-0" ou "0x0" → "0-0"
+                    normalized_oid = oid.replace('x', '-').replace('X', '-')
+                    correct_score[normalized_oid] = odd_val
+                
+                if correct_score:
+                    data["markets"]["correct_score"] = {
+                        "display_name": "Placar Exato",
+                        "options": correct_score,
+                        "market_id": market_id
+                    }
+                continue
+        
+        # HANDICAP ASIÁTICO
+        # Geralmente tem outcome_ids como "H1", "H2", "H-1", "H-2", "H0", "H0.5", etc.
+        # ou "AH1", "AH2", etc.
+        handicap_pattern = re.compile(r'^H[-]?[\d.]+$|^AH[-]?[\d.]+$', re.IGNORECASE)
+        if any(handicap_pattern.match(oid) for oid in outcome_ids):
+            asian_handicap = {}
+            for oid, odd_val in odds.items():
+                asian_handicap[oid] = odd_val
+            
+            if asian_handicap:
+                data["markets"]["asian_handicap"] = {
+                    "display_name": "Handicap Asiático",
+                    "options": asian_handicap,
+                    "market_id": market_id
+                }
+            continue
+        
+        # OUTROS MERCADOS - Processar genéricamente
+        # Se não identificamos, armazenar como mercado genérico
+        generic_options = {}
+        for oid, odd_val in odds.items():
+            generic_options[oid] = odd_val
+        
+        if generic_options:
+            data["markets"][f"market_{market_id}"] = {
+                "display_name": f"Mercado {market_id}",
+                "options": generic_options,
+                "market_id": market_id
+            }
     
     logger.debug(f"📊 Evento {event_id}: {len(markets_dict)} mercados extraídos via API")
     return data
@@ -1070,6 +1140,9 @@ def scrape_live_game_data(html: str, ext_id: str, source_url: str = None) -> Dic
         "Ambos os Times Marcam": "btts",
         "Total de Gols": "total_goals",
         "Placar Exato": "correct_score",
+        "Gols Exatos": "correct_score",  # Sinônimo de Placar Exato
+        "Handicap Asiático": "asian_handicap",
+        "Handicap": "asian_handicap",  # Forma abreviada
         "Marcar A Qualquer Momento (Tempo Regulamentar)": "anytime_scorer",
         "Escanteio - Resultado Final": "corners_result",
         "Cartão - Resultado Final": "cards_result",
