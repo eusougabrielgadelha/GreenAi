@@ -183,6 +183,38 @@ def fmt_pick_now(g: Game) -> str:
     return msg
 
 
+def fmt_results_batch(games: List[Game], date_local: datetime = None) -> str:
+    """Mensagem única listando resultados de vários jogos (pick e resultado real)."""
+    if date_local is None:
+        date_local = datetime.now(ZONE)
+    dstr = date_local.strftime("%d/%m/%Y")
+    header = f"Resultados das Apostas — {dstr}"
+    total = len(games)
+    hits = sum(1 for g in games if getattr(g, 'hit', None) is True)
+    misses = sum(1 for g in games if getattr(g, 'hit', None) is False)
+    acc = (hits / total * 100) if total else 0
+    msg = f"{header}\n"
+    msg += f"Resumo: {total} jogos | {hits} acertos, {misses} erros | Taxa: {acc:.0f}%\n\n"
+    # Ordena por horário
+    games_sorted = sorted(games, key=lambda g: g.start_time or datetime(1970,1,1))
+    for idx, g in enumerate(games_sorted, 1):
+        hhmm = (g.start_time.astimezone(ZONE).strftime("%H:%M") if g.start_time else "--:--")
+        pick_map = {"home": g.team_home, "draw": "Empate", "away": g.team_away}
+        pick_str = pick_map.get(g.pick, g.pick or "—")
+        outcome_str = pick_map.get(g.outcome, g.outcome or "—")
+        odd = 0.0
+        if g.pick == "home":
+            odd = float(g.odds_home or 0.0)
+        elif g.pick == "draw":
+            odd = float(g.odds_draw or 0.0)
+        elif g.pick == "away":
+            odd = float(g.odds_away or 0.0)
+        status = "ACERTOU" if g.hit else ("ERROU" if g.hit is False else "—")
+        msg += f"{idx}) {g.team_home} vs {g.team_away} — {hhmm}\n"
+        msg += f"   Pick: {pick_str} @ {odd:.2f} | Resultado real: {outcome_str} | {status}\n\n"
+    return msg
+
+
 def fmt_reminder(g: Game) -> str:
     """Lembrete T-15 min antes do início do jogo."""
     hhmm = g.start_time.astimezone(ZONE).strftime("%H:%M")

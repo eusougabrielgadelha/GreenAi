@@ -849,9 +849,7 @@ async def _handle_finished_game(session, game: Game, tracker: LiveGameTracker, n
             extra_fields={"outcome": outcome, "hit": game.hit, "result_msg": result_msg}
         )
         
-        # Envia notificação de resultado
-        from utils.formatters import fmt_result
-        tg_send_message(fmt_result(game), message_type="result", game_id=game.id, ext_id=game.ext_id)
+        # Não enviar mensagem individual; envio será consolidado pelo job periódico
         
         # Atualiza resultado de apostas combinadas que incluíam este jogo
         try:
@@ -1235,14 +1233,7 @@ async def watch_game_until_end_job(game_id: int):
                 result_msg = "✅ ACERTOU" if game.hit else "❌ ERROU" if game.hit is False else "⚠️ SEM PALPITE"
                 logger.info("🏁 Resultado obtido para jogo id=%s: %s | %s", game_id, outcome, result_msg)
                 
-                # Envia notificação de resultado
-                from utils.formatters import fmt_result
-                tg_send_message(
-                    fmt_result(game),
-                    message_type="result",
-                    game_id=game.id,
-                    ext_id=game.ext_id
-                )
+                # Não enviar mensagem individual; envio será consolidado pelo job periódico
                 
                 session.commit()
                 
@@ -1454,13 +1445,10 @@ async def fetch_finished_games_results_job():
                         result_msg = "✅ ACERTOU" if game.hit else "❌ ERROU" if game.hit is False else "⚠️ SEM PALPITE"
                         logger.info(f"✅ Resultado obtido para jogo {game.id}: {outcome} | {result_msg}")
                         
-                        # Envia notificação de resultado
-                        tg_send_message(
-                            fmt_result(game),
-                            message_type="result",
-                            game_id=game.id,
-                            ext_id=game.ext_id
-                        )
+                        # Acumula resultados desta execução para envio em lote
+                        if 'results_batch' not in locals():
+                            results_batch = []
+                        results_batch.append(game)
                         
                         # Atualiza resultado de apostas combinadas
                         try:
@@ -1476,10 +1464,18 @@ async def fetch_finished_games_results_job():
                             logger.exception(f"Erro ao atualizar apostas combinadas após jogo {game.id}")
                         
                         session.commit()
-                        logger.info(f"✅ Resultado do jogo {game.id} salvo e notificado")
+                        logger.info(f"✅ Resultado do jogo {game.id} salvo (notificação em lote)")
                     else:
                         logger.debug(f"⚠️  Não foi possível obter resultado para jogo {game.id} ainda (tentará novamente)")
-                        
+        # Após processar o bloco, se houver jogos com resultado, enviar mensagem única
+        try:
+            if 'results_batch' in locals() and results_batch:
+                from utils.formatters import fmt_results_batch
+                from notifications.telegram import tg_send_message
+                msg = fmt_results_batch(results_batch)
+                tg_send_message(msg, parse_mode=None)  # texto simples
+        except Exception:
+            logger.exception("Erro ao enviar mensagem em lote de resultados")
                 except Exception as e:
                     logger.exception(f"Erro ao buscar resultado para jogo {game.id}: {e}")
                     
