@@ -228,12 +228,24 @@ async def fetch_game_result(ext_id: str, source_link: str) -> Optional[str]:
         if HAS_PLAYWRIGHT:
             # Aguardar por seletor do live-tracker ou scoreboard, ou aguardar mais tempo
             # Tentar múltiplos seletores em sequência
-            html = await _fetch_with_playwright(
-                source_link,
-                # Aguarda diretamente o bloco de resultado final do LMT Plus
-                wait_for_selector="#lmt-match-preview .sr-lmt-plus-scb__result",
-                wait_time=5000
-            )
+            # Primeiro aguarda o liveMatchTracker, depois o bloco de resultado, dando mais tempo para o widget carregar
+            try:
+                html = await _fetch_with_playwright(
+                    source_link,
+                    wait_for_selector="[data-testid='liveMatchTracker']",
+                    wait_time=2500
+                )
+            except Exception:
+                html = await _fetch_with_playwright(source_link, wait_time=3500)
+            # Segunda passada curta aguardando o bloco de resultado explícito
+            try:
+                html = await _fetch_with_playwright(
+                    source_link,
+                    wait_for_selector="#lmt-match-preview .sr-lmt-plus-scb__result",
+                    wait_time=2500
+                )
+            except Exception:
+                pass
         else:
             html = await _fetch_requests_async(source_link)
         result = scrape_game_result(html, ext_id)

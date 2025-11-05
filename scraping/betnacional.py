@@ -1024,7 +1024,11 @@ def scrape_game_result(html: str, ext_id: str) -> Optional[str]:
             try:
                 # PRIORIDADE: Placar final no LMT Plus (sr-lmt-plus-scb__result)
                 # Ex.: <div class="sr-lmt-plus-scb__result"><div class="sr-lmt-plus-scb__result-team srm-team1">3</div><div class="sr-lmt-plus-scb__result-sep">:</div><div class="sr-lmt-plus-scb__result-team srm-team2">1</div></div>
-                result_block = lmt_container.select_one(".sr-lmt-plus-scb__result")
+                # Tentar dentro do bloco "mid" (estrutura mais comum em jogos encerrados)
+                result_block = (
+                    lmt_container.select_one(".sr-lmt-plus-scb__mid .sr-lmt-plus-scb__result")
+                    or lmt_container.select_one(".sr-lmt-plus-scb__result")
+                )
                 if result_block:
                     home_el = result_block.select_one(".sr-lmt-plus-scb__result-team.srm-team1")
                     away_el = result_block.select_one(".sr-lmt-plus-scb__result-team.srm-team2")
@@ -1181,6 +1185,39 @@ def scrape_game_result(html: str, ext_id: str) -> Optional[str]:
                         logger.debug(f"Placar inválido ignorado para {ext_id}: {home_goals_raw}-{away_goals_raw}")
             except (ValueError, IndexError, AttributeError) as e:
                 logger.debug(f"Erro ao extrair placar do live-tracker: {e}")
+
+    # ESTRATÉGIA 1B (global): Se o container não foi detectado, procurar globalmente pelo bloco de resultado do LMT Plus
+    if not lmt_tracker:
+        try:
+            global_result_block = soup.select_one("#lmt-match-preview .sr-lmt-plus-scb__mid .sr-lmt-plus-scb__result") or soup.select_one("#lmt-match-preview .sr-lmt-plus-scb__result")
+            if global_result_block:
+                home_el = global_result_block.select_one(".sr-lmt-plus-scb__result-team.srm-team1")
+                away_el = global_result_block.select_one(".sr-lmt-plus-scb__result-team.srm-team2")
+                if home_el and away_el:
+                    home_goals_raw = home_el.get_text(strip=True)
+                    away_goals_raw = away_el.get_text(strip=True)
+                    from utils.validators import validate_score
+                    validated_score = validate_score(home_goals_raw, away_goals_raw)
+                    if validated_score:
+                        home_goals, away_goals = validated_score
+                        from utils.logger import log_with_context
+                        if home_goals > away_goals:
+                            result = "home"
+                        elif away_goals > home_goals:
+                            result = "away"
+                        else:
+                            result = "draw"
+                        log_with_context(
+                            "info",
+                            f"Resultado extraído do LMT Plus (global): {home_goals}-{away_goals} → {result}",
+                            ext_id=ext_id,
+                            stage="scrape_result",
+                            status="success",
+                            extra_fields={"score": f"{home_goals}-{away_goals}", "result": result, "strategy": "lmt_plus_result_global"}
+                        )
+                        return result
+        except Exception as e:
+            logger.debug(f"Erro ao extrair placar global do LMT Plus: {e}")
 
     # ESTRATÉGIA 2: Extrair do scoreboard principal (data-testid="scoreboard")
     scoreboard = soup.find("div", {"data-testid": "scoreboard"})
