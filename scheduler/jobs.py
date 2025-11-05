@@ -1383,6 +1383,21 @@ async def fetch_finished_games_results_job():
     from utils.formatters import fmt_result
     from notifications.telegram import tg_send_message
     
+    def _normalize_datetime_to_utc(dt: datetime) -> datetime:
+        """
+        Normaliza um datetime para UTC (offset-aware).
+        
+        Se o datetime já for offset-aware, retorna convertido para UTC.
+        Se for offset-naive, assume que está em UTC e adiciona timezone UTC.
+        """
+        if dt is None:
+            return None
+        if dt.tzinfo is None:
+            # Offset-naive: assume UTC
+            return pytz.UTC.localize(dt)
+        # Offset-aware: converte para UTC
+        return dt.astimezone(pytz.UTC)
+    
     now_utc = datetime.now(pytz.UTC)
     
     try:
@@ -1412,7 +1427,9 @@ async def fetch_finished_games_results_job():
                 try:
                     # Verificar se o jogo já aconteceu (comparando data/hora)
                     # Se start_time está no passado (há mais de 30 minutos), o jogo já aconteceu
-                    time_since_start = now_utc - game.start_time
+                    # Normalizar start_time para UTC (offset-aware)
+                    game_start_utc = _normalize_datetime_to_utc(game.start_time)
+                    time_since_start = now_utc - game_start_utc
                     game_duration_minutes = 105  # Duração típica de um jogo de futebol (90min + 15min de acréscimo)
                     
                     # Verificar se já passou tempo suficiente para o jogo ter terminado

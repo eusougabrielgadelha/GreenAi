@@ -17,6 +17,22 @@ from scheduler.jobs import (
 )
 
 
+def _normalize_datetime_to_utc(dt: datetime) -> datetime:
+    """
+    Normaliza um datetime para UTC (offset-aware).
+    
+    Se o datetime já for offset-aware, retorna convertido para UTC.
+    Se for offset-naive, assume que está em UTC e adiciona timezone UTC.
+    """
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        # Offset-naive: assume UTC
+        return pytz.UTC.localize(dt)
+    # Offset-aware: converte para UTC
+    return dt.astimezone(pytz.UTC)
+
+
 async def recover_pending_games():
     """
     Recupera e continua o processamento de jogos pendentes após reiniciar o script.
@@ -46,7 +62,9 @@ async def recover_pending_games():
             for game in live_games:
                 try:
                     # IMPORTANTE: Verificar se o jogo já aconteceu (comparando data/hora)
-                    time_since_start = now_utc - game.start_time
+                    # Normalizar start_time para UTC (offset-aware)
+                    game_start_utc = _normalize_datetime_to_utc(game.start_time)
+                    time_since_start = now_utc - game_start_utc
                     game_duration_minutes = 105  # Duração típica de um jogo de futebol (90min + 15min de acréscimo)
                     
                     # Se já passou tempo suficiente para o jogo ter terminado, buscar resultado final
@@ -104,7 +122,9 @@ async def recover_pending_games():
             for game in scheduled_games:
                 try:
                     # Verificar se o jogo já aconteceu (comparando data/hora)
-                    time_since_start = now_utc - game.start_time
+                    # Normalizar start_time para UTC (offset-aware)
+                    game_start_utc = _normalize_datetime_to_utc(game.start_time)
+                    time_since_start = now_utc - game_start_utc
                     game_duration_minutes = 105  # Duração típica de um jogo de futebol (90min + 15min de acréscimo)
                     
                     # Se já passou tempo suficiente para o jogo ter terminado, buscar resultado final
@@ -132,7 +152,7 @@ async def recover_pending_games():
                         continue
                     
                     # Verificar se já começou mas ainda está em andamento
-                    if game.start_time <= now_utc:
+                    if game_start_utc <= now_utc:
                         game.status = "live"
                         logger.info(f"▶️  Jogo {game.id} ({game.ext_id}) atualizado para 'live' - {game.team_home} vs {game.team_away}")
                         # Garantir tracker
@@ -168,7 +188,9 @@ async def recover_pending_games():
                 try:
                     # Verificar se o jogo já aconteceu (comparando data/hora)
                     # Se start_time está no passado (há mais de 30 minutos), o jogo já aconteceu
-                    time_since_start = now_utc - game.start_time
+                    # Normalizar start_time para UTC (offset-aware)
+                    game_start_utc = _normalize_datetime_to_utc(game.start_time)
+                    time_since_start = now_utc - game_start_utc
                     game_duration_minutes = 105  # Duração típica de um jogo de futebol (90min + 15min de acréscimo)
                     
                     # Verificar se já passou tempo suficiente para o jogo ter terminado
