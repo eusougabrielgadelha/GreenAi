@@ -1558,17 +1558,17 @@ def setup_scheduler():
     )
     logger.info("🧹 Limpeza de cache de resultados agendada a cada 1 hora")
     
-    # --- Health checks do sistema ---
-    scheduler.add_job(
-        health_check_job,
-        trigger=IntervalTrigger(minutes=30),  # A cada 30 minutos
-        id="health_check",
-        replace_existing=True,
-        coalesce=True,
-        max_instances=1,
-        misfire_grace_time=300,
-    )
-    logger.info("🏥 Health checks do sistema agendados a cada 30 minutos")
+    # --- Health checks do sistema (DESATIVADO) ---
+    # scheduler.add_job(
+    #     health_check_job,
+    #     trigger=IntervalTrigger(minutes=30),  # A cada 30 minutos
+    #     id="health_check",
+    #     replace_existing=True,
+    #     coalesce=True,
+    #     max_instances=1,
+    #     misfire_grace_time=300,
+    # )
+    # logger.info("🏥 Health checks do sistema agendados a cada 30 minutos")
     
     # --- Busca periódica de resultados de jogos finalizados ---
     scheduler.add_job(
