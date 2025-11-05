@@ -91,14 +91,15 @@ async def recover_pending_games():
                     logger.exception(f"Erro ao recuperar jogo agendado {game.id}: {e}")
         
         # 3. Buscar jogos que terminaram mas não têm resultado
+        # Busca jogos que terminaram há mais de 30 minutos (tempo suficiente para ter resultado no site)
         finished_no_result = (
             session.query(Game)
             .filter(
                 Game.status.in_(["live", "ended"]),
                 Game.will_bet.is_(True),
                 Game.outcome.is_(None),  # Não tem resultado
-                Game.start_time >= now_utc - timedelta(days=1),  # Últimas 24 horas
-                Game.start_time <= now_utc - timedelta(minutes=90)  # Terminou há mais de 90min (tempo suficiente para ter resultado)
+                Game.start_time >= now_utc - timedelta(days=2),  # Últimas 48 horas (expandido)
+                Game.start_time <= now_utc - timedelta(minutes=30)  # Terminou há mais de 30min
             )
             .all()
         )

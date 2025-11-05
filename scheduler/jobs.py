@@ -19,7 +19,7 @@ from config.settings import (
 from utils.logger import logger
 from utils.stats import to_aware_utc, save_odd_history
 from utils.formatters import fmt_pick_now, fmt_watch_upgrade, fmt_live_bet_opportunity, format_night_scan_summary, fmt_combined_bet
-from models.database import Game, LiveGameTracker, SessionLocal
+from models.database import Game, LiveGameTracker, SessionLocal, CombinedBet
 from scraping.fetchers import fetch_events_from_link, fetch_game_result, _fetch_requests_async, _fetch_with_playwright
 from config.settings import HAS_PLAYWRIGHT
 from scraping.betnacional import parse_local_datetime, scrape_live_game_data
@@ -1371,6 +1371,87 @@ async def health_check_job():
         logger.exception(f"Erro ao executar health checks: {e}")
 
 
+async def fetch_finished_games_results_job():
+    """
+    Job periódico que busca resultados de jogos finalizados que ainda não têm resultado.
+    Garante que mesmo após reiniciar o script, os resultados sejam buscados eventualmente.
+    """
+    from datetime import datetime, timedelta
+    import pytz
+    from models.database import SessionLocal, Game
+    from scraping.fetchers import fetch_game_result
+    from utils.formatters import fmt_result
+    from notifications.telegram import tg_send_message
+    
+    now_utc = datetime.now(pytz.UTC)
+    
+    try:
+        with SessionLocal() as session:
+            # Buscar jogos que terminaram mas não têm resultado
+            # Busca jogos que terminaram há mais de 30 minutos e nas últimas 48 horas
+            finished_no_result = (
+                session.query(Game)
+                .filter(
+                    Game.status.in_(["live", "ended"]),
+                    Game.will_bet.is_(True),
+                    Game.outcome.is_(None),  # Não tem resultado
+                    Game.start_time >= now_utc - timedelta(days=2),  # Últimas 48 horas
+                    Game.start_time <= now_utc - timedelta(minutes=30)  # Terminou há mais de 30min
+                )
+                .all()
+            )
+            
+            if not finished_no_result:
+                logger.debug("✅ Nenhum jogo finalizado sem resultado para buscar")
+                return
+            
+            logger.info(f"🔍 Buscando resultados para {len(finished_no_result)} jogo(s) finalizado(s) sem resultado")
+            
+            for game in finished_no_result:
+                try:
+                    logger.debug(f"🔎 Buscando resultado para jogo {game.id} ({game.ext_id}) - {game.team_home} vs {game.team_away}")
+                    outcome = await fetch_game_result(game.ext_id, game.game_url or game.source_link)
+                    
+                    if outcome:
+                        game.outcome = outcome
+                        game.status = "ended"
+                        game.hit = (outcome == game.pick) if game.pick else None
+                        result_msg = "✅ ACERTOU" if game.hit else "❌ ERROU" if game.hit is False else "⚠️ SEM PALPITE"
+                        logger.info(f"✅ Resultado obtido para jogo {game.id}: {outcome} | {result_msg}")
+                        
+                        # Envia notificação de resultado
+                        tg_send_message(
+                            fmt_result(game),
+                            message_type="result",
+                            game_id=game.id,
+                            ext_id=game.ext_id
+                        )
+                        
+                        # Atualiza resultado de apostas combinadas
+                        try:
+                            from betting.combined_bets import update_combined_bet_result
+                            pending_bets = session.query(CombinedBet).filter(
+                                CombinedBet.status == "pending"
+                            ).all()
+                            
+                            for bet in pending_bets:
+                                if game.id in bet.game_ids:
+                                    update_combined_bet_result(bet, session)
+                        except Exception:
+                            logger.exception(f"Erro ao atualizar apostas combinadas após jogo {game.id}")
+                        
+                        session.commit()
+                        logger.info(f"✅ Resultado do jogo {game.id} salvo e notificado")
+                    else:
+                        logger.debug(f"⚠️  Não foi possível obter resultado para jogo {game.id} ainda (tentará novamente)")
+                        
+                except Exception as e:
+                    logger.exception(f"Erro ao buscar resultado para jogo {game.id}: {e}")
+                    
+    except Exception as e:
+        logger.exception(f"Erro ao executar job de busca de resultados: {e}")
+
+
 def setup_scheduler():
     """
     Registra todos os jobs no AsyncIOScheduler.
@@ -1455,7 +1536,19 @@ def setup_scheduler():
         misfire_grace_time=300,
     )
     logger.info("🏥 Health checks do sistema agendados a cada 30 minutos")
-
+    
+    # --- Busca periódica de resultados de jogos finalizados ---
+    scheduler.add_job(
+        fetch_finished_games_results_job,
+        trigger=IntervalTrigger(minutes=30),  # A cada 30 minutos
+        id="fetch_finished_results",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+        misfire_grace_time=300,
+    )
+    logger.info("🔍 Busca de resultados de jogos finalizados agendada a cada 30 minutos")
+    
     # --- Reavaliação horária dos jogos do dia ---
     scheduler.add_job(
         hourly_rescan_job,
