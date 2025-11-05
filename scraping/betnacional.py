@@ -986,15 +986,211 @@ def scrape_game_result(html: str, ext_id: str) -> Optional[str]:
     Tenta extrair o resultado final (home/draw/away) da página HTML de um jogo encerrado.
     
     Usa múltiplas estratégias para maior robustez:
-    1. Extrair do placar final (MAIS CONFIÁVEL)
-    2. Buscar em elementos de resultado final
-    3. Procurar texto "Vencedor" (fallback)
-    4. Procurar classes CSS de vencedor (fallback)
+    1. Detectar se jogo está finalizado (procurar por "Término", "Finalizado", etc.)
+    2. Extrair do placar final do live-tracker-component (MAIS CONFIÁVEL)
+    3. Extrair do placar final do scoreboard (data-testid="scoreboard")
+    4. Buscar em elementos de resultado final
+    5. Procurar texto "Vencedor" (fallback)
+    6. Procurar classes CSS de vencedor (fallback)
     """
     soup = BeautifulSoup(html, "html.parser")
 
-    # ESTRATÉGIA 1: Extrair do placar final (MAIS CONFIÁVEL)
-    # Usa o mesmo método que scrape_live_game_data() usa para placar
+    # PRIMEIRO: Verificar se o jogo está finalizado
+    # Procurar por indicadores de jogo finalizado
+    ended_indicators = [
+        "Término", "Finalizado", "Encerrado", "Terminado", "Final",
+        "FT", "Fim", "Terminou", "Acabou"
+    ]
+    html_text_lower = html.lower()
+    is_ended = any(indicator.lower() in html_text_lower for indicator in ended_indicators)
+    
+    if not is_ended:
+        # Procurar por status no live-tracker-component
+        lmt_tracker = soup.find("div", {"data-testid": "liveMatchTracker"})
+        if lmt_tracker:
+            tracker_text = lmt_tracker.get_text(" ", strip=True).lower()
+            is_ended = any(indicator.lower() in tracker_text for indicator in ended_indicators)
+    
+    # Se não detectou que está finalizado, ainda pode tentar extrair resultado (pode estar em transição)
+    if not is_ended:
+        logger.debug(f"Jogo {ext_id}: não detectado como finalizado, mas tentando extrair resultado mesmo assim")
+
+    # ESTRATÉGIA 1: Extrair do placar final do live-tracker-component (MAIS CONFIÁVEL)
+    # Procurar primeiro no data-testid="liveMatchTracker" conforme especificado pelo usuário
+    lmt_tracker = soup.find("div", {"data-testid": "liveMatchTracker"})
+    if lmt_tracker:
+        lmt_container = lmt_tracker.find("div", id="lmt-match-preview") or lmt_tracker.find("div", class_=lambda x: x and "live-tracker-component" in str(x))
+        if lmt_container:
+            try:
+                # Tentar extrair placar do scoreboard dentro do live-tracker
+                scoreboard = lmt_container.find("div", {"data-testid": "scoreboard"})
+                if scoreboard:
+                    # Procurar por placar na estrutura do scoreboard
+                    score_elements = scoreboard.select(".sr-lmt-1-sbr__score, [class*='score']")
+                    if len(score_elements) >= 2:
+                        home_goals_raw = score_elements[0].get_text(strip=True)
+                        away_goals_raw = score_elements[1].get_text(strip=True)
+                        
+                        # Validar placar antes de usar
+                        from utils.validators import validate_score
+                        validated_score = validate_score(home_goals_raw, away_goals_raw)
+                        if validated_score:
+                            home_goals, away_goals = validated_score
+                            
+                            # Determinar resultado pelo placar
+                            from utils.logger import log_with_context
+                            if home_goals > away_goals:
+                                result = "home"
+                                log_with_context(
+                                    "info",
+                                    f"Resultado extraído do placar final (live-tracker): {home_goals}-{away_goals} → home",
+                                    ext_id=ext_id,
+                                    stage="scrape_result",
+                                    status="success",
+                                    extra_fields={"score": f"{home_goals}-{away_goals}", "result": result, "strategy": "live_tracker_scoreboard"}
+                                )
+                                return result
+                            elif away_goals > home_goals:
+                                result = "away"
+                                log_with_context(
+                                    "info",
+                                    f"Resultado extraído do placar final (live-tracker): {home_goals}-{away_goals} → away",
+                                    ext_id=ext_id,
+                                    stage="scrape_result",
+                                    status="success",
+                                    extra_fields={"score": f"{home_goals}-{away_goals}", "result": result, "strategy": "live_tracker_scoreboard"}
+                                )
+                                return result
+                            else:
+                                result = "draw"
+                                log_with_context(
+                                    "info",
+                                    f"Resultado extraído do placar final (live-tracker): {home_goals}-{away_goals} → draw",
+                                    ext_id=ext_id,
+                                    stage="scrape_result",
+                                    status="success",
+                                    extra_fields={"score": f"{home_goals}-{away_goals}", "result": result, "strategy": "live_tracker_scoreboard"}
+                                )
+                                return result
+                
+                # Fallback: tentar extrair placar diretamente do lmt-container
+                score_elements = lmt_container.select(".sr-lmt-1-sbr__score")
+                if len(score_elements) >= 2:
+                    home_goals_raw = score_elements[0].get_text(strip=True)
+                    away_goals_raw = score_elements[1].get_text(strip=True)
+                    
+                    # Validar placar antes de usar
+                    from utils.validators import validate_score
+                    validated_score = validate_score(home_goals_raw, away_goals_raw)
+                    if validated_score:
+                        home_goals, away_goals = validated_score
+                        
+                        # Determinar resultado pelo placar
+                        from utils.logger import log_with_context
+                        if home_goals > away_goals:
+                            result = "home"
+                            log_with_context(
+                                "info",
+                                f"Resultado extraído do placar final (lmt-container): {home_goals}-{away_goals} → home",
+                                ext_id=ext_id,
+                                stage="scrape_result",
+                                status="success",
+                                extra_fields={"score": f"{home_goals}-{away_goals}", "result": result, "strategy": "lmt_container"}
+                            )
+                            return result
+                        elif away_goals > home_goals:
+                            result = "away"
+                            log_with_context(
+                                "info",
+                                f"Resultado extraído do placar final (lmt-container): {home_goals}-{away_goals} → away",
+                                ext_id=ext_id,
+                                stage="scrape_result",
+                                status="success",
+                                extra_fields={"score": f"{home_goals}-{away_goals}", "result": result, "strategy": "lmt_container"}
+                            )
+                            return result
+                        else:
+                            result = "draw"
+                            log_with_context(
+                                "info",
+                                f"Resultado extraído do placar final (lmt-container): {home_goals}-{away_goals} → draw",
+                                ext_id=ext_id,
+                                stage="scrape_result",
+                                status="success",
+                                extra_fields={"score": f"{home_goals}-{away_goals}", "result": result, "strategy": "lmt_container"}
+                            )
+                            return result
+                    else:
+                        logger.debug(f"Placar inválido ignorado para {ext_id}: {home_goals_raw}-{away_goals_raw}")
+            except (ValueError, IndexError, AttributeError) as e:
+                logger.debug(f"Erro ao extrair placar do live-tracker: {e}")
+
+    # ESTRATÉGIA 2: Extrair do scoreboard principal (data-testid="scoreboard")
+    scoreboard = soup.find("div", {"data-testid": "scoreboard"})
+    if scoreboard:
+        try:
+            # Tentar extrair placar da tabela do scoreboard
+            table = scoreboard.find("table")
+            if table:
+                rows = table.find_all("tr")
+                if len(rows) >= 3:
+                    # Linha 1: time da casa (geralmente linha 1)
+                    home_row = rows[1]
+                    home_cells = home_row.find_all("td")
+                    if len(home_cells) >= 6:
+                        home_goals_raw = home_cells[5].get_text(strip=True)  # Última coluna geralmente é gols
+                        
+                    # Linha 2: time visitante (geralmente linha 2)
+                    away_row = rows[2]
+                    away_cells = away_row.find_all("td")
+                    if len(away_cells) >= 6:
+                        away_goals_raw = away_cells[5].get_text(strip=True)
+                        
+                        # Validar placar antes de usar
+                        from utils.validators import validate_score
+                        validated_score = validate_score(home_goals_raw, away_goals_raw)
+                        if validated_score:
+                            home_goals, away_goals = validated_score
+                            
+                            # Determinar resultado pelo placar
+                            from utils.logger import log_with_context
+                            if home_goals > away_goals:
+                                result = "home"
+                                log_with_context(
+                                    "info",
+                                    f"Resultado extraído do scoreboard: {home_goals}-{away_goals} → home",
+                                    ext_id=ext_id,
+                                    stage="scrape_result",
+                                    status="success",
+                                    extra_fields={"score": f"{home_goals}-{away_goals}", "result": result, "strategy": "scoreboard_table"}
+                                )
+                                return result
+                            elif away_goals > home_goals:
+                                result = "away"
+                                log_with_context(
+                                    "info",
+                                    f"Resultado extraído do scoreboard: {home_goals}-{away_goals} → away",
+                                    ext_id=ext_id,
+                                    stage="scrape_result",
+                                    status="success",
+                                    extra_fields={"score": f"{home_goals}-{away_goals}", "result": result, "strategy": "scoreboard_table"}
+                                )
+                                return result
+                            else:
+                                result = "draw"
+                                log_with_context(
+                                    "info",
+                                    f"Resultado extraído do scoreboard: {home_goals}-{away_goals} → draw",
+                                    ext_id=ext_id,
+                                    stage="scrape_result",
+                                    status="success",
+                                    extra_fields={"score": f"{home_goals}-{away_goals}", "result": result, "strategy": "scoreboard_table"}
+                                )
+                                return result
+        except (ValueError, IndexError, AttributeError) as e:
+            logger.debug(f"Erro ao extrair placar do scoreboard: {e}")
+
+    # ESTRATÉGIA 3: Extrair do placar final (fallback para estrutura antiga)
     lmt_container = soup.find("div", id="lmt-match-preview")
     if lmt_container:
         try:

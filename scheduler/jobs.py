@@ -1388,15 +1388,16 @@ async def fetch_finished_games_results_job():
     try:
         with SessionLocal() as session:
             # Buscar jogos que terminaram mas não têm resultado
+            # IMPORTANTE: Verificar se o jogo já aconteceu (data/hora) antes de buscar resultado
             # Busca jogos que terminaram há mais de 30 minutos e nas últimas 48 horas
             finished_no_result = (
                 session.query(Game)
                 .filter(
-                    Game.status.in_(["live", "ended"]),
+                    Game.status.in_(["live", "ended", "scheduled"]),  # Incluir scheduled também
                     Game.will_bet.is_(True),
                     Game.outcome.is_(None),  # Não tem resultado
                     Game.start_time >= now_utc - timedelta(days=2),  # Últimas 48 horas
-                    Game.start_time <= now_utc - timedelta(minutes=30)  # Terminou há mais de 30min
+                    Game.start_time <= now_utc - timedelta(minutes=30)  # Terminou há mais de 30min (já aconteceu)
                 )
                 .all()
             )
@@ -1409,7 +1410,24 @@ async def fetch_finished_games_results_job():
             
             for game in finished_no_result:
                 try:
-                    logger.debug(f"🔎 Buscando resultado para jogo {game.id} ({game.ext_id}) - {game.team_home} vs {game.team_away}")
+                    # Verificar se o jogo já aconteceu (comparando data/hora)
+                    # Se start_time está no passado (há mais de 30 minutos), o jogo já aconteceu
+                    time_since_start = now_utc - game.start_time
+                    game_duration_minutes = 105  # Duração típica de um jogo de futebol (90min + 15min de acréscimo)
+                    
+                    # Verificar se já passou tempo suficiente para o jogo ter terminado
+                    if time_since_start.total_seconds() / 60 < game_duration_minutes:
+                        # Jogo ainda pode estar em andamento, pular
+                        logger.debug(f"⏳ Jogo {game.id} ainda pode estar em andamento (iniciou há {int(time_since_start.total_seconds() / 60)} minutos)")
+                        continue
+                    
+                    logger.info(f"🔎 Buscando resultado para jogo {game.id} ({game.ext_id}) - {game.team_home} vs {game.team_away} (iniciou há {int(time_since_start.total_seconds() / 60)} minutos)")
+                    
+                    # Atualizar status para "ended" se ainda não estiver
+                    if game.status != "ended":
+                        game.status = "ended"
+                        logger.debug(f"📝 Status do jogo {game.id} atualizado para 'ended'")
+                    
                     outcome = await fetch_game_result(game.ext_id, game.game_url or game.source_link)
                     
                     if outcome:

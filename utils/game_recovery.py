@@ -45,6 +45,35 @@ async def recover_pending_games():
             logger.info(f"🔄 Recuperando {len(live_games)} jogo(s) ao vivo pendente(s)")
             for game in live_games:
                 try:
+                    # IMPORTANTE: Verificar se o jogo já aconteceu (comparando data/hora)
+                    time_since_start = now_utc - game.start_time
+                    game_duration_minutes = 105  # Duração típica de um jogo de futebol (90min + 15min de acréscimo)
+                    
+                    # Se já passou tempo suficiente para o jogo ter terminado, buscar resultado final
+                    if time_since_start.total_seconds() / 60 >= game_duration_minutes:
+                        logger.info(f"⏰ Jogo {game.id} ({game.ext_id}) já deveria ter terminado (iniciou há {int(time_since_start.total_seconds() / 60)} minutos), buscando resultado final...")
+                        game.status = "ended"
+                        
+                        # Buscar resultado final
+                        outcome = await fetch_game_result(game.ext_id, game.game_url or game.source_link)
+                        if outcome:
+                            game.outcome = outcome
+                            game.hit = (outcome == game.pick) if game.pick else None
+                            result_msg = "✅ ACERTOU" if game.hit else "❌ ERROU" if game.hit is False else "⚠️ SEM PALPITE"
+                            logger.info(f"✅ Resultado obtido para jogo {game.id}: {outcome} | {result_msg}")
+                            
+                            # Envia notificação de resultado
+                            from utils.formatters import fmt_result
+                            from notifications.telegram import tg_send_message
+                            tg_send_message(fmt_result(game), message_type="result", game_id=game.id, ext_id=game.ext_id)
+                            
+                            session.commit()
+                        else:
+                            logger.warning(f"⚠️  Não foi possível obter resultado para jogo {game.id} ainda (tentará novamente no próximo ciclo)")
+                            session.commit()
+                        continue
+                    
+                    # Jogo ainda pode estar em andamento - fazer análise ao vivo
                     # Garantir que tracker existe
                     tracker = _ensure_tracker_exists(session, game, now_utc)
                     # Atualizar tracker com dados atuais
@@ -74,7 +103,35 @@ async def recover_pending_games():
             logger.info(f"🔄 Recuperando {len(scheduled_games)} jogo(s) agendado(s) para monitoramento")
             for game in scheduled_games:
                 try:
-                    # Verificar se já começou
+                    # Verificar se o jogo já aconteceu (comparando data/hora)
+                    time_since_start = now_utc - game.start_time
+                    game_duration_minutes = 105  # Duração típica de um jogo de futebol (90min + 15min de acréscimo)
+                    
+                    # Se já passou tempo suficiente para o jogo ter terminado, buscar resultado final
+                    if time_since_start.total_seconds() / 60 >= game_duration_minutes:
+                        logger.info(f"⏰ Jogo agendado {game.id} ({game.ext_id}) já deveria ter terminado (iniciou há {int(time_since_start.total_seconds() / 60)} minutos), buscando resultado final...")
+                        game.status = "ended"
+                        
+                        # Buscar resultado final
+                        outcome = await fetch_game_result(game.ext_id, game.game_url or game.source_link)
+                        if outcome:
+                            game.outcome = outcome
+                            game.hit = (outcome == game.pick) if game.pick else None
+                            result_msg = "✅ ACERTOU" if game.hit else "❌ ERROU" if game.hit is False else "⚠️ SEM PALPITE"
+                            logger.info(f"✅ Resultado obtido para jogo {game.id}: {outcome} | {result_msg}")
+                            
+                            # Envia notificação de resultado
+                            from utils.formatters import fmt_result
+                            from notifications.telegram import tg_send_message
+                            tg_send_message(fmt_result(game), message_type="result", game_id=game.id, ext_id=game.ext_id)
+                            
+                            session.commit()
+                        else:
+                            logger.warning(f"⚠️  Não foi possível obter resultado para jogo {game.id} ainda (tentará novamente no próximo ciclo)")
+                            session.commit()
+                        continue
+                    
+                    # Verificar se já começou mas ainda está em andamento
                     if game.start_time <= now_utc:
                         game.status = "live"
                         logger.info(f"▶️  Jogo {game.id} ({game.ext_id}) atualizado para 'live' - {game.team_home} vs {game.team_away}")
@@ -91,15 +148,16 @@ async def recover_pending_games():
                     logger.exception(f"Erro ao recuperar jogo agendado {game.id}: {e}")
         
         # 3. Buscar jogos que terminaram mas não têm resultado
+        # IMPORTANTE: Verificar se o jogo já aconteceu (data/hora) antes de buscar resultado
         # Busca jogos que terminaram há mais de 30 minutos (tempo suficiente para ter resultado no site)
         finished_no_result = (
             session.query(Game)
             .filter(
-                Game.status.in_(["live", "ended"]),
+                Game.status.in_(["live", "ended", "scheduled"]),  # Incluir scheduled também
                 Game.will_bet.is_(True),
                 Game.outcome.is_(None),  # Não tem resultado
                 Game.start_time >= now_utc - timedelta(days=2),  # Últimas 48 horas (expandido)
-                Game.start_time <= now_utc - timedelta(minutes=30)  # Terminou há mais de 30min
+                Game.start_time <= now_utc - timedelta(minutes=30)  # Terminou há mais de 30min (já aconteceu)
             )
             .all()
         )
@@ -108,11 +166,27 @@ async def recover_pending_games():
             logger.info(f"🔍 Buscando resultados finais para {len(finished_no_result)} jogo(s) que terminaram sem resultado")
             for game in finished_no_result:
                 try:
-                    logger.info(f"🔎 Buscando resultado final para jogo {game.id} ({game.ext_id}) - {game.team_home} vs {game.team_away}")
+                    # Verificar se o jogo já aconteceu (comparando data/hora)
+                    # Se start_time está no passado (há mais de 30 minutos), o jogo já aconteceu
+                    time_since_start = now_utc - game.start_time
+                    game_duration_minutes = 105  # Duração típica de um jogo de futebol (90min + 15min de acréscimo)
+                    
+                    # Verificar se já passou tempo suficiente para o jogo ter terminado
+                    if time_since_start.total_seconds() / 60 < game_duration_minutes:
+                        # Jogo ainda pode estar em andamento, pular
+                        logger.debug(f"⏳ Jogo {game.id} ainda pode estar em andamento (iniciou há {int(time_since_start.total_seconds() / 60)} minutos)")
+                        continue
+                    
+                    logger.info(f"🔎 Buscando resultado final para jogo {game.id} ({game.ext_id}) - {game.team_home} vs {game.team_away} (iniciou há {int(time_since_start.total_seconds() / 60)} minutos)")
+                    
+                    # Atualizar status para "ended" se ainda não estiver
+                    if game.status != "ended":
+                        game.status = "ended"
+                        logger.debug(f"📝 Status do jogo {game.id} atualizado para 'ended'")
+                    
                     outcome = await fetch_game_result(game.ext_id, game.game_url or game.source_link)
                     if outcome:
                         game.outcome = outcome
-                        game.status = "ended"
                         game.hit = (outcome == game.pick) if game.pick else None
                         result_msg = "✅ ACERTOU" if game.hit else "❌ ERROU" if game.hit is False else "⚠️ SEM PALPITE"
                         logger.info(f"✅ Resultado obtido para jogo {game.id}: {outcome} | {result_msg}")
@@ -124,7 +198,7 @@ async def recover_pending_games():
                         
                         session.commit()
                     else:
-                        logger.warning(f"⚠️  Não foi possível obter resultado para jogo {game.id} ainda")
+                        logger.warning(f"⚠️  Não foi possível obter resultado para jogo {game.id} ainda (tentará novamente no próximo ciclo)")
                 except Exception as e:
                     logger.exception(f"Erro ao buscar resultado final para jogo {game.id}: {e}")
         
