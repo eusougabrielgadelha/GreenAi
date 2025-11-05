@@ -74,6 +74,21 @@ def show_accuracy_stats():
         print("\nESTATISTICAS DE ACERTO")
         print(f"   Taxa geral: {accuracy:.2f}% ({hits}/{total})")
         
+        # Por nível de confiança
+        from utils.stats import get_accuracy_by_confidence
+        conf_stats = get_accuracy_by_confidence(session)
+        
+        print("\n   Por nível de confiança:")
+        if conf_stats['high']['total'] > 0:
+            print(f"   • 🔥 Alta (≥60%): {conf_stats['high']['accuracy_percent']:.2f}% "
+                  f"({conf_stats['high']['hits']}/{conf_stats['high']['total']})")
+        if conf_stats['medium']['total'] > 0:
+            print(f"   • ⭐ Média (40-60%): {conf_stats['medium']['accuracy_percent']:.2f}% "
+                  f"({conf_stats['medium']['hits']}/{conf_stats['medium']['total']})")
+        if conf_stats['low']['total'] > 0:
+            print(f"   • 💡 Baixa (<40%): {conf_stats['low']['accuracy_percent']:.2f}% "
+                  f"({conf_stats['low']['hits']}/{conf_stats['low']['total']})")
+        
         if by_pick:
             print("\n   Por tipo de pick:")
             for pick, stats in sorted(by_pick.items()):
