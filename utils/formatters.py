@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Any, Dict, List
 from models.database import Game, SessionLocal, CombinedBet
 from config.settings import ZONE, HIGH_CONF_THRESHOLD
-from utils.stats import global_accuracy, get_weekly_stats, to_aware_utc, get_lifetime_accuracy, get_daily_summary
+from utils.stats import global_accuracy, get_weekly_stats, to_aware_utc, get_lifetime_accuracy, get_daily_summary, get_accuracy_by_confidence
 
 
 def h(b: str) -> str:
@@ -658,9 +658,28 @@ def fmt_daily_summary(session, date_local: datetime = None) -> str:
         msg += f"├ Assertividade: <b>{lifetime['accuracy_percent']:.1f}%</b>\n"
         if lifetime['average_odd'] > 0:
             msg += f"├ Odd média: <b>{lifetime['average_odd']:.2f}</b>\n"
-            msg += f"└ ROI estimado: <b>{lifetime['roi']:+.1f}%</b>\n"
+            msg += f"└ ROI estimado: <b>{lifetime['roi']:+.1f}%</b>\n\n"
         else:
-            msg += f"└ ROI: <b>—</b>\n"
+            msg += f"└ ROI: <b>—</b>\n\n"
+        
+        # Assertividade por nível de confiança
+        conf_stats = get_accuracy_by_confidence(session)
+        msg += f"📊 <b>ASSERTIVIDADE POR CONFIANÇA</b>\n"
+        
+        if conf_stats['high']['total'] > 0:
+            msg += f"├ 🔥 Alta (≥60%): <b>{conf_stats['high']['accuracy_percent']:.1f}%</b> "
+            msg += f"({conf_stats['high']['hits']}/{conf_stats['high']['total']})\n"
+        
+        if conf_stats['medium']['total'] > 0:
+            msg += f"├ ⭐ Média (40-60%): <b>{conf_stats['medium']['accuracy_percent']:.1f}%</b> "
+            msg += f"({conf_stats['medium']['hits']}/{conf_stats['medium']['total']})\n"
+        
+        if conf_stats['low']['total'] > 0:
+            msg += f"└ 💡 Baixa (<40%): <b>{conf_stats['low']['accuracy_percent']:.1f}%</b> "
+            msg += f"({conf_stats['low']['hits']}/{conf_stats['low']['total']})\n"
+        else:
+            if conf_stats['high']['total'] > 0 or conf_stats['medium']['total'] > 0:
+                msg += f"└ 💡 Baixa: <b>—</b> (sem dados)\n"
     
     # Mensagem motivacional
     if summary['accuracy'] >= 60:
@@ -698,6 +717,25 @@ def fmt_lifetime_stats(session) -> str:
         msg += f"└ ROI estimado: <b>{lifetime['roi']:+.1f}%</b>\n\n"
     else:
         msg += f"└ ROI: <b>—</b>\n\n"
+    
+    # Assertividade por nível de confiança
+    conf_stats = get_accuracy_by_confidence(session)
+    msg += f"📊 <b>ASSERTIVIDADE POR CONFIANÇA</b>\n"
+    
+    if conf_stats['high']['total'] > 0:
+        msg += f"├ 🔥 Alta (≥60%): <b>{conf_stats['high']['accuracy_percent']:.1f}%</b> "
+        msg += f"({conf_stats['high']['hits']}/{conf_stats['high']['total']})\n"
+    
+    if conf_stats['medium']['total'] > 0:
+        msg += f"├ ⭐ Média (40-60%): <b>{conf_stats['medium']['accuracy_percent']:.1f}%</b> "
+        msg += f"({conf_stats['medium']['hits']}/{conf_stats['medium']['total']})\n"
+    
+    if conf_stats['low']['total'] > 0:
+        msg += f"└ 💡 Baixa (<40%): <b>{conf_stats['low']['accuracy_percent']:.1f}%</b> "
+        msg += f"({conf_stats['low']['hits']}/{conf_stats['low']['total']})\n\n"
+    else:
+        if conf_stats['high']['total'] > 0 or conf_stats['medium']['total'] > 0:
+            msg += f"└ 💡 Baixa: <b>—</b> (sem dados)\n\n"
     
     # Interpretação do ROI
     if lifetime['roi'] > 0:

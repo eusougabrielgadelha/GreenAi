@@ -161,6 +161,69 @@ def get_daily_summary(session, date_local: datetime = None) -> Dict[str, Any]:
     }
 
 
+def get_accuracy_by_confidence(session) -> Dict[str, Any]:
+    """
+    Calcula assertividade segmentada por nível de confiança.
+    
+    Retorna estatísticas separadas para:
+    - Alta confiança (pick_prob >= 0.60)
+    - Média confiança (0.40 <= pick_prob < 0.60)
+    - Baixa confiança (pick_prob < 0.40)
+    
+    Returns:
+        Dict com estatísticas por nível de confiança
+    """
+    from config.settings import HIGH_CONF_THRESHOLD
+    
+    # Todos os jogos com resultado verificado
+    all_games = session.query(Game).filter(
+        Game.hit.isnot(None),
+        Game.status == "ended",
+        Game.pick_prob.isnot(None)
+    ).all()
+    
+    if not all_games:
+        return {
+            'high': {'total': 0, 'hits': 0, 'accuracy': 0.0, 'accuracy_percent': 0.0},
+            'medium': {'total': 0, 'hits': 0, 'accuracy': 0.0, 'accuracy_percent': 0.0},
+            'low': {'total': 0, 'hits': 0, 'accuracy': 0.0, 'accuracy_percent': 0.0}
+        }
+    
+    # Separa por nível de confiança
+    high_conf_games = []
+    medium_conf_games = []
+    low_conf_games = []
+    
+    for game in all_games:
+        prob = game.pick_prob or 0.0
+        if prob >= HIGH_CONF_THRESHOLD:
+            high_conf_games.append(game)
+        elif prob >= 0.40:
+            medium_conf_games.append(game)
+        else:
+            low_conf_games.append(game)
+    
+    def calc_accuracy(games):
+        if not games:
+            return {'total': 0, 'hits': 0, 'accuracy': 0.0, 'accuracy_percent': 0.0}
+        total = len(games)
+        hits = sum(1 for g in games if g.hit is True)
+        accuracy = hits / total if total > 0 else 0.0
+        return {
+            'total': total,
+            'hits': hits,
+            'misses': total - hits,
+            'accuracy': accuracy,
+            'accuracy_percent': accuracy * 100
+        }
+    
+    return {
+        'high': calc_accuracy(high_conf_games),
+        'medium': calc_accuracy(medium_conf_games),
+        'low': calc_accuracy(low_conf_games)
+    }
+
+
 def save_odd_history(session, game) -> bool:
     """Salva histórico de odds para um jogo."""
     from models.database import OddHistory
