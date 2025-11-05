@@ -14,7 +14,8 @@ from config.settings import (
     APP_TZ, MORNING_HOUR, WATCHLIST_RESCAN_MIN, ZONE,
     HIGH_CONF_THRESHOLD, MIN_EV, MIN_PROB, WATCHLIST_DELTA, WATCHLIST_MIN_LEAD_MIN,
     START_ALERT_MIN, LATE_WATCH_WINDOW_MIN, get_all_betting_links,
-    is_high_conf, was_high_conf_notified, mark_high_conf_notified
+    is_high_conf, was_high_conf_notified, mark_high_conf_notified,
+    ONLY_HIGH_CONF_GAMES
 )
 from utils.logger import logger
 from utils.stats import to_aware_utc, save_odd_history
@@ -157,11 +158,19 @@ async def night_scan_for_early_games():
 
                     # PASSE LIVRE: alta confiança entra mesmo sem will
                     free_pass = is_high_conf(pprob)
-                    if not will and free_pass:
-                        will = True
-                        reason = (reason or "Passe livre") + " | HIGH_TRUST"
                     
-                    should_save = will  # Para madrugada, só salva se will=True (já inclui free_pass)
+                    # Se flag ONLY_HIGH_CONF_GAMES estiver ativa, apenas seleciona alta confiança
+                    if ONLY_HIGH_CONF_GAMES:
+                        should_save = free_pass  # Apenas alta confiança
+                        if free_pass and not will:
+                            will = True
+                            reason = (reason or "Apenas alta confiança") + " | HIGH_CONF_ONLY"
+                    else:
+                        # Comportamento normal
+                        if not will and free_pass:
+                            will = True
+                            reason = (reason or "Passe livre") + " | HIGH_TRUST"
+                        should_save = will  # Para madrugada, só salva se will=True (já inclui free_pass)
                     
                     # SALVAR TODOS OS JOGOS NO BANCO (mesmo os não selecionados)
                     # Upsert do jogo (salva sempre, mas will_bet só é True se selecionado)
@@ -401,7 +410,12 @@ async def rescan_watchlist_job():
 
             # PASSE LIVRE: alta confiança promove mesmo sem cruzar thresholds
             free_pass = is_high_conf(pprob)
-            promote = free_pass or (will and (pprob >= MIN_PROB) and (pev >= MIN_EV))
+            
+            # Se flag ONLY_HIGH_CONF_GAMES estiver ativa, apenas promove alta confiança
+            if ONLY_HIGH_CONF_GAMES:
+                promote = free_pass  # Apenas alta confiança
+            else:
+                promote = free_pass or (will and (pprob >= MIN_PROB) and (pev >= MIN_EV))
 
             if promote:
                 # UPSERT seguro

@@ -69,6 +69,8 @@ if not os.getenv("REQUESTS_TIMEOUT"):
 # ================================
 HIGH_CONF_THRESHOLD = float(os.getenv("HIGH_CONF_THRESHOLD", "0.60"))
 HIGH_CONF_SENT_MARK = "[HC_SENT]"
+# Flag para buscar apenas jogos de alta confiança (ignora outros critérios)
+ONLY_HIGH_CONF_GAMES = os.getenv("ONLY_HIGH_CONF_GAMES", "false").lower() == "true"
 
 # ================================
 # Links Extras

@@ -8,7 +8,8 @@ from sqlalchemy.exc import IntegrityError
 
 from config.settings import (
     ZONE, HIGH_CONF_THRESHOLD, MIN_EV, MIN_PROB, WATCHLIST_DELTA, WATCHLIST_MIN_LEAD_MIN,
-    get_all_betting_links, is_high_conf, was_high_conf_notified, mark_high_conf_notified
+    get_all_betting_links, is_high_conf, was_high_conf_notified, mark_high_conf_notified,
+    ONLY_HIGH_CONF_GAMES
 )
 from utils.logger import logger
 from utils.stats import to_aware_utc, save_odd_history
@@ -76,9 +77,17 @@ async def scan_games_for_date(
                     
                     free_pass = is_high_conf(pprob)
                     
+                    # Se flag ONLY_HIGH_CONF_GAMES estiver ativa, apenas seleciona alta confiança
+                    if ONLY_HIGH_CONF_GAMES:
+                        should_save = free_pass  # Apenas alta confiança
+                        if free_pass and not will:
+                            reason = (reason or "Apenas alta confiança") + " | HIGH_CONF_ONLY"
+                    else:
+                        # Comportamento normal: seleciona se will=True ou alta confiança
+                        should_save = will or free_pass
+                    
                     # SALVAR TODOS OS JOGOS NO BANCO (mesmo os não selecionados)
                     # Isso garante que o sistema tenha histórico completo e possa recuperar após reiniciar
-                    should_save = will or free_pass
                     
                     # Upsert do jogo (salva sempre, mas will_bet só é True se selecionado)
                     g = session.query(Game).filter_by(ext_id=ev.ext_id, start_time=start_utc).one_or_none()
