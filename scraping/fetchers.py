@@ -224,7 +224,17 @@ async def fetch_game_result(ext_id: str, source_link: str) -> Optional[str]:
     # ETAPA 1: Usar APENAS HTML scraping (XHR desativado)
     try:
         logger.debug(f"🌐 Buscando resultado via HTML scraping para jogo {ext_id}")
-        html = await _fetch_with_playwright(source_link) if HAS_PLAYWRIGHT else await _fetch_requests_async(source_link)
+        # Para jogos finalizados, usar Playwright com mais tempo de espera para garantir que o widget carregue
+        if HAS_PLAYWRIGHT:
+            # Aguardar por seletor do live-tracker ou scoreboard, ou aguardar mais tempo
+            # Tentar múltiplos seletores em sequência
+            html = await _fetch_with_playwright(
+                source_link, 
+                wait_for_selector="[data-testid='liveMatchTracker']",  # Tentar primeiro o live-tracker
+                wait_time=5000  # 5 segundos adicionais para garantir carregamento
+            )
+        else:
+            html = await _fetch_requests_async(source_link)
         result = scrape_game_result(html, ext_id)
         if result:
             logger.info(f"✅ Resultado encontrado via HTML: {result}")

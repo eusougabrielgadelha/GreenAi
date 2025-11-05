@@ -1245,16 +1245,86 @@ def scrape_game_result(html: str, ext_id: str) -> Optional[str]:
         except (ValueError, IndexError, AttributeError) as e:
             logger.debug(f"Erro ao extrair placar do lmt-container: {e}")
 
-    # ESTRATÉGIA 2: Buscar em elementos de resultado final
+    # ESTRATÉGIA 4: Buscar padrões de placar em todo o HTML (mais genérico)
+    # Procurar por qualquer padrão de placar no texto do HTML
+    all_text = soup.get_text(" ", strip=True)
+    # Procurar padrões como "2 - 1", "2:1", "2 x 1", "2x1", "(2-1)", etc.
+    score_patterns = [
+        r'(\d+)\s*[-:x×]\s*(\d+)',  # Padrão básico: "2 - 1", "2:1", "2 x 1"
+        r'\((\d+)\s*[-:x]\s*(\d+)\)',  # Com parênteses: "(2-1)"
+        r'\[(\d+)\s*[-:x]\s*(\d+)\]',  # Com colchetes: "[2-1]"
+    ]
+    
+    for pattern in score_patterns:
+        matches = re.finditer(pattern, all_text, re.IGNORECASE)
+        for match in matches:
+            try:
+                home_goals_raw = match.group(1)
+                away_goals_raw = match.group(2)
+                
+                # Validar placar antes de usar
+                from utils.validators import validate_score
+                validated_score = validate_score(home_goals_raw, away_goals_raw)
+                if validated_score:
+                    home_goals, away_goals = validated_score
+                    from utils.logger import log_with_context
+                    # Só considerar se o placar está em um contexto relevante (não muito aleatório)
+                    # Verificar se está próximo de palavras relacionadas a futebol/jogo
+                    match_start = match.start()
+                    context_start = max(0, match_start - 50)
+                    context_end = min(len(all_text), match_start + 50)
+                    context = all_text[context_start:context_end].lower()
+                    
+                    # Procurar por palavras-chave que indicam contexto de placar
+                    context_keywords = ['gol', 'score', 'placar', 'resultado', 'final', 'time', 'casa', 'fora', 'visitante']
+                    if any(keyword in context for keyword in context_keywords) or match_start < 5000:  # Primeiros 5000 chars geralmente têm o placar
+                        if home_goals > away_goals:
+                            result = "home"
+                            log_with_context(
+                                "info",
+                                f"Resultado encontrado via padrão genérico: {home_goals}-{away_goals} → home",
+                                ext_id=ext_id,
+                                stage="scrape_result",
+                                status="success",
+                                extra_fields={"score": f"{home_goals}-{away_goals}", "result": result, "strategy": "padrao_generico"}
+                            )
+                            return result
+                        elif away_goals > home_goals:
+                            result = "away"
+                            log_with_context(
+                                "info",
+                                f"Resultado encontrado via padrão genérico: {home_goals}-{away_goals} → away",
+                                ext_id=ext_id,
+                                stage="scrape_result",
+                                status="success",
+                                extra_fields={"score": f"{home_goals}-{away_goals}", "result": result, "strategy": "padrao_generico"}
+                            )
+                            return result
+                        else:
+                            result = "draw"
+                            log_with_context(
+                                "info",
+                                f"Resultado encontrado via padrão genérico: {home_goals}-{away_goals} → draw",
+                                ext_id=ext_id,
+                                stage="scrape_result",
+                                status="success",
+                                extra_fields={"score": f"{home_goals}-{away_goals}", "result": result, "strategy": "padrao_generico"}
+                            )
+                            return result
+            except (ValueError, AttributeError) as e:
+                logger.debug(f"Erro ao processar padrão de placar: {e}")
+                continue
+
+    # ESTRATÉGIA 5: Buscar em elementos de resultado final (seletor específico)
     # Procurar por padrões de placar em vários elementos
     result_elements = soup.select(
         '.final-score, .match-result, [class*="result"], [class*="final"], '
-        '.score, [class*="score"], .sr-lmt-1-sbr__score'
+        '.score, [class*="score"], .sr-lmt-1-sbr__score, [class*="lmt"], [class*="match"]'
     )
     for elem in result_elements:
         text = elem.get_text(strip=True)
         # Procurar padrão "2 - 1", "2:1", "2 x 1", "2x1"
-        match = re.search(r'(\d+)\s*[-:x]\s*(\d+)', text)
+        match = re.search(r'(\d+)\s*[-:x×]\s*(\d+)', text)
         if match:
             try:
                 home_goals_raw = match.group(1)
@@ -1380,16 +1450,103 @@ def scrape_game_result(html: str, ext_id: str) -> Optional[str]:
             )
             return "draw"
 
-    # Se nenhuma estratégia funcionou, retorna None
+    # ESTRATÉGIA 6: Procurar por elementos com números grandes que podem ser placares
+    # Procurar por divs/spans com classes que podem conter placares
+    potential_score_elements = soup.select(
+        '[class*="score"], [class*="goals"], [class*="result"], '
+        '[class*="sbr"], [class*="scb"], [class*="match-score"], '
+        'div[class*="number"], span[class*="number"], '
+        '[class*="sr-lmt"], [class*="sr-"]'
+    )
+    
+    score_numbers = []
+    for elem in potential_score_elements:
+        text = elem.get_text(strip=True)
+        # Procurar por números isolados (0-9) que podem ser gols
+        numbers = re.findall(r'\b([0-9])\b', text)
+        if numbers and len(numbers) >= 2:
+            # Tentar combinar números adjacentes como placar
+            for i in range(len(numbers) - 1):
+                try:
+                    home_goals_raw = numbers[i]
+                    away_goals_raw = numbers[i + 1]
+                    from utils.validators import validate_score
+                    validated_score = validate_score(home_goals_raw, away_goals_raw)
+                    if validated_score:
+                        score_numbers.append((validated_score[0], validated_score[1], elem))
+                except:
+                    continue
+    
+    # Se encontrou placares potenciais, usar o primeiro válido
+    if score_numbers:
+        home_goals, away_goals, elem = score_numbers[0]
+        from utils.logger import log_with_context
+        if home_goals > away_goals:
+            result = "home"
+            log_with_context(
+                "info",
+                f"Resultado encontrado via elementos numéricos: {home_goals}-{away_goals} → home",
+                ext_id=ext_id,
+                stage="scrape_result",
+                status="success",
+                extra_fields={"score": f"{home_goals}-{away_goals}", "result": result, "strategy": "elementos_numericos"}
+            )
+            return result
+        elif away_goals > home_goals:
+            result = "away"
+            log_with_context(
+                "info",
+                f"Resultado encontrado via elementos numéricos: {home_goals}-{away_goals} → away",
+                ext_id=ext_id,
+                stage="scrape_result",
+                status="success",
+                extra_fields={"score": f"{home_goals}-{away_goals}", "result": result, "strategy": "elementos_numericos"}
+            )
+            return result
+        else:
+            result = "draw"
+            log_with_context(
+                "info",
+                f"Resultado encontrado via elementos numéricos: {home_goals}-{away_goals} → draw",
+                ext_id=ext_id,
+                stage="scrape_result",
+                status="success",
+                extra_fields={"score": f"{home_goals}-{away_goals}", "result": result, "strategy": "elementos_numericos"}
+            )
+            return result
+
+    # Se nenhuma estratégia funcionou, logar informações de debug
     from utils.logger import log_with_context
+    
+    # Extrair informações úteis para debug
+    debug_info = {
+        "strategies_tried": 6,
+        "has_lmt_tracker": bool(soup.find("div", {"data-testid": "liveMatchTracker"})),
+        "has_lmt_preview": bool(soup.find("div", id="lmt-match-preview")),
+        "has_scoreboard": bool(soup.find("div", {"data-testid": "scoreboard"})),
+        "html_length": len(html),
+        "text_length": len(soup.get_text())
+    }
+    
+    # Tentar encontrar qualquer padrão de placar no HTML para debug
+    all_text_preview = soup.get_text(" ", strip=True)[:1000]  # Primeiros 1000 chars
+    score_matches = re.findall(r'\d+\s*[-:x×]\s*\d+', all_text_preview)
+    if score_matches:
+        debug_info["found_score_patterns"] = score_matches[:5]  # Primeiros 5 padrões encontrados
+    
     log_with_context(
         "warning",
-        "Não foi possível determinar o vencedor após tentar 4 estratégias",
+        f"Não foi possível determinar o vencedor após tentar 6 estratégias. Debug: {debug_info}",
         ext_id=ext_id,
         stage="scrape_result",
         status="failed",
-        extra_fields={"strategies_tried": 4}
+        extra_fields=debug_info
     )
+    
+    # Log adicional para ajudar no debug
+    logger.debug(f"Jogo {ext_id}: HTML preview (primeiros 500 chars): {html[:500]}")
+    logger.debug(f"Jogo {ext_id}: Text preview (primeiros 500 chars): {all_text_preview[:500]}")
+    
     return None
 
 
