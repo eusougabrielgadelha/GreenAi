@@ -948,20 +948,10 @@ async def _handle_active_game(session, game: Game, tracker: LiveGameTracker, liv
         tracker.notifications_sent = (tracker.notifications_sent or 0) + 1
 
         logger.info(f"✅ Oportunidade validada e enviada para jogo {game.id}: {opportunity['option']} @ {opportunity['odd']}")
-    else:
-        # Envia mensagem de "Busca Continua" (opcional, para não spam)
-        # Só envia a mensagem se passou muito tempo desde a última.
-        if (now_utc - tracker.last_analysis_time).total_seconds() > 3600:  # 1 hora
-            tg_send_message(
-                f"🔄 <b>BUSCA CONTINUADA</b>\n"
-                f"Ainda não encontramos uma oportunidade de valor em <b>{game.team_home} vs {game.team_away}</b>.\n"
-                f"Continuaremos monitorando.",
-                message_type="live_opportunity",
-                game_id=game.id,
-                ext_id=game.ext_id
-            )
-            tracker.last_analysis_time = now_utc  # Atualiza para evitar spam
-            session.commit()
+    # else:
+    #     # Mensagem "Busca Continua" DESATIVADA para evitar spam
+    #     # Só envia oportunidades quando realmente encontradas
+    #     pass
 
 
 # Lock para prevenir execuções simultâneas do monitor_live_games_job

@@ -5,7 +5,7 @@ from config.settings import TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, TELEGRAM_TIMEOUT
 from utils.logger import logger
 
 
-def tg_send_message(text: str, parse_mode: Optional[str] = "HTML", message_type: Optional[str] = None, game_id: Optional[int] = None, ext_id: Optional[str] = None) -> None:
+def tg_send_message(text: str, parse_mode: Optional[str] = "HTML", message_type: Optional[str] = None, game_id: Optional[int] = None, ext_id: Optional[str] = None, skip_rate_limit: bool = False) -> None:
     """
     Usa HTML por padrão; omite parse_mode se None para evitar 400.
     
@@ -15,6 +15,7 @@ def tg_send_message(text: str, parse_mode: Optional[str] = "HTML", message_type:
         message_type: Tipo da mensagem para analytics (pick_now, watch_upgrade, reminder, etc)
         game_id: ID do jogo relacionado (opcional)
         ext_id: ID externo do jogo (opcional)
+        skip_rate_limit: Se True, ignora rate limiting (usar apenas para mensagens críticas)
     """
     from utils.analytics_logger import log_telegram_send
     
@@ -28,6 +29,21 @@ def tg_send_message(text: str, parse_mode: Optional[str] = "HTML", message_type:
             error="Telegram não configurado"
         )
         return
+    
+    # Verifica rate limiting (exceto para mensagens críticas)
+    if not skip_rate_limit:
+        from utils.telegram_rate_limiter import check_rate_limit, record_message_sent
+        can_send, reason = check_rate_limit(message_type)
+        if not can_send:
+            logger.debug(f"⏸️ Mensagem suprimida (rate limit): {message_type} - {reason}")
+            log_telegram_send(
+                message_type or "unknown",
+                game_id=game_id,
+                ext_id=ext_id,
+                success=False,
+                error=f"Rate limit: {reason}"
+            )
+            return
     
     # Detecta tipo de mensagem automaticamente se não fornecido
     if not message_type:
@@ -65,6 +81,11 @@ def tg_send_message(text: str, parse_mode: Optional[str] = "HTML", message_type:
                 error=error_msg
             )
         else:
+            # Registra que mensagem foi enviada (rate limiting)
+            if not skip_rate_limit:
+                from utils.telegram_rate_limiter import record_message_sent
+                record_message_sent(message_type)
+            
             log_telegram_send(
                 message_type,
                 game_id=game_id,
