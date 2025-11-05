@@ -143,7 +143,7 @@ class CombinedBet(Base):
     id = Column(Integer, primary_key=True)
     bet_date = Column(DateTime, nullable=False, index=True)  # Data da aposta (dia dos jogos)
     game_ids = Column(JSON, nullable=False)  # Lista de IDs dos jogos incluídos [1, 2, 3]
-    picks = Column(JSON, nullable=False)  # Lista de picks correspondentes ["home", "draw", "away"]
+    picks = Column(JSON, nullable=False)  # Lista de picks (nomes dos times ou "Empate")
     odds = Column(JSON, nullable=False)  # Lista de odds correspondentes [1.5, 2.0, 1.8]
     combined_odd = Column(Float, nullable=False)  # Odd combinada (multiplicação de todas)
     example_stake = Column(Float, default=10.0)  # Valor de exemplo da aposta (padrão R$ 10)

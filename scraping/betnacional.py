@@ -1022,6 +1022,63 @@ def scrape_game_result(html: str, ext_id: str) -> Optional[str]:
         lmt_container = lmt_tracker.find("div", id="lmt-match-preview") or lmt_tracker.find("div", class_=lambda x: x and "live-tracker-component" in str(x))
         if lmt_container:
             try:
+                # PRIORIDADE: Placar final no LMT Plus (sr-lmt-plus-scb__result)
+                # Ex.: <div class="sr-lmt-plus-scb__result"><div class="sr-lmt-plus-scb__result-team srm-team1">3</div><div class="sr-lmt-plus-scb__result-sep">:</div><div class="sr-lmt-plus-scb__result-team srm-team2">1</div></div>
+                result_block = lmt_container.select_one(".sr-lmt-plus-scb__result")
+                if result_block:
+                    home_el = result_block.select_one(".sr-lmt-plus-scb__result-team.srm-team1")
+                    away_el = result_block.select_one(".sr-lmt-plus-scb__result-team.srm-team2")
+                    if home_el and away_el:
+                        home_goals_raw = home_el.get_text(strip=True)
+                        away_goals_raw = away_el.get_text(strip=True)
+                        from utils.validators import validate_score
+                        validated_score = validate_score(home_goals_raw, away_goals_raw)
+                        if validated_score:
+                            home_goals, away_goals = validated_score
+                            from utils.logger import log_with_context
+                            # Opcional: checar status "Término" (mais uma confirmação)
+                            status_el = lmt_container.select_one(".sr-lmt-plus-scb__status")
+                            if status_el:
+                                status_text = status_el.get_text(" ", strip=True).lower()
+                                # não bloqueia se não achar; apenas reforça o log
+                                ended_hint = any(ind.lower() in status_text for ind in [
+                                    "término", "finalizado", "encerrado", "terminado", "final", "ft", "fim"
+                                ])
+                            # Determinar vencedor
+                            if home_goals > away_goals:
+                                result = "home"
+                                log_with_context(
+                                    "info",
+                                    f"Resultado extraído do LMT Plus (result): {home_goals}-{away_goals} → home",
+                                    ext_id=ext_id,
+                                    stage="scrape_result",
+                                    status="success",
+                                    extra_fields={"score": f"{home_goals}-{away_goals}", "result": result, "strategy": "lmt_plus_result"}
+                                )
+                                return result
+                            elif away_goals > home_goals:
+                                result = "away"
+                                log_with_context(
+                                    "info",
+                                    f"Resultado extraído do LMT Plus (result): {home_goals}-{away_goals} → away",
+                                    ext_id=ext_id,
+                                    stage="scrape_result",
+                                    status="success",
+                                    extra_fields={"score": f"{home_goals}-{away_goals}", "result": result, "strategy": "lmt_plus_result"}
+                                )
+                                return result
+                            else:
+                                result = "draw"
+                                log_with_context(
+                                    "info",
+                                    f"Resultado extraído do LMT Plus (result): {home_goals}-{away_goals} → draw",
+                                    ext_id=ext_id,
+                                    stage="scrape_result",
+                                    status="success",
+                                    extra_fields={"score": f"{home_goals}-{away_goals}", "result": result, "strategy": "lmt_plus_result"}
+                                )
+                                return result
+
                 # Tentar extrair placar do scoreboard dentro do live-tracker
                 scoreboard = lmt_container.find("div", {"data-testid": "scoreboard"})
                 if scoreboard:

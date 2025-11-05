@@ -69,7 +69,13 @@ def calculate_combined_odd(games: List[Game]) -> Tuple[float, List[float], List[
             continue  # Skip se odd inválida
         
         odds_list.append(odd)
-        picks_list.append(game.pick)
+        # Armazenar o pick como NOME DO TIME (ou 'Empate') em vez de 'home/away'
+        if game.pick == "home":
+            picks_list.append(game.team_home)
+        elif game.pick == "away":
+            picks_list.append(game.team_away)
+        else:
+            picks_list.append("Empate")
     
     # Calcula odd combinada (multiplicação)
     combined_odd = 1.0

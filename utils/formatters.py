@@ -413,11 +413,13 @@ def fmt_combined_bet(combined_bet: CombinedBet, games: List[Game]) -> str:
     # Ordena jogos por horário
     games_sorted = sorted(games, key=lambda g: g.start_time)
     
-    pick_map = {"home": "Casa", "draw": "Empate", "away": "Fora"}
+    # Exibir o nome do time escolhido ou 'Empate'
+    pick_map = {"home": lambda g: g.team_home, "draw": lambda g: "Empate", "away": lambda g: g.team_away}
     
     for idx, game in enumerate(games_sorted, 1):
         hhmm = game.start_time.astimezone(ZONE).strftime("%H:%M")
-        pick_str = pick_map.get(game.pick, game.pick or "—")
+        resolver = pick_map.get(game.pick)
+        pick_str = resolver(game) if callable(resolver) else (game.pick or "—")
         
         # Determina odd do pick
         if game.pick == "home":
