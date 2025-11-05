@@ -282,15 +282,7 @@ def parse_events_from_api(json_data: Dict[str, Any], source_url: str) -> List[An
             is_live=event_data.get('is_live', False),
         ))
     
-    from utils.logger import log_with_context
-    log_with_context(
-        "info",
-        f"Eventos extraídos via API XHR: {len(events)} eventos",
-        url=source_url,
-        stage="parse_events_api",
-        status="success",
-        extra_fields={"events_count": len(events), "method": "api_xhr"}
-    )
+    # Suprimir logs de status da API: não enviar métricas/estado da API
     return events
 
 
