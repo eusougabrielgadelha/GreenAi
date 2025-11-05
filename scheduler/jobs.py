@@ -857,21 +857,28 @@ async def _handle_finished_game(session, game: Game, tracker: LiveGameTracker, n
     
     # Busca resultado final
     from scraping.fetchers import fetch_game_result
-    outcome = await fetch_game_result(game.ext_id, game.game_url or game.source_link)
+    from datetime import datetime
+    import pytz
+    result_data = await fetch_game_result(game.ext_id, game.game_url or game.source_link)
     
-    if outcome:
-        game.outcome = outcome
-        game.hit = (outcome == game.pick) if game.pick else None
+    if result_data:
+        game.outcome = result_data.get("outcome")
+        game.final_score_home = result_data.get("home_goals")
+        game.final_score_away = result_data.get("away_goals")
+        game.final_score = result_data.get("score")
+        game.result_fetched_at = datetime.now(pytz.UTC)
+        game.hit = (game.outcome == game.pick) if game.pick else None
         result_msg = "✅ ACERTOU" if game.hit else "❌ ERROU" if game.hit is False else "⚠️ SEM PALPITE"
+        score_str = f" ({game.final_score})" if game.final_score else ""
         from utils.logger import log_with_context
         log_with_context(
             "info",
-            f"Resultado obtido para jogo: {outcome} | {result_msg}",
+            f"Resultado obtido para jogo: {game.outcome}{score_str} | {result_msg}",
             game_id=game.id,
             ext_id=game.ext_id,
             stage="fetch_result",
             status="success",
-            extra_fields={"outcome": outcome, "hit": game.hit, "result_msg": result_msg}
+            extra_fields={"outcome": game.outcome, "score": game.final_score, "hit": game.hit, "result_msg": result_msg}
         )
         
         # Não enviar mensagem individual; envio será consolidado pelo job periódico
@@ -1238,15 +1245,22 @@ async def watch_game_until_end_job(game_id: int):
         
         # Tenta obter o resultado
         try:
-            outcome = await fetch_game_result(game.ext_id, game.game_url or game.source_link)
+            from datetime import datetime
+            import pytz
+            result_data = await fetch_game_result(game.ext_id, game.game_url or game.source_link)
             
-            if outcome:
-                game.outcome = outcome
+            if result_data:
+                game.outcome = result_data.get("outcome")
+                game.final_score_home = result_data.get("home_goals")
+                game.final_score_away = result_data.get("away_goals")
+                game.final_score = result_data.get("score")
+                game.result_fetched_at = datetime.now(pytz.UTC)
                 game.status = "ended"
-                game.hit = (outcome == game.pick) if game.pick else None
+                game.hit = (game.outcome == game.pick) if game.pick else None
                 
                 result_msg = "✅ ACERTOU" if game.hit else "❌ ERROU" if game.hit is False else "⚠️ SEM PALPITE"
-                logger.info("🏁 Resultado obtido para jogo id=%s: %s | %s", game_id, outcome, result_msg)
+                score_str = f" ({game.final_score})" if game.final_score else ""
+                logger.info("🏁 Resultado obtido para jogo id=%s: %s%s | %s", game_id, game.outcome, score_str, result_msg)
                 
                 # Não enviar mensagem individual; envio será consolidado pelo job periódico
                 
@@ -1465,14 +1479,21 @@ async def fetch_finished_games_results_job():
                         game.status = "ended"
                         logger.debug(f"📝 Status do jogo {game.id} atualizado para 'ended'")
                     
-                    outcome = await fetch_game_result(game.ext_id, game.game_url or game.source_link)
+                    from datetime import datetime
+                    import pytz
+                    result_data = await fetch_game_result(game.ext_id, game.game_url or game.source_link)
                     
-                    if outcome:
-                        game.outcome = outcome
+                    if result_data:
+                        game.outcome = result_data.get("outcome")
+                        game.final_score_home = result_data.get("home_goals")
+                        game.final_score_away = result_data.get("away_goals")
+                        game.final_score = result_data.get("score")
+                        game.result_fetched_at = datetime.now(pytz.UTC)
                         game.status = "ended"
-                        game.hit = (outcome == game.pick) if game.pick else None
+                        game.hit = (game.outcome == game.pick) if game.pick else None
                         result_msg = "✅ ACERTOU" if game.hit else "❌ ERROU" if game.hit is False else "⚠️ SEM PALPITE"
-                        logger.info(f"✅ Resultado obtido para jogo {game.id}: {outcome} | {result_msg}")
+                        score_str = f" ({game.final_score})" if game.final_score else ""
+                        logger.info(f"✅ Resultado obtido para jogo {game.id}: {game.outcome}{score_str} | {result_msg}")
                         
                         # Acumula resultados desta execução para envio em lote
                         if 'results_batch' not in locals():

@@ -973,9 +973,9 @@ def try_parse_events(html: str, url: str) -> List[Any]:
     return evs
 
 
-def scrape_game_result(html: str, ext_id: str) -> Optional[str]:
+def scrape_game_result(html: str, ext_id: str) -> Optional[dict]:
     """
-    Tenta extrair o resultado final (home/draw/away) da página HTML de um jogo encerrado.
+    Tenta extrair o resultado final (home/draw/away) e placar da página HTML de um jogo encerrado.
     
     Usa múltiplas estratégias para maior robustez:
     1. Detectar se jogo está finalizado (procurar por "Término", "Finalizado", etc.)
@@ -984,7 +984,29 @@ def scrape_game_result(html: str, ext_id: str) -> Optional[str]:
     4. Buscar em elementos de resultado final
     5. Procurar texto "Vencedor" (fallback)
     6. Procurar classes CSS de vencedor (fallback)
+    
+    Returns:
+        Dict com keys: "outcome" (home/draw/away), "home_goals", "away_goals", "score" (formato "2-1")
+        Ou None se não conseguir extrair
     """
+    def _make_result_dict(home_goals: int, away_goals: int, result: str) -> dict:
+        """Helper para criar dict de resultado padronizado."""
+        return {
+            "outcome": result,
+            "home_goals": home_goals,
+            "away_goals": away_goals,
+            "score": f"{home_goals}-{away_goals}"
+        }
+    
+    def _make_result_dict_no_score(result: str) -> dict:
+        """Helper para criar dict de resultado quando placar não foi extraído."""
+        return {
+            "outcome": result,
+            "home_goals": None,
+            "away_goals": None,
+            "score": None
+        }
+    
     soup = BeautifulSoup(html, "html.parser")
 
     # PRIMEIRO: Verificar se o jogo está finalizado
@@ -1043,37 +1065,20 @@ def scrape_game_result(html: str, ext_id: str) -> Optional[str]:
                             # Determinar vencedor
                             if home_goals > away_goals:
                                 result = "home"
-                                log_with_context(
-                                    "info",
-                                    f"Resultado extraído do LMT Plus (result): {home_goals}-{away_goals} → home",
-                                    ext_id=ext_id,
-                                    stage="scrape_result",
-                                    status="success",
-                                    extra_fields={"score": f"{home_goals}-{away_goals}", "result": result, "strategy": "lmt_plus_result"}
-                                )
-                                return result
                             elif away_goals > home_goals:
                                 result = "away"
-                                log_with_context(
-                                    "info",
-                                    f"Resultado extraído do LMT Plus (result): {home_goals}-{away_goals} → away",
-                                    ext_id=ext_id,
-                                    stage="scrape_result",
-                                    status="success",
-                                    extra_fields={"score": f"{home_goals}-{away_goals}", "result": result, "strategy": "lmt_plus_result"}
-                                )
-                                return result
                             else:
                                 result = "draw"
-                                log_with_context(
-                                    "info",
-                                    f"Resultado extraído do LMT Plus (result): {home_goals}-{away_goals} → draw",
-                                    ext_id=ext_id,
-                                    stage="scrape_result",
-                                    status="success",
-                                    extra_fields={"score": f"{home_goals}-{away_goals}", "result": result, "strategy": "lmt_plus_result"}
-                                )
-                                return result
+                            
+                            log_with_context(
+                                "info",
+                                f"Resultado extraído do LMT Plus (result): {home_goals}-{away_goals} → {result}",
+                                ext_id=ext_id,
+                                stage="scrape_result",
+                                status="success",
+                                extra_fields={"score": f"{home_goals}-{away_goals}", "result": result, "strategy": "lmt_plus_result"}
+                            )
+                            return _make_result_dict(home_goals, away_goals, result)
 
                 # Tentar extrair placar do scoreboard dentro do live-tracker
                 scoreboard = lmt_container.find("div", {"data-testid": "scoreboard"})
@@ -1094,37 +1099,20 @@ def scrape_game_result(html: str, ext_id: str) -> Optional[str]:
                             from utils.logger import log_with_context
                             if home_goals > away_goals:
                                 result = "home"
-                                log_with_context(
-                                    "info",
-                                    f"Resultado extraído do placar final (live-tracker): {home_goals}-{away_goals} → home",
-                                    ext_id=ext_id,
-                                    stage="scrape_result",
-                                    status="success",
-                                    extra_fields={"score": f"{home_goals}-{away_goals}", "result": result, "strategy": "live_tracker_scoreboard"}
-                                )
-                                return result
                             elif away_goals > home_goals:
                                 result = "away"
-                                log_with_context(
-                                    "info",
-                                    f"Resultado extraído do placar final (live-tracker): {home_goals}-{away_goals} → away",
-                                    ext_id=ext_id,
-                                    stage="scrape_result",
-                                    status="success",
-                                    extra_fields={"score": f"{home_goals}-{away_goals}", "result": result, "strategy": "live_tracker_scoreboard"}
-                                )
-                                return result
                             else:
                                 result = "draw"
-                                log_with_context(
-                                    "info",
-                                    f"Resultado extraído do placar final (live-tracker): {home_goals}-{away_goals} → draw",
-                                    ext_id=ext_id,
-                                    stage="scrape_result",
-                                    status="success",
-                                    extra_fields={"score": f"{home_goals}-{away_goals}", "result": result, "strategy": "live_tracker_scoreboard"}
-                                )
-                                return result
+                            
+                            log_with_context(
+                                "info",
+                                f"Resultado extraído do placar final (live-tracker): {home_goals}-{away_goals} → {result}",
+                                ext_id=ext_id,
+                                stage="scrape_result",
+                                status="success",
+                                extra_fields={"score": f"{home_goals}-{away_goals}", "result": result, "strategy": "live_tracker_scoreboard"}
+                            )
+                            return _make_result_dict(home_goals, away_goals, result)
                 
                 # Fallback: tentar extrair placar diretamente do lmt-container
                 score_elements = lmt_container.select(".sr-lmt-1-sbr__score")
@@ -1142,37 +1130,20 @@ def scrape_game_result(html: str, ext_id: str) -> Optional[str]:
                         from utils.logger import log_with_context
                         if home_goals > away_goals:
                             result = "home"
-                            log_with_context(
-                                "info",
-                                f"Resultado extraído do placar final (lmt-container): {home_goals}-{away_goals} → home",
-                                ext_id=ext_id,
-                                stage="scrape_result",
-                                status="success",
-                                extra_fields={"score": f"{home_goals}-{away_goals}", "result": result, "strategy": "lmt_container"}
-                            )
-                            return result
                         elif away_goals > home_goals:
                             result = "away"
-                            log_with_context(
-                                "info",
-                                f"Resultado extraído do placar final (lmt-container): {home_goals}-{away_goals} → away",
-                                ext_id=ext_id,
-                                stage="scrape_result",
-                                status="success",
-                                extra_fields={"score": f"{home_goals}-{away_goals}", "result": result, "strategy": "lmt_container"}
-                            )
-                            return result
                         else:
                             result = "draw"
-                            log_with_context(
-                                "info",
-                                f"Resultado extraído do placar final (lmt-container): {home_goals}-{away_goals} → draw",
-                                ext_id=ext_id,
-                                stage="scrape_result",
-                                status="success",
-                                extra_fields={"score": f"{home_goals}-{away_goals}", "result": result, "strategy": "lmt_container"}
-                            )
-                            return result
+                        
+                        log_with_context(
+                            "info",
+                            f"Resultado extraído do placar final (lmt-container): {home_goals}-{away_goals} → {result}",
+                            ext_id=ext_id,
+                            stage="scrape_result",
+                            status="success",
+                            extra_fields={"score": f"{home_goals}-{away_goals}", "result": result, "strategy": "lmt_container"}
+                        )
+                        return _make_result_dict(home_goals, away_goals, result)
                     else:
                         logger.debug(f"Placar inválido ignorado para {ext_id}: {home_goals_raw}-{away_goals_raw}")
             except (ValueError, IndexError, AttributeError) as e:
@@ -1207,7 +1178,7 @@ def scrape_game_result(html: str, ext_id: str) -> Optional[str]:
                             status="success",
                             extra_fields={"score": f"{home_goals}-{away_goals}", "result": result, "strategy": "lmt_plus_result_global"}
                         )
-                        return result
+                        return _make_result_dict(home_goals, away_goals, result)
         except Exception as e:
             logger.debug(f"Erro ao extrair placar global do LMT Plus: {e}")
 
@@ -1242,37 +1213,20 @@ def scrape_game_result(html: str, ext_id: str) -> Optional[str]:
                             from utils.logger import log_with_context
                             if home_goals > away_goals:
                                 result = "home"
-                                log_with_context(
-                                    "info",
-                                    f"Resultado extraído do scoreboard: {home_goals}-{away_goals} → home",
-                                    ext_id=ext_id,
-                                    stage="scrape_result",
-                                    status="success",
-                                    extra_fields={"score": f"{home_goals}-{away_goals}", "result": result, "strategy": "scoreboard_table"}
-                                )
-                                return result
                             elif away_goals > home_goals:
                                 result = "away"
-                                log_with_context(
-                                    "info",
-                                    f"Resultado extraído do scoreboard: {home_goals}-{away_goals} → away",
-                                    ext_id=ext_id,
-                                    stage="scrape_result",
-                                    status="success",
-                                    extra_fields={"score": f"{home_goals}-{away_goals}", "result": result, "strategy": "scoreboard_table"}
-                                )
-                                return result
                             else:
                                 result = "draw"
-                                log_with_context(
-                                    "info",
-                                    f"Resultado extraído do scoreboard: {home_goals}-{away_goals} → draw",
-                                    ext_id=ext_id,
-                                    stage="scrape_result",
-                                    status="success",
-                                    extra_fields={"score": f"{home_goals}-{away_goals}", "result": result, "strategy": "scoreboard_table"}
-                                )
-                                return result
+                            
+                            log_with_context(
+                                "info",
+                                f"Resultado extraído do scoreboard: {home_goals}-{away_goals} → {result}",
+                                ext_id=ext_id,
+                                stage="scrape_result",
+                                status="success",
+                                extra_fields={"score": f"{home_goals}-{away_goals}", "result": result, "strategy": "scoreboard_table"}
+                            )
+                            return _make_result_dict(home_goals, away_goals, result)
         except (ValueError, IndexError, AttributeError) as e:
             logger.debug(f"Erro ao extrair placar do scoreboard: {e}")
 
@@ -1295,37 +1249,20 @@ def scrape_game_result(html: str, ext_id: str) -> Optional[str]:
                     from utils.logger import log_with_context
                     if home_goals > away_goals:
                         result = "home"
-                        log_with_context(
-                            "info",
-                            f"Resultado extraído do placar: {home_goals}-{away_goals} → home",
-                            ext_id=ext_id,
-                            stage="scrape_result",
-                            status="success",
-                            extra_fields={"score": f"{home_goals}-{away_goals}", "result": result, "strategy": "placar_final"}
-                        )
-                        return result
                     elif away_goals > home_goals:
                         result = "away"
-                        log_with_context(
-                            "info",
-                            f"Resultado extraído do placar: {home_goals}-{away_goals} → away",
-                            ext_id=ext_id,
-                            stage="scrape_result",
-                            status="success",
-                            extra_fields={"score": f"{home_goals}-{away_goals}", "result": result, "strategy": "placar_final"}
-                        )
-                        return result
                     else:
                         result = "draw"
-                        log_with_context(
-                            "info",
-                            f"Resultado extraído do placar: {home_goals}-{away_goals} → draw",
-                            ext_id=ext_id,
-                            stage="scrape_result",
-                            status="success",
-                            extra_fields={"score": f"{home_goals}-{away_goals}", "result": result, "strategy": "placar_final"}
-                        )
-                        return result
+                    
+                    log_with_context(
+                        "info",
+                        f"Resultado extraído do placar: {home_goals}-{away_goals} → {result}",
+                        ext_id=ext_id,
+                        stage="scrape_result",
+                        status="success",
+                        extra_fields={"score": f"{home_goals}-{away_goals}", "result": result, "strategy": "placar_final"}
+                    )
+                    return _make_result_dict(home_goals, away_goals, result)
                 else:
                     logger.debug(f"Placar inválido ignorado para {ext_id}: {home_goals_raw}-{away_goals_raw}")
         except (ValueError, IndexError, AttributeError) as e:
@@ -1366,37 +1303,20 @@ def scrape_game_result(html: str, ext_id: str) -> Optional[str]:
                     if any(keyword in context for keyword in context_keywords) or match_start < 5000:  # Primeiros 5000 chars geralmente têm o placar
                         if home_goals > away_goals:
                             result = "home"
-                            log_with_context(
-                                "info",
-                                f"Resultado encontrado via padrão genérico: {home_goals}-{away_goals} → home",
-                                ext_id=ext_id,
-                                stage="scrape_result",
-                                status="success",
-                                extra_fields={"score": f"{home_goals}-{away_goals}", "result": result, "strategy": "padrao_generico"}
-                            )
-                            return result
                         elif away_goals > home_goals:
                             result = "away"
-                            log_with_context(
-                                "info",
-                                f"Resultado encontrado via padrão genérico: {home_goals}-{away_goals} → away",
-                                ext_id=ext_id,
-                                stage="scrape_result",
-                                status="success",
-                                extra_fields={"score": f"{home_goals}-{away_goals}", "result": result, "strategy": "padrao_generico"}
-                            )
-                            return result
                         else:
                             result = "draw"
-                            log_with_context(
-                                "info",
-                                f"Resultado encontrado via padrão genérico: {home_goals}-{away_goals} → draw",
-                                ext_id=ext_id,
-                                stage="scrape_result",
-                                status="success",
-                                extra_fields={"score": f"{home_goals}-{away_goals}", "result": result, "strategy": "padrao_generico"}
-                            )
-                            return result
+                        
+                        log_with_context(
+                            "info",
+                            f"Resultado encontrado via padrão genérico: {home_goals}-{away_goals} → {result}",
+                            ext_id=ext_id,
+                            stage="scrape_result",
+                            status="success",
+                            extra_fields={"score": f"{home_goals}-{away_goals}", "result": result, "strategy": "padrao_generico"}
+                        )
+                        return _make_result_dict(home_goals, away_goals, result)
             except (ValueError, AttributeError) as e:
                 logger.debug(f"Erro ao processar padrão de placar: {e}")
                 continue
@@ -1424,37 +1344,20 @@ def scrape_game_result(html: str, ext_id: str) -> Optional[str]:
                     from utils.logger import log_with_context
                     if home_goals > away_goals:
                         result = "home"
-                        log_with_context(
-                            "debug",
-                            f"Resultado encontrado em elemento de resultado: {home_goals}-{away_goals} → home",
-                            ext_id=ext_id,
-                            stage="scrape_result",
-                            status="success",
-                            extra_fields={"score": f"{home_goals}-{away_goals}", "result": result, "strategy": "elementos_resultado"}
-                        )
-                        return result
                     elif away_goals > home_goals:
                         result = "away"
-                        log_with_context(
-                            "debug",
-                            f"Resultado encontrado em elemento de resultado: {home_goals}-{away_goals} → away",
-                            ext_id=ext_id,
-                            stage="scrape_result",
-                            status="success",
-                            extra_fields={"score": f"{home_goals}-{away_goals}", "result": result, "strategy": "elementos_resultado"}
-                        )
-                        return result
                     else:
                         result = "draw"
-                        log_with_context(
-                            "debug",
-                            f"Resultado encontrado em elemento de resultado: {home_goals}-{away_goals} → draw",
-                            ext_id=ext_id,
-                            stage="scrape_result",
-                            status="success",
-                            extra_fields={"score": f"{home_goals}-{away_goals}", "result": result, "strategy": "elementos_resultado"}
-                        )
-                        return result
+                    
+                    log_with_context(
+                        "debug",
+                        f"Resultado encontrado em elemento de resultado: {home_goals}-{away_goals} → {result}",
+                        ext_id=ext_id,
+                        stage="scrape_result",
+                        status="success",
+                        extra_fields={"score": f"{home_goals}-{away_goals}", "result": result, "strategy": "elementos_resultado"}
+                    )
+                    return _make_result_dict(home_goals, away_goals, result)
             except (ValueError, AttributeError) as e:
                 logger.debug(f"Erro ao validar placar do elemento: {e}")
                 continue
@@ -1478,7 +1381,7 @@ def scrape_game_result(html: str, ext_id: str) -> Optional[str]:
                     status="success",
                     extra_fields={"result": "home", "strategy": "texto_vencedor"}
                 )
-                return "home"
+                return _make_result_dict_no_score("home")
             elif "Fora" in parent_text or "Away" in parent_text:
                 log_with_context(
                     "debug",
@@ -1488,7 +1391,7 @@ def scrape_game_result(html: str, ext_id: str) -> Optional[str]:
                     status="success",
                     extra_fields={"result": "away", "strategy": "texto_vencedor"}
                 )
-                return "away"
+                return _make_result_dict_no_score("away")
             elif "Empate" in parent_text or "Draw" in parent_text:
                 log_with_context(
                     "debug",
@@ -1498,7 +1401,7 @@ def scrape_game_result(html: str, ext_id: str) -> Optional[str]:
                     status="success",
                     extra_fields={"result": "draw", "strategy": "texto_vencedor"}
                 )
-                return "draw"
+                return _make_result_dict_no_score("draw")
 
     # ESTRATÉGIA 4: Procurar por classes CSS comuns em elementos de vencedor (fallback)
     winner_elements = soup.select('.winner, .vencedor, .champion, [class*="winner"], [class*="vencedor"]')
@@ -1514,7 +1417,7 @@ def scrape_game_result(html: str, ext_id: str) -> Optional[str]:
                 status="success",
                 extra_fields={"result": "home", "strategy": "classes_css"}
             )
-            return "home"
+            return _make_result_dict_no_score("home")
         elif "fora" in elem_text or "away" in elem_text:
             log_with_context(
                 "debug",
@@ -1524,7 +1427,7 @@ def scrape_game_result(html: str, ext_id: str) -> Optional[str]:
                 status="success",
                 extra_fields={"result": "away", "strategy": "classes_css"}
             )
-            return "away"
+            return _make_result_dict_no_score("away")
         elif "empate" in elem_text or "draw" in elem_text:
             log_with_context(
                 "debug",
@@ -1534,7 +1437,7 @@ def scrape_game_result(html: str, ext_id: str) -> Optional[str]:
                 status="success",
                 extra_fields={"result": "draw", "strategy": "classes_css"}
             )
-            return "draw"
+            return _make_result_dict_no_score("draw")
 
     # ESTRATÉGIA 6: Procurar por elementos com números grandes que podem ser placares
     # Procurar por divs/spans com classes que podem conter placares
@@ -1569,37 +1472,20 @@ def scrape_game_result(html: str, ext_id: str) -> Optional[str]:
         from utils.logger import log_with_context
         if home_goals > away_goals:
             result = "home"
-            log_with_context(
-                "info",
-                f"Resultado encontrado via elementos numéricos: {home_goals}-{away_goals} → home",
-                ext_id=ext_id,
-                stage="scrape_result",
-                status="success",
-                extra_fields={"score": f"{home_goals}-{away_goals}", "result": result, "strategy": "elementos_numericos"}
-            )
-            return result
         elif away_goals > home_goals:
             result = "away"
-            log_with_context(
-                "info",
-                f"Resultado encontrado via elementos numéricos: {home_goals}-{away_goals} → away",
-                ext_id=ext_id,
-                stage="scrape_result",
-                status="success",
-                extra_fields={"score": f"{home_goals}-{away_goals}", "result": result, "strategy": "elementos_numericos"}
-            )
-            return result
         else:
             result = "draw"
-            log_with_context(
-                "info",
-                f"Resultado encontrado via elementos numéricos: {home_goals}-{away_goals} → draw",
-                ext_id=ext_id,
-                stage="scrape_result",
-                status="success",
-                extra_fields={"score": f"{home_goals}-{away_goals}", "result": result, "strategy": "elementos_numericos"}
-            )
-            return result
+        
+        log_with_context(
+            "info",
+            f"Resultado encontrado via elementos numéricos: {home_goals}-{away_goals} → {result}",
+            ext_id=ext_id,
+            stage="scrape_result",
+            status="success",
+            extra_fields={"score": f"{home_goals}-{away_goals}", "result": result, "strategy": "elementos_numericos"}
+        )
+        return _make_result_dict(home_goals, away_goals, result)
 
     # Se nenhuma estratégia funcionou, logar informações de debug
     from utils.logger import log_with_context

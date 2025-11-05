@@ -32,6 +32,10 @@ class Game(Base):
     status = Column(String, default="scheduled")  # scheduled|live|ended
     outcome = Column(String, nullable=True)  # home|draw|away
     hit = Column(Boolean, nullable=True)
+    final_score_home = Column(Integer, nullable=True)  # Gols do time da casa
+    final_score_away = Column(Integer, nullable=True)  # Gols do time visitante
+    final_score = Column(String, nullable=True)  # "2-1" (formato legível)
+    result_fetched_at = Column(DateTime, nullable=True)  # Quando o resultado foi obtido
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, onupdate=func.now())
     
@@ -232,6 +236,11 @@ def init_database():
     _safe_add_column("live_game_trackers", "last_pick_key TEXT")
     _safe_add_column("live_game_trackers", "last_pick_sent DATETIME")
     _safe_add_column("games", "pick_notified_at DATETIME")  # Rastrear quando palpite foi notificado
+    # Migração: placar final e timestamp do resultado
+    _safe_add_column("games", "final_score_home INTEGER")
+    _safe_add_column("games", "final_score_away INTEGER")
+    _safe_add_column("games", "final_score TEXT")
+    _safe_add_column("games", "result_fetched_at DATETIME")
     # Migração: renomear coluna 'metadata' para 'event_metadata' em analytics_events
     _safe_migrate_metadata_column()
 

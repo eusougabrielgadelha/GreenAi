@@ -198,7 +198,7 @@ async def fetch_events_from_link(url: str, backend: str):
     return []
 
 
-async def fetch_game_result(ext_id: str, source_link: str) -> Optional[str]:
+async def fetch_game_result(ext_id: str, source_link: str) -> Optional[dict]:
     """
     Busca o resultado de um jogo específico.
     
@@ -210,7 +210,8 @@ async def fetch_game_result(ext_id: str, source_link: str) -> Optional[str]:
         source_link: URL do jogo
     
     Returns:
-        "home", "draw", ou "away" se encontrou resultado, None caso contrário
+        Dict com keys: "outcome" (home/draw/away), "home_goals", "away_goals", "score" (formato "2-1")
+        Ou None se não conseguir extrair
     """
     from scraping.betnacional import scrape_game_result
     from utils.cache import result_cache
@@ -218,7 +219,16 @@ async def fetch_game_result(ext_id: str, source_link: str) -> Optional[str]:
     # ETAPA 0: Verificar cache primeiro
     cached_result = result_cache.get(ext_id)
     if cached_result:
-        logger.info(f"✅ Resultado encontrado no cache para jogo {ext_id}: {cached_result}")
+        # Se cache retornar string (legado), converter para dict
+        if isinstance(cached_result, str):
+            logger.info(f"✅ Resultado encontrado no cache (legado) para jogo {ext_id}: {cached_result}")
+            return {
+                "outcome": cached_result,
+                "home_goals": None,
+                "away_goals": None,
+                "score": None
+            }
+        logger.info(f"✅ Resultado encontrado no cache para jogo {ext_id}: {cached_result.get('outcome')}")
         return cached_result
     
     # ETAPA 1: Usar APENAS HTML scraping (XHR desativado)
@@ -250,7 +260,7 @@ async def fetch_game_result(ext_id: str, source_link: str) -> Optional[str]:
             html = await _fetch_requests_async(source_link)
         result = scrape_game_result(html, ext_id)
         if result:
-            logger.info(f"✅ Resultado encontrado via HTML: {result}")
+            logger.info(f"✅ Resultado encontrado via HTML: {result.get('outcome')} (placar: {result.get('score', 'N/A')})")
             # Salvar no cache
             result_cache.set(ext_id, result)
             return result
