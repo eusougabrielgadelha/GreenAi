@@ -206,7 +206,8 @@ async def scan_games_for_date(
                         should_notify, reason = should_notify_pick(g, check_high_conf=True)
                         
                         if should_notify:
-                            tg_send_message(fmt_pick_now(g), message_type="pick_now", game_id=g.id, ext_id=g.ext_id)
+                            from utils.telegram_helpers import send_pick_with_buffer
+                            send_pick_with_buffer(g)
                             # Marca como notificado no banco de dados (persiste após reiniciar)
                             mark_pick_notified(g, session)
                             # Mantém compatibilidade com sistema antigo (pick_reason)

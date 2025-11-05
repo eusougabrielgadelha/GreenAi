@@ -288,7 +288,8 @@ async def night_scan_for_early_games():
                         should_notify, reason = should_notify_pick(g, check_high_conf=True)
                         
                         if should_notify:
-                            tg_send_message(fmt_pick_now(g), message_type="pick_now", game_id=g.id, ext_id=g.ext_id)
+                            from utils.telegram_helpers import send_pick_with_buffer
+                            send_pick_with_buffer(g)
                             # Marca como notificado no banco de dados (persiste após reiniciar)
                             mark_pick_notified(g, session)
                             # Mantém compatibilidade com sistema antigo (pick_reason)
@@ -480,7 +481,8 @@ async def rescan_watchlist_job():
                     should_notify, reason = should_notify_pick(g, check_high_conf=True)
                     
                     if should_notify:
-                        tg_send_message(fmt_watch_upgrade(g), message_type="watch_upgrade", game_id=g.id, ext_id=g.ext_id)
+                        from utils.telegram_helpers import send_upgrade_with_buffer
+                        send_upgrade_with_buffer(g)
                         # Marca como notificado no banco de dados (persiste após reiniciar)
                         mark_pick_notified(g, session)
                         # Mantém compatibilidade com sistema antigo (pick_reason)
@@ -507,8 +509,15 @@ async def rescan_watchlist_job():
 
         if removed_expired:
             logger.info("🧹 WATCHLIST: %d itens expirados removidos.", removed_expired)
+        
         if upgraded:
             logger.info("⬆️ WATCHLIST: promovidos %d itens: %s", len(upgraded), ", ".join(upgraded))
+            # Faz flush dos buffers após upgrades para garantir envio rápido
+            try:
+                from utils.telegram_message_buffer import flush_all_buffers
+                await flush_all_buffers()
+            except Exception:
+                pass  # Não falha o job se flush falhar
         else:
             logger.info("ℹ️ WATCHLIST: nenhuma promoção nesta passada.")
 
@@ -585,7 +594,8 @@ async def hourly_rescan_job():
                         from utils.notification_tracker import mark_pick_notified
                         
                         # Já verificamos acima que não foi notificado, então pode enviar
-                        tg_send_message(fmt_pick_now(game), message_type="pick_now", game_id=game.id, ext_id=game.ext_id)
+                        from utils.telegram_helpers import send_pick_with_buffer
+                        send_pick_with_buffer(game)
                         mark_pick_notified(game, session)
                         game.pick_reason = mark_high_conf_notified(game.pick_reason or "")
                         session.commit()
@@ -623,7 +633,8 @@ async def hourly_rescan_job():
                         
                         should_notify, reason = should_notify_pick(game, check_high_conf=True)
                         if should_notify:
-                            tg_send_message(fmt_pick_now(game), message_type="pick_now", game_id=game.id, ext_id=game.ext_id)
+                            from utils.telegram_helpers import send_pick_with_buffer
+                            send_pick_with_buffer(game)
                             mark_pick_notified(game, session)
                             game.pick_reason = mark_high_conf_notified(game.pick_reason or "")
                             session.commit()
@@ -1352,6 +1363,19 @@ async def health_check_job():
         logger.exception(f"Erro ao executar health checks: {e}")
 
 
+async def flush_message_buffers_job():
+    """
+    Job periódico para fazer flush dos buffers de mensagens.
+    Garante que mensagens consolidadas sejam enviadas mesmo se buffer não encher.
+    """
+    try:
+        from utils.telegram_message_buffer import flush_all_buffers
+        await flush_all_buffers()
+        logger.debug("📦 Buffers de mensagens verificados e flushados se necessário")
+    except Exception as e:
+        logger.exception(f"Erro ao fazer flush dos buffers: {e}")
+
+
 async def fetch_finished_games_results_job():
     """
     Job periódico que busca resultados de jogos finalizados que ainda não têm resultado.
@@ -1571,6 +1595,18 @@ def setup_scheduler():
         misfire_grace_time=300,
     )
     logger.info("🔍 Busca de resultados de jogos finalizados agendada a cada 30 minutos")
+    
+    # --- Flush periódico de buffers de mensagens ---
+    scheduler.add_job(
+        flush_message_buffers_job,
+        trigger=IntervalTrigger(minutes=2),  # A cada 2 minutos
+        id="flush_message_buffers",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+        misfire_grace_time=60,
+    )
+    logger.info("📦 Flush de buffers de mensagens agendado a cada 2 minutos")
     
     # --- Reavaliação horária dos jogos do dia ---
     scheduler.add_job(
