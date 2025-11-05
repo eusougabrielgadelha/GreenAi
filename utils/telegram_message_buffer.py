@@ -148,20 +148,90 @@ class MessageBuffer:
         if not buffer:
             return
         
-        # Consolida mensagens
-        consolidated = self._consolidate_messages(message_type, buffer)
+        # Para picks, agrupa por confiança e envia mensagens separadas
+        if message_type == "pick_now":
+            await self._flush_picks_by_confidence(buffer)
+        else:
+            # Para outros tipos, consolida normalmente
+            consolidated = self._consolidate_messages(message_type, buffer)
+            
+            if consolidated:
+                # Envia mensagem consolidada
+                from notifications.telegram import tg_send_message
+                tg_send_message(
+                    consolidated,
+                    parse_mode="HTML",
+                    message_type=message_type,
+                    game_id=buffer[0].game_id if buffer else None,
+                    ext_id=f"consolidated_{len(buffer)}"
+                )
+                logger.info(f"📦 Mensagem consolidada enviada: {message_type} ({len(buffer)} itens)")
+    
+    async def _flush_picks_by_confidence(self, messages: List[BufferedMessage]):
+        """Faz flush de picks agrupados por nível de confiança."""
+        from config.settings import HIGH_CONF_THRESHOLD
+        from models.database import SessionLocal, Game
+        from notifications.telegram import tg_send_message
         
-        if consolidated:
-            # Envia mensagem consolidada
-            from notifications.telegram import tg_send_message
-            tg_send_message(
-                consolidated,
-                parse_mode="HTML",
-                message_type=message_type,
-                game_id=buffer[0].game_id if buffer else None,
-                ext_id=f"consolidated_{len(buffer)}"
-            )
-            logger.info(f"📦 Mensagem consolidada enviada: {message_type} ({len(buffer)} itens)")
+        # Agrupa mensagens por nível de confiança
+        high_conf = []
+        medium_conf = []
+        low_conf = []
+        
+        with SessionLocal() as session:
+            for msg in messages:
+                game = None
+                if msg.game_id:
+                    game = session.query(Game).filter_by(id=msg.game_id).first()
+                
+                if game:
+                    prob = game.pick_prob or 0.0
+                    if prob >= HIGH_CONF_THRESHOLD:
+                        high_conf.append(msg)
+                    elif prob >= 0.40:
+                        medium_conf.append(msg)
+                    else:
+                        low_conf.append(msg)
+                else:
+                    # Se não conseguir buscar o jogo, coloca na média (fallback)
+                    medium_conf.append(msg)
+        
+        # Envia mensagem consolidada para cada nível de confiança
+        if high_conf:
+            consolidated = self._consolidate_picks_by_confidence(high_conf, "alta")
+            if consolidated:
+                tg_send_message(
+                    consolidated,
+                    parse_mode="HTML",
+                    message_type="pick_now",
+                    game_id=high_conf[0].game_id if high_conf else None,
+                    ext_id=f"picks_high_{len(high_conf)}"
+                )
+                logger.info(f"📦 Picks de alta confiança enviados: {len(high_conf)} itens")
+        
+        if medium_conf:
+            consolidated = self._consolidate_picks_by_confidence(medium_conf, "média")
+            if consolidated:
+                tg_send_message(
+                    consolidated,
+                    parse_mode="HTML",
+                    message_type="pick_now",
+                    game_id=medium_conf[0].game_id if medium_conf else None,
+                    ext_id=f"picks_medium_{len(medium_conf)}"
+                )
+                logger.info(f"📦 Picks de média confiança enviados: {len(medium_conf)} itens")
+        
+        if low_conf:
+            consolidated = self._consolidate_picks_by_confidence(low_conf, "baixa")
+            if consolidated:
+                tg_send_message(
+                    consolidated,
+                    parse_mode="HTML",
+                    message_type="pick_now",
+                    game_id=low_conf[0].game_id if low_conf else None,
+                    ext_id=f"picks_low_{len(low_conf)}"
+                )
+                logger.info(f"📦 Picks de baixa confiança enviados: {len(low_conf)} itens")
     
     def _consolidate_messages(self, message_type: str, messages: List[BufferedMessage]) -> Optional[str]:
         """
@@ -241,6 +311,70 @@ class MessageBuffer:
                     # Fallback: usa conteúdo original
                     lines.append(f"<b>{i}.</b> {msg.content}")
                     lines.append("")
+        
+        return "\n".join(lines)
+    
+    def _consolidate_picks_by_confidence(self, messages: List[BufferedMessage], confidence_level: str) -> str:
+        """Consolida picks de um nível de confiança específico."""
+        from models.database import SessionLocal, Game
+        
+        # Ícones e labels por nível
+        confidence_config = {
+            "alta": {"icon": "🔥", "label": "ALTA CONFIANÇA", "threshold": "≥60%"},
+            "média": {"icon": "⭐", "label": "MÉDIA CONFIANÇA", "threshold": "40-60%"},
+            "baixa": {"icon": "💡", "label": "BAIXA CONFIANÇA", "threshold": "<40%"}
+        }
+        
+        config = confidence_config.get(confidence_level, {"icon": "🎯", "label": "CONFIANÇA", "threshold": ""})
+        
+        lines = [
+            f"{config['icon']} <b>PICKS - {config['label']} ({config['threshold']})</b>",
+            f"<i>{len(messages)} jogo(s)</i>",
+            "━━━━━━━━━━━━━━━━━━━━━━",
+            ""
+        ]
+        
+        with SessionLocal() as session:
+            # Ordena por horário
+            games_with_time = []
+            for msg in messages:
+                game = None
+                if msg.game_id:
+                    game = session.query(Game).filter_by(id=msg.game_id).first()
+                if game:
+                    games_with_time.append((game.start_time, game, msg))
+            
+            # Ordena por horário
+            games_with_time.sort(key=lambda x: x[0])
+            
+            for i, (start_time, game, msg) in enumerate(games_with_time, 1):
+                pick_map = {
+                    "home": game.team_home,
+                    "draw": "Empate",
+                    "away": game.team_away
+                }
+                pick_str = pick_map.get(game.pick, game.pick or "—")
+                
+                start_local = game.start_time.astimezone(ZONE)
+                time_str = start_local.strftime("%H:%M")
+                
+                pick_odd = 0.0
+                if game.pick == "home":
+                    pick_odd = game.odds_home or 0
+                elif game.pick == "draw":
+                    pick_odd = game.odds_draw or 0
+                elif game.pick == "away":
+                    pick_odd = game.odds_away or 0
+                
+                prob = (game.pick_prob or 0) * 100
+                ev = (game.pick_ev or 0) * 100
+                
+                lines.append(
+                    f"<b>{i}.</b> <b>{game.team_home}</b> vs <b>{game.team_away}</b>\n"
+                    f"   🕐 {time_str}h | Pick: <b>{pick_str}</b> @ {pick_odd:.2f}\n"
+                    f"   📊 Prob: {prob:.0f}% | EV: {ev:+.1f}%"
+                )
+                lines.append("")
         
         return "\n".join(lines)
     
