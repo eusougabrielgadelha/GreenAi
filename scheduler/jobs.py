@@ -947,9 +947,9 @@ async def _handle_active_game(session, game: Game, tracker: LiveGameTracker, liv
             "validation_reason": opportunity.get("validation_reason", "")
         }
         
-        # Envia mensagem de "Palpite Validado"
-        message = fmt_live_bet_opportunity(game, opportunity, stats_with_validation)
-        tg_send_message(message, message_type="live_opportunity", game_id=game.id, ext_id=game.ext_id)
+        # Envia mensagem de "Palpite Validado" usando buffer
+        from utils.telegram_helpers import send_live_opportunity_with_buffer
+        send_live_opportunity_with_buffer(game, opportunity, stats_with_validation)
 
         # Atualiza o tracker
         tracker.last_pick_sent = now_utc

@@ -43,6 +43,11 @@ class MessageBuffer:
                 "window_seconds": int(os.getenv("TELEGRAM_UPGRADE_BUFFER_SECONDS", "60")),  # 1 minuto
                 "max_items": int(os.getenv("TELEGRAM_UPGRADE_BUFFER_MAX", "20")),  # Máximo 20 upgrades
                 "enabled": os.getenv("TELEGRAM_UPGRADE_BUFFER_ENABLED", "true").lower() == "true"
+            },
+            "live_opportunity": {
+                "window_seconds": int(os.getenv("TELEGRAM_LIVE_BUFFER_SECONDS", "180")),  # 3 minutos
+                "max_items": int(os.getenv("TELEGRAM_LIVE_BUFFER_MAX", "5")),  # Máximo 5 oportunidades
+                "enabled": os.getenv("TELEGRAM_LIVE_BUFFER_ENABLED", "true").lower() == "true"
             }
         }
         
@@ -176,6 +181,8 @@ class MessageBuffer:
             return self._consolidate_picks(messages)
         elif message_type == "watch_upgrade":
             return self._consolidate_upgrades(messages)
+        elif message_type == "live_opportunity":
+            return self._consolidate_live_opportunities(messages)
         
         # Fallback: junta todas as mensagens
         lines = [msg.content for msg in messages]
@@ -290,6 +297,61 @@ class MessageBuffer:
                     lines.append(f"<b>{i}.</b> {msg.content}")
                     lines.append("")
         
+        return "\n".join(lines)
+    
+    def _consolidate_live_opportunities(self, messages: List[BufferedMessage]) -> str:
+        """Consolida oportunidades ao vivo em uma mensagem única."""
+        from models.database import SessionLocal, Game
+        
+        lines = [
+            f"⚡ <b>OPORTUNIDADES AO VIVO ({len(messages)})</b>",
+            "━━━━━━━━━━━━━━━━━━━━━━",
+            ""
+        ]
+        
+        with SessionLocal() as session:
+            for i, msg in enumerate(messages, 1):
+                game = None
+                if msg.game_id:
+                    game = session.query(Game).filter_by(id=msg.game_id).first()
+                
+                # Extrai informações da oportunidade dos metadados
+                opportunity = msg.metadata.get("opportunity", {})
+                stats = msg.metadata.get("stats", {})
+                
+                if game and opportunity:
+                    match_time = stats.get('match_time', '—')
+                    score = stats.get('score', '—')
+                    option = opportunity.get('option', '—')
+                    odd = opportunity.get('odd', 0.0)
+                    est_p = opportunity.get("p_est", 0.0) * 100
+                    stake = opportunity.get("stake", 0.0)
+                    profit = opportunity.get("profit", 0.0)
+                    confidence_score = stats.get('confidence_score', 0.0) * 100
+                    
+                    urgency = "🔥🔥🔥" if any(x in match_time for x in ["85","86","87","88","89","90"]) else "🔥"
+                    
+                    lines.append(
+                        f"<b>{i}.</b> {urgency} <b>{game.team_home}</b> vs <b>{game.team_away}</b>\n"
+                        f"   ⏱ {match_time} | Placar: {score}\n"
+                        f"   💰 {option} @ {odd:.2f} | Prob: {est_p:.0f}%\n"
+                        f"   📊 Confiança: {confidence_score:.0f}% | Aporte: R$ {stake:.2f} | Lucro: R$ {profit:.2f}"
+                    )
+                    lines.append("")
+                else:
+                    # Fallback: usa conteúdo original (mas simplificado)
+                    # Remove cabeçalho e separadores para evitar duplicação
+                    content = msg.content
+                    if "━━━━━━━━━━━━━━━━━━━━" in content:
+                        # Pega apenas a parte relevante após o separador
+                        parts = content.split("━━━━━━━━━━━━━━━━━━━━")
+                        if len(parts) > 1:
+                            content = parts[1].strip()
+                    
+                    lines.append(f"<b>{i}.</b> {content}")
+                    lines.append("")
+        
+        lines.append("\n⚡ <i>Aja rápido — odds ao vivo mudam!</i>")
         return "\n".join(lines)
     
     async def flush_all(self):
