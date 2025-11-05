@@ -184,17 +184,22 @@ def fmt_pick_now(g: Game) -> str:
 
 
 def fmt_results_batch(games: List[Game], date_local: datetime = None) -> str:
-    """Mensagem única listando resultados de vários jogos (pick e resultado real)."""
+    """Mensagem única (HTML) listando resultados de vários jogos (pick e resultado real)."""
     if date_local is None:
         date_local = datetime.now(ZONE)
     dstr = date_local.strftime("%d/%m/%Y")
-    header = f"Resultados das Apostas — {dstr}"
+    msg = f"📊 <b>RESULTADOS DAS APOSTAS</b>\n"
+    msg += f"<i>{dstr}</i>\n"
+    msg += "━━━━━━━━━━━━━━━━━━━━\n\n"
     total = len(games)
     hits = sum(1 for g in games if getattr(g, 'hit', None) is True)
     misses = sum(1 for g in games if getattr(g, 'hit', None) is False)
     acc = (hits / total * 100) if total else 0
-    msg = f"{header}\n"
-    msg += f"Resumo: {total} jogos | {hits} acertos, {misses} erros | Taxa: {acc:.0f}%\n\n"
+    msg += f"📈 <b>RESUMO</b>\n"
+    msg += f"├ Total: <b>{total}</b>\n"
+    msg += f"├ ✅ Acertos: <b>{hits}</b>\n"
+    msg += f"├ ❌ Erros: <b>{misses}</b>\n"
+    msg += f"└ Assertividade: <b>{acc:.0f}%</b>\n\n"
     # Ordena por horário
     games_sorted = sorted(games, key=lambda g: g.start_time or datetime(1970,1,1))
     for idx, g in enumerate(games_sorted, 1):
@@ -209,9 +214,11 @@ def fmt_results_batch(games: List[Game], date_local: datetime = None) -> str:
             odd = float(g.odds_draw or 0.0)
         elif g.pick == "away":
             odd = float(g.odds_away or 0.0)
-        status = "ACERTOU" if g.hit else ("ERROU" if g.hit is False else "—")
-        msg += f"{idx}) {g.team_home} vs {g.team_away} — {hhmm}\n"
-        msg += f"   Pick: {pick_str} @ {odd:.2f} | Resultado real: {outcome_str} | {status}\n\n"
+        status_emoji = "✅" if g.hit else ("❌" if g.hit is False else "ℹ️")
+        status_text = "ACERTOU" if g.hit else ("ERROU" if g.hit is False else "SEM VERIFICAÇÃO")
+        msg += f"{status_emoji} <b>{idx}.</b> <b>{esc(g.team_home)}</b> vs <b>{esc(g.team_away)}</b>\n"
+        msg += f"   🕐 {hhmm}h | Pick: <b>{esc(pick_str)}</b> @ {odd:.2f}\n"
+        msg += f"   📊 Resultado real: <b>{esc(outcome_str)}</b> | {status_text}\n\n"
     return msg
 
 

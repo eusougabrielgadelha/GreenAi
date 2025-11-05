@@ -1473,7 +1473,7 @@ async def fetch_finished_games_results_job():
                 from utils.formatters import fmt_results_batch
                 from notifications.telegram import tg_send_message
                 msg = fmt_results_batch(results_batch)
-                tg_send_message(msg, parse_mode=None)  # texto simples
+                tg_send_message(msg)  # HTML por padrão
         except Exception:
             logger.exception("Erro ao enviar mensagem em lote de resultados")
                 except Exception as e:
