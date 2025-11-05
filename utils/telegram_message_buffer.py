@@ -317,15 +317,16 @@ class MessageBuffer:
     def _consolidate_picks_by_confidence(self, messages: List[BufferedMessage], confidence_level: str) -> str:
         """Consolida picks de um nível de confiança específico."""
         from models.database import SessionLocal, Game
+        from utils.stats import get_accuracy_by_confidence
         
         # Ícones e labels por nível
         confidence_config = {
-            "alta": {"icon": "🔥", "label": "ALTA CONFIANÇA", "threshold": "≥60%"},
-            "média": {"icon": "⭐", "label": "MÉDIA CONFIANÇA", "threshold": "40-60%"},
-            "baixa": {"icon": "💡", "label": "BAIXA CONFIANÇA", "threshold": "<40%"}
+            "alta": {"icon": "🔥", "label": "ALTA CONFIANÇA", "threshold": "≥60%", "key": "high"},
+            "média": {"icon": "⭐", "label": "MÉDIA CONFIANÇA", "threshold": "40-60%", "key": "medium"},
+            "baixa": {"icon": "💡", "label": "BAIXA CONFIANÇA", "threshold": "<40%", "key": "low"}
         }
         
-        config = confidence_config.get(confidence_level, {"icon": "🎯", "label": "CONFIANÇA", "threshold": ""})
+        config = confidence_config.get(confidence_level, {"icon": "🎯", "label": "CONFIANÇA", "threshold": "", "key": "high"})
         
         lines = [
             f"{config['icon']} <b>PICKS - {config['label']} ({config['threshold']})</b>",
@@ -375,6 +376,25 @@ class MessageBuffer:
                     f"   📊 Prob: {prob:.0f}% | EV: {ev:+.1f}%"
                 )
                 lines.append("")
+            
+            # Adiciona assertividade do nível de confiança
+            try:
+                accuracy_stats = get_accuracy_by_confidence(session)
+                level_stats = accuracy_stats.get(config['key'], {})
+                
+                if level_stats.get('total', 0) > 0:
+                    accuracy_pct = level_stats.get('accuracy_percent', 0.0)
+                    hits = level_stats.get('hits', 0)
+                    total = level_stats.get('total', 0)
+                    
+                    lines.append("━━━━━━━━━━━━━━━━━━━━━━")
+                    lines.append(
+                        f"📊 <b>Assertividade {config['label']}:</b> "
+                        f"<b>{accuracy_pct:.1f}%</b> "
+                        f"({hits} acertos de {total} jogos)"
+                    )
+            except Exception as e:
+                logger.warning(f"Erro ao calcular assertividade por confiança: {e}")
         
         return "\n".join(lines)
     
