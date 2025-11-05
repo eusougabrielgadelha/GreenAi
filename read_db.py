@@ -13,6 +13,20 @@ def print_separator():
     print("\n" + "="*60 + "\n")
 
 
+def _label_for_outcome(game: Game, code: str) -> str:
+    """Converte 'home/draw/away' no rótulo legível (time da casa/Empate/time de fora)."""
+    if not code:
+        return "N/A"
+    code = (code or "").strip().lower()
+    if code == "home":
+        return game.team_home or "Casa"
+    if code == "draw":
+        return "Empate"
+    if code == "away":
+        return game.team_away or "Fora"
+    return code
+
+
 def show_summary():
     """Mostra resumo geral do banco."""
     with SessionLocal() as session:
@@ -105,7 +119,9 @@ def show_finished_games_with_results(limit=50):
             print(f"   {game.competition or 'N/A'} - {start_str}")
             
             if game.pick:
-                print(f"   Pick: {game.pick} | Resultado: {game.outcome}")
+                pick_label = _label_for_outcome(game, game.pick)
+                outcome_label = _label_for_outcome(game, game.outcome) if game.outcome else "N/A"
+                print(f"   Pick: {pick_label} | Resultado real: {outcome_label}")
                 if game.will_bet:
                     print(f"   [SELECIONADO PARA APOSTAR]")
             
@@ -153,7 +169,9 @@ def show_recent_games(limit=10):
                 else:
                     result_label = ">>> ERROU <<<"
                 print(f"      {result_label}")
-                print(f"      Resultado: {game.outcome} | Pick era: {game.pick}")
+                pick_label = _label_for_outcome(game, game.pick)
+                outcome_label = _label_for_outcome(game, game.outcome) if game.outcome else "N/A"
+                print(f"      Pick: {pick_label} | Resultado real: {outcome_label}")
             elif game.status == "ended":
                 print(f"      [FINALIZADO SEM RESULTADO REGISTRADO]")
 
@@ -231,7 +249,9 @@ def show_today_games():
                     else:
                         result = ">>> ERROU <<<"
                     print(f"      {result} {game.team_home} vs {game.team_away}")
-                    print(f"         Pick: {game.pick} | Resultado: {game.outcome}")
+                    pick_label = _label_for_outcome(game, game.pick)
+                    outcome_label = _label_for_outcome(game, game.outcome) if game.outcome else "N/A"
+                    print(f"         Pick: {pick_label} | Resultado real: {outcome_label}")
                 else:
                     print(f"      [?] {game.team_home} vs {game.team_away} (sem resultado registrado)")
 
@@ -276,7 +296,9 @@ def show_selected_games(limit=20):
                     else:
                         result_label = ">>> ERROU <<<"
                     print(f"      {result_label}")
-                    print(f"      Resultado: {game.outcome} | Pick era: {game.pick}")
+                    pick_label = _label_for_outcome(game, game.pick)
+                    outcome_label = _label_for_outcome(game, game.outcome) if game.outcome else "N/A"
+                    print(f"      Pick: {pick_label} | Resultado real: {outcome_label}")
                 else:
                     print(f"      [FINALIZADO SEM RESULTADO REGISTRADO]")
         
