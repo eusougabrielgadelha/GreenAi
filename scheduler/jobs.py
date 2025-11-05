@@ -1414,6 +1414,7 @@ async def fetch_finished_games_results_job():
             
             logger.info(f"🔍 Buscando resultados para {len(finished_no_result)} jogo(s) finalizado(s) sem resultado")
             
+            results_batch = []
             for game in finished_no_result:
                 try:
                     # Verificar se o jogo já aconteceu (comparando data/hora)
@@ -1467,17 +1468,18 @@ async def fetch_finished_games_results_job():
                         logger.info(f"✅ Resultado do jogo {game.id} salvo (notificação em lote)")
                     else:
                         logger.debug(f"⚠️  Não foi possível obter resultado para jogo {game.id} ainda (tentará novamente)")
-        # Após processar o bloco, se houver jogos com resultado, enviar mensagem única
-        try:
-            if 'results_batch' in locals() and results_batch:
-                from utils.formatters import fmt_results_batch
-                from notifications.telegram import tg_send_message
-                msg = fmt_results_batch(results_batch)
-                tg_send_message(msg)  # HTML por padrão
-        except Exception:
-            logger.exception("Erro ao enviar mensagem em lote de resultados")
                 except Exception as e:
                     logger.exception(f"Erro ao buscar resultado para jogo {game.id}: {e}")
+
+            # Após processar o bloco, se houver jogos com resultado, enviar mensagem única
+            try:
+                if results_batch:
+                    from utils.formatters import fmt_results_batch
+                    from notifications.telegram import tg_send_message
+                    msg = fmt_results_batch(results_batch)
+                    tg_send_message(msg)  # HTML por padrão
+            except Exception:
+                logger.exception("Erro ao enviar mensagem em lote de resultados")
                     
     except Exception as e:
         logger.exception(f"Erro ao executar job de busca de resultados: {e}")
