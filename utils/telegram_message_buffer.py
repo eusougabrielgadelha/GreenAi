@@ -47,7 +47,7 @@ class MessageBuffer:
             "live_opportunity": {
                 "window_seconds": int(os.getenv("TELEGRAM_LIVE_BUFFER_SECONDS", "180")),  # 3 minutos
                 "max_items": int(os.getenv("TELEGRAM_LIVE_BUFFER_MAX", "5")),  # Máximo 5 oportunidades
-                "enabled": os.getenv("TELEGRAM_LIVE_BUFFER_ENABLED", "true").lower() == "true"
+                "enabled": False  # Sempre desabilitado - oportunidades ao vivo devem ser enviadas imediatamente
             }
         }
         
