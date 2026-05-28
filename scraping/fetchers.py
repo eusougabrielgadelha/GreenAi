@@ -4,7 +4,8 @@ import requests
 from typing import Optional
 from config.settings import (
     HAS_PLAYWRIGHT, SCRAPE_BACKEND, REQUESTS_TIMEOUT, HTML_TIMEOUT, USER_AGENT,
-    PLAYWRIGHT_NAVIGATION_TIMEOUT, PLAYWRIGHT_SELECTOR_TIMEOUT, PLAYWRIGHT_NETWORKIDLE_TIMEOUT
+    PLAYWRIGHT_NAVIGATION_TIMEOUT, PLAYWRIGHT_SELECTOR_TIMEOUT, PLAYWRIGHT_NETWORKIDLE_TIMEOUT,
+    PLAYWRIGHT_RESULT_TIMEOUT,
 )
 from utils.logger import logger
 from scraping.betnacional import try_parse_events
@@ -103,18 +104,25 @@ def _backend_auto() -> str:
     return "playwright" if HAS_PLAYWRIGHT else "requests"
 
 
-async def _fetch_with_playwright(url: str, wait_for_selector: str = None, wait_time: int = 3000) -> str:
+async def _fetch_with_playwright(
+    url: str,
+    wait_for_selector: str = None,
+    wait_time: int = 3000,
+    selector_timeout: int = None,
+) -> str:
     """
     Renderiza a página com Playwright e retorna o HTML.
-    
+
     Args:
         url: URL para buscar
         wait_for_selector: Seletor CSS para aguardar (opcional)
         wait_time: Tempo adicional em ms para aguardar após carregamento (padrão: 3000ms)
+        selector_timeout: Timeout em ms para aguardar o seletor (default: PLAYWRIGHT_SELECTOR_TIMEOUT)
     """
     if not HAS_PLAYWRIGHT:
         raise RuntimeError("Playwright não disponível no ambiente.")
     from playwright.async_api import async_playwright
+    sel_timeout = selector_timeout if selector_timeout is not None else PLAYWRIGHT_SELECTOR_TIMEOUT
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context(
@@ -124,17 +132,19 @@ async def _fetch_with_playwright(url: str, wait_for_selector: str = None, wait_t
         page = await context.new_page()
         try:
             await page.goto(url, wait_until="networkidle", timeout=PLAYWRIGHT_NETWORKIDLE_TIMEOUT)
-            
+
             # Aguarda seletor específico se fornecido
             if wait_for_selector:
                 try:
-                    await page.wait_for_selector(wait_for_selector, timeout=PLAYWRIGHT_SELECTOR_TIMEOUT)
-                except:
-                    pass  # Continua mesmo se não encontrar
-            
+                    await page.wait_for_selector(wait_for_selector, timeout=sel_timeout)
+                except Exception as e:
+                    logger.warning(
+                        f"Timeout/erro aguardando seletor '{wait_for_selector}' em {url} ({sel_timeout}ms): {type(e).__name__}"
+                    )
+
             # Aguarda tempo adicional para JavaScript carregar
             await page.wait_for_timeout(wait_time)
-            
+
             html = await page.content()
             return html
         finally:
@@ -145,11 +155,21 @@ async def _fetch_with_playwright(url: str, wait_for_selector: str = None, wait_t
 async def fetch_events_from_link(url: str, backend: str):
     """
     Busca eventos de uma URL do BetNacional.
-    Usa APENAS HTML scraping (XHR desativado).
+
+    Estratégia:
+      1) XHR (API events-by-seasons) como caminho primário quando dá pra extrair
+         (sport_id, category_id, tournament_id) da URL. Rápido, limpo e traz país.
+      2) Fallback HTML (Playwright/requests + try_parse_events) se a API falhar
+         ou se os IDs não puderem ser inferidos.
     """
     from utils.analytics_logger import log_extraction
-    from scraping.betnacional import try_parse_events
-    
+    from scraping.betnacional import (
+        try_parse_events,
+        extract_ids_from_url,
+        fetch_events_from_api_async,
+        parse_events_from_api,
+    )
+
     def _other(b: str) -> str:
         return "requests" if b == "playwright" else "playwright"
 
@@ -161,10 +181,45 @@ async def fetch_events_from_link(url: str, backend: str):
         stage="fetch_events",
         status="started"
     )
-    
-    # Usar APENAS HTML scraping (XHR desativado)
+
+    # ── Caminho 1: XHR ────────────────────────────────────────────────────
+    ids = extract_ids_from_url(url)
+    if ids is not None:
+        sport_id, category_id, tournament_id = ids
+        logger.info(
+            "🔌 Tentando XHR para %s (sport=%s, cat=%s, tour=%s)",
+            url, sport_id, category_id, tournament_id,
+        )
+        try:
+            json_data = await fetch_events_from_api_async(
+                sport_id, category_id, tournament_id, market_id=1
+            )
+            if json_data:
+                evs = parse_events_from_api(json_data, url)
+                if evs:
+                    logger.info("✅ XHR retornou %d eventos para %s", len(evs), url)
+                    log_extraction(
+                        url, len(evs), "xhr", success=True,
+                        metadata={"attempt": 1, "method": "xhr"}
+                    )
+                    return evs
+                logger.info("XHR respondeu mas parser não extraiu eventos; caindo pro HTML…")
+            else:
+                logger.info("XHR não retornou dados; caindo pro HTML…")
+        except Exception as e:
+            from utils.error_handler import log_error_with_context
+            log_error_with_context(
+                e,
+                context={"url": url, "stage": "xhr_primary"},
+                level="warning",
+                reraise=False,
+            )
+    else:
+        logger.info("URL %s não bate no padrão /events/sport/cat/tour; pulando XHR.", url)
+
+    # ── Caminho 2: HTML scraping (fallback) ───────────────────────────────
     backend_sel = backend if backend != "auto" else _backend_auto()
-    logger.info("🌐 Usando HTML scraping — backend=%s (XHR desativado)", backend_sel)
+    logger.info("🌐 Fallback HTML — backend=%s", backend_sel)
 
     for attempt, b in enumerate([backend_sel, _other(backend_sel)]):
         try:
@@ -214,7 +269,7 @@ async def fetch_game_result(ext_id: str, source_link: str) -> Optional[dict]:
         Ou None se não conseguir extrair
     """
     from scraping.betnacional import scrape_game_result
-    from utils.cache import result_cache
+    from utils.cache import result_cache, negative_result_cache
     
     # ETAPA 0: Verificar cache primeiro
     cached_result = result_cache.get(ext_id)
@@ -231,6 +286,11 @@ async def fetch_game_result(ext_id: str, source_link: str) -> Optional[dict]:
         logger.info(f"✅ Resultado encontrado no cache para jogo {ext_id}: {cached_result.get('outcome')}")
         return cached_result
     
+    # ETAPA 0.5: Verificar cache negativo (jogo recém-pesquisado sem resultado)
+    if negative_result_cache.get(ext_id) is not None:
+        logger.debug(f"⏭️ Cache negativo HIT para jogo {ext_id} — pulando refetch (será tentado novamente após TTL)")
+        return None
+
     # ETAPA 1: Usar APENAS HTML scraping (XHR desativado)
     try:
         logger.debug(f"🌐 Buscando resultado via HTML scraping para jogo {ext_id}")
@@ -243,19 +303,24 @@ async def fetch_game_result(ext_id: str, source_link: str) -> Optional[dict]:
                 html = await _fetch_with_playwright(
                     source_link,
                     wait_for_selector="[data-testid='liveMatchTracker']",
-                    wait_time=2500
+                    wait_time=2500,
+                    selector_timeout=PLAYWRIGHT_RESULT_TIMEOUT,
                 )
-            except Exception:
+            except Exception as e:
+                logger.warning(f"⚠️ Falha aguardando liveMatchTracker para {ext_id}: {type(e).__name__}. Fallback wait-only.")
                 html = await _fetch_with_playwright(source_link, wait_time=3500)
-            # Segunda passada curta aguardando o bloco de resultado explícito
+            # Segunda passada aguardando o bloco de resultado explícito (SportRadar tarda renderizar)
             try:
                 html = await _fetch_with_playwright(
                     source_link,
                     wait_for_selector="#lmt-match-preview .sr-lmt-plus-scb__result",
-                    wait_time=2500
+                    wait_time=4000,
+                    selector_timeout=PLAYWRIGHT_RESULT_TIMEOUT,
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(
+                    f"⚠️ Falha aguardando widget de resultado SportRadar para {ext_id}: {type(e).__name__}. Usando HTML da 1ª passada."
+                )
         else:
             html = await _fetch_requests_async(source_link)
         result = scrape_game_result(html, ext_id)
@@ -265,7 +330,8 @@ async def fetch_game_result(ext_id: str, source_link: str) -> Optional[dict]:
             result_cache.set(ext_id, result)
             return result
         else:
-            logger.warning(f"⚠️ Resultado não encontrado no HTML para jogo {ext_id}")
+            logger.warning(f"⚠️ Resultado não encontrado no HTML para jogo {ext_id} — cacheado por TTL curto")
+            negative_result_cache.set(ext_id, "_not_found_")
     except Exception as e:
         from utils.error_handler import log_error_with_context
         log_error_with_context(

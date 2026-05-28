@@ -139,3 +139,9 @@ class ResultCache:
 # TTL de 2 horas (120 minutos) - resultados de jogos não mudam após terminar
 result_cache = ResultCache(ttl_minutes=120)
 
+# Cache negativo: marca jogos cuja busca por resultado falhou recentemente.
+# Evita refetch (Playwright) a cada ciclo de 30min do fetch_finished_games_results_job.
+# Widget SportRadar pode levar minutos pra renderizar resultado após FT, então 10min é
+# janela razoável: dá tempo do widget aparecer sem hammeram o site.
+negative_result_cache = ResultCache(ttl_minutes=10)
+

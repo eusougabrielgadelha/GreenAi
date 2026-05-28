@@ -456,10 +456,12 @@ def fmt_combined_bet(combined_bet: CombinedBet, games: List[Game]) -> str:
     pick_map = {"home": lambda g: g.team_home, "draw": lambda g: "Empate", "away": lambda g: g.team_away}
     
     for idx, game in enumerate(games_sorted, 1):
-        hhmm = game.start_time.astimezone(ZONE).strftime("%H:%M")
+        game_local = game.start_time.astimezone(ZONE)
+        date_short = game_local.strftime("%d/%m")
+        hhmm = game_local.strftime("%H:%M")
         resolver = pick_map.get(game.pick)
         pick_str = resolver(game) if callable(resolver) else (game.pick or "—")
-        
+
         # Determina odd do pick
         if game.pick == "home":
             pick_odd = float(game.odds_home or 0.0)
@@ -467,19 +469,184 @@ def fmt_combined_bet(combined_bet: CombinedBet, games: List[Game]) -> str:
             pick_odd = float(game.odds_draw or 0.0)
         else:
             pick_odd = float(game.odds_away or 0.0)
-        
+
         # Ícone de confiança
         prob = float(game.pick_prob or 0.0)
         confidence_icon = "🔥" if prob >= HIGH_CONF_THRESHOLD else "⭐"
-        
+
         msg += f"{confidence_icon} <b>{idx}.</b> {esc(game.team_home)} vs {esc(game.team_away)}\n"
-        msg += f"   🕐 {hhmm}h | Pick: <b>{pick_str}</b> @ {pick_odd:.2f}\n"
+        msg += f"   🗓 {date_short} 🕐 {hhmm} | Pick: <b>{pick_str}</b> @ {pick_odd:.2f}\n"
         msg += f"   📈 Prob: {prob*100:.0f}% | EV: {game.pick_ev*100:+.1f}%\n\n"
     
     msg += "━━━━━━━━━━━━━━━━━━━━\n"
     msg += "💡 <i>Esta aposta combina todos os jogos de alta confiança do dia.</i>\n"
-    
+
     return msg
+
+
+def fmt_combined_bet_result(bet: 'CombinedBet', session=None) -> str:
+    """
+    Mensagem HTML pro Telegram com resultado FINAL de uma múltipla.
+
+    Estados:
+      - status='won' → mensagem positiva, mostra lucro
+      - status='lost' → mostra qual jogo errou
+      - status='cancelled' → mostra jogo que cancelou (early-cancel)
+    """
+    def _fmt_brl(v: float) -> str:
+        return f"R$ {v:.2f}".replace(".", ",")
+
+    # Helper de moeda com sinal (lucro/perda)
+    def _fmt_brl_signed(v: float) -> str:
+        sign = "+" if v >= 0 else "-"
+        return f"R$ {sign}{abs(v):.2f}".replace(".", ",")
+
+    owns_session = False
+    if session is None:
+        session = SessionLocal()
+        owns_session = True
+
+    try:
+        status = (bet.status or "").lower()
+        status_map = {
+            "won": ("✅🎉", "ACERTOU"),
+            "lost": ("❌", "ERROU"),
+            "cancelled": ("⏸️", "CANCELADA"),
+        }
+        status_emoji, status_label = status_map.get(status, ("⚠️", (status.upper() or "DESCONHECIDO")))
+
+        # Buscar games associados
+        game_ids = list(bet.game_ids or [])
+        games = []
+        if game_ids:
+            games = session.query(Game).filter(Game.id.in_(game_ids)).all()
+
+        # Manter ordem original do bet.game_ids
+        games_by_id = {g.id: g for g in games}
+        games_ordered = [games_by_id[gid] for gid in game_ids if gid in games_by_id]
+
+        # Contagem de acertos sobre jogos verificados
+        total_games = bet.total_games or len(game_ids) or 0
+        hits = sum(1 for g in games_ordered if g.hit is True)
+
+        # Métricas financeiras
+        combined_odd = float(bet.combined_odd or 0.0)
+        stake = float(bet.example_stake or 0.0)
+        if status == "won":
+            pnl_label = "Lucro"
+            pnl_value = (combined_odd - 1.0) * stake
+        elif status in ("lost", "cancelled"):
+            pnl_label = "Perda"
+            pnl_value = -stake
+        else:
+            pnl_label = "Resultado"
+            pnl_value = 0.0
+
+        # Cabeçalho
+        msg = f"🎯 <b>RESULTADO DA MÚLTIPLA</b> {status_emoji}\n"
+        msg += "━━━━━━━━━━━━━━━━━━━━\n\n"
+
+        # Resumo
+        msg += "📊 <b>RESUMO</b>\n"
+        msg += f"├ Status: <b>{status_label}</b>\n"
+        msg += f"├ Acertos: <b>{hits}/{total_games}</b>\n"
+        msg += f"├ Odd combinada: <b>{combined_odd:.2f}</b>\n"
+        msg += f"├ Aposta exemplo: <b>{_fmt_brl(stake)}</b>\n"
+        msg += f"└ {pnl_label}: <b>{_fmt_brl_signed(pnl_value)}</b>\n\n"
+
+        # Jogos
+        msg += "⚽ <b>JOGOS</b>\n\n"
+
+        outcome_dict = bet.outcome or {}
+        pick_map_fn = {
+            "home": lambda g: g.team_home,
+            "draw": lambda g: "Empate",
+            "away": lambda g: g.team_away,
+        }
+
+        # Iterar pareando picks/odds via índice (bet.picks/bet.odds são listas paralelas)
+        picks_list = list(bet.picks or [])
+        odds_list = list(bet.odds or [])
+
+        for idx, gid in enumerate(game_ids, 0):
+            g = games_by_id.get(gid)
+            if g is None:
+                # Jogo deletado/ausente — degrade gracioso
+                pick_raw = picks_list[idx] if idx < len(picks_list) else "—"
+                odd_val = float(odds_list[idx]) if idx < len(odds_list) and odds_list[idx] is not None else 0.0
+                msg += f"⚠️ <b>{idx+1}.</b> Jogo indisponível\n"
+                msg += f"   → Pick: <b>{esc(str(pick_raw))}</b> @ {odd_val:.2f}\n\n"
+                continue
+
+            team_home = esc(g.team_home or "—")
+            team_away = esc(g.team_away or "—")
+
+            # Resolver pick (preferir g.pick; fallback pra bet.picks[idx])
+            pick_key = g.pick if g.pick in ("home", "draw", "away") else (
+                picks_list[idx] if idx < len(picks_list) else None
+            )
+            pick_resolver = pick_map_fn.get(pick_key)
+            pick_str = pick_resolver(g) if pick_resolver else (str(pick_key) if pick_key else "—")
+
+            # Odd do pick: usar bet.odds[idx] se válida, senão derivar do game
+            if idx < len(odds_list) and odds_list[idx] is not None:
+                pick_odd = float(odds_list[idx])
+            elif pick_key == "home":
+                pick_odd = float(g.odds_home or 0.0)
+            elif pick_key == "draw":
+                pick_odd = float(g.odds_draw or 0.0)
+            elif pick_key == "away":
+                pick_odd = float(g.odds_away or 0.0)
+            else:
+                pick_odd = 0.0
+
+            # Emoji individual
+            if g.hit is True:
+                game_emoji = "✅"
+                game_status = "ACERTOU"
+            elif g.hit is False:
+                game_emoji = "❌"
+                outcome_key = outcome_dict.get(str(g.id)) or g.outcome
+                outcome_resolver = pick_map_fn.get(outcome_key)
+                outcome_str = outcome_resolver(g) if outcome_resolver else (str(outcome_key) if outcome_key else "—")
+                game_status = f"ERROU (Resultado: {esc(outcome_str)})"
+            elif status == "cancelled":
+                game_emoji = "⏸"
+                game_status = "CANCELADA"
+            else:
+                game_emoji = "⏳"
+                game_status = "PENDENTE"
+
+            # Data e hora local do jogo
+            if g.start_time is not None:
+                try:
+                    g_local = g.start_time.astimezone(ZONE)
+                    datetime_short = g_local.strftime("%d/%m %H:%M")
+                except (ValueError, AttributeError):
+                    datetime_short = "—"
+            else:
+                datetime_short = "—"
+
+            msg += f"{game_emoji} <b>{idx+1}.</b> {team_home} vs {team_away}\n"
+            msg += f"   🗓 {datetime_short} | Pick: <b>{esc(pick_str)}</b> @ {pick_odd:.2f} → <b>{game_status}</b>\n\n"
+
+        # Rodapé com data
+        if bet.bet_date is not None:
+            try:
+                date_local = bet.bet_date.astimezone(ZONE)
+            except (ValueError, AttributeError):
+                date_local = bet.bet_date
+            date_str = date_local.strftime("%d/%m/%Y")
+        else:
+            date_str = "—"
+
+        msg += "━━━━━━━━━━━━━━━━━━━━\n"
+        msg += f"📅 <i>Data: {date_str}</i>\n"
+
+        return msg
+    finally:
+        if owns_session:
+            session.close()
 
 
 def fmt_today_games_summary(games: List[Game], date, analyzed: int) -> str:

@@ -120,6 +120,7 @@ async def scan_games_for_date(
                             source_link=url,
                             game_url=getattr(ev, "game_url", None),
                             competition=ev.competition,
+                            country=getattr(ev, "country", None),
                             team_home=ev.team_home,
                             team_away=ev.team_away,
                             start_time=start_utc,
@@ -144,6 +145,7 @@ async def scan_games_for_date(
                                 g.source_link = url
                                 g.game_url = getattr(ev, "game_url", None) or g.game_url
                                 g.competition = ev.competition or g.competition
+                                g.country = getattr(ev, "country", None) or g.country
                                 g.team_home = ev.team_home or g.team_home
                                 g.team_away = ev.team_away or g.team_away
                                 g.odds_home = ev.odds_home

@@ -15,7 +15,9 @@ from config.settings import (
     HIGH_CONF_THRESHOLD, MIN_EV, MIN_PROB, WATCHLIST_DELTA, WATCHLIST_MIN_LEAD_MIN,
     START_ALERT_MIN, LATE_WATCH_WINDOW_MIN, get_all_betting_links,
     is_high_conf, was_high_conf_notified, mark_high_conf_notified,
-    ONLY_HIGH_CONF_GAMES
+    ONLY_HIGH_CONF_GAMES,
+    MONITOR_LIVE_INTERVAL_MIN, FLUSH_BUFFERS_INTERVAL_MIN,
+    UPDATE_LIVE_STATUS_INTERVAL_MIN, FETCH_FINISHED_INTERVAL_MIN,
 )
 from utils.logger import logger
 from utils.stats import to_aware_utc, save_odd_history
@@ -201,6 +203,7 @@ async def night_scan_for_early_games():
                             source_link=url,
                             game_url=getattr(ev, "game_url", None),
                             competition=ev.competition,
+                            country=getattr(ev, "country", None),
                             team_home=ev.team_home,
                             team_away=ev.team_away,
                             start_time=start_utc,
@@ -224,6 +227,7 @@ async def night_scan_for_early_games():
                                 g.source_link = url
                                 g.game_url = getattr(ev, "game_url", None) or g.game_url
                                 g.competition = ev.competition or g.competition
+                                g.country = getattr(ev, "country", None) or g.country
                                 g.team_home = ev.team_home or g.team_home
                                 g.team_away = ev.team_away or g.team_away
                                 g.odds_home = ev.odds_home
@@ -447,6 +451,7 @@ async def rescan_watchlist_job():
                         source_link=link,
                         game_url=getattr(ev, "game_url", None),
                         competition=ev.competition,
+                        country=getattr(ev, "country", None),
                         team_home=ev.team_home,
                         team_away=ev.team_away,
                         start_time=start_utc,
@@ -470,6 +475,7 @@ async def rescan_watchlist_job():
                             g.source_link = link
                             g.game_url = getattr(ev, "game_url", None) or g.game_url
                             g.competition = ev.competition or g.competition
+                            g.country = getattr(ev, "country", None) or g.country
                             g.team_home = ev.team_home or g.team_home
                             g.team_away = ev.team_away or g.team_away
                             g.odds_home = ev.odds_home
@@ -886,14 +892,23 @@ async def _handle_finished_game(session, game: Game, tracker: LiveGameTracker, n
         # Atualiza resultado de apostas combinadas que incluíam este jogo
         try:
             from betting.combined_bets import update_combined_bet_result
+            from utils.formatters import fmt_combined_bet_result
             # Busca apostas combinadas pendentes que incluem este jogo
             pending_bets = session.query(CombinedBet).filter(
                 CombinedBet.status == "pending"
             ).all()
-            
+
             for bet in pending_bets:
                 if game.id in bet.game_ids:
-                    update_combined_bet_result(bet, session)
+                    result_status = update_combined_bet_result(bet, session)
+                    if result_status in ("won", "lost"):
+                        session.commit()
+                        try:
+                            msg = fmt_combined_bet_result(bet, session)
+                            tg_send_message(msg, parse_mode="HTML", message_type="combined_result")
+                            logger.info("📊 Resultado de múltipla #%s enviado: %s", bet.id, result_status)
+                        except Exception:
+                            logger.exception("Erro ao enviar notificação da múltipla #%s", bet.id)
         except Exception:
             logger.exception(f"Erro ao atualizar apostas combinadas após jogo {game.id}")
         
@@ -1127,22 +1142,23 @@ async def send_combined_bet_job():
     Executa diariamente às 08:00 para enviar a aposta combinada do dia.
     """
     from betting.combined_bets import (
-        get_high_confidence_games_for_date,
+        select_games_for_combined_bet,
         create_combined_bet,
         calculate_combined_odd,
         calculate_potential_return,
         calculate_avg_confidence
     )
-    
+
     now_utc = datetime.now(pytz.UTC)
     today_utc = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
-    
+
     with SessionLocal() as session:
-        # Busca jogos de alta confiança do dia
-        games = get_high_confidence_games_for_date(today_utc, session)
-        
+        # Seleção inteligente: max 10, min 3, diversificação por liga/time, exclui draws,
+        # ranking por pick_prob, valida min_combined_odd. Tudo configurável via env.
+        games = select_games_for_combined_bet(session, date_filter=today_utc)
+
         if not games:
-            logger.info("📊 Nenhum jogo de alta confiança encontrado para aposta combinada hoje.")
+            logger.info("📊 Nenhuma múltipla criada hoje (sem jogos elegíveis após filtros).")
             return
         
         # Cria aposta combinada
@@ -1503,13 +1519,22 @@ async def fetch_finished_games_results_job():
                         # Atualiza resultado de apostas combinadas
                         try:
                             from betting.combined_bets import update_combined_bet_result
+                            from utils.formatters import fmt_combined_bet_result
                             pending_bets = session.query(CombinedBet).filter(
                                 CombinedBet.status == "pending"
                             ).all()
-                            
+
                             for bet in pending_bets:
                                 if game.id in bet.game_ids:
-                                    update_combined_bet_result(bet, session)
+                                    result_status = update_combined_bet_result(bet, session)
+                                    if result_status in ("won", "lost"):
+                                        session.commit()
+                                        try:
+                                            msg = fmt_combined_bet_result(bet, session)
+                                            tg_send_message(msg, parse_mode="HTML", message_type="combined_result")
+                                            logger.info("📊 Resultado de múltipla #%s enviado: %s", bet.id, result_status)
+                                        except Exception:
+                                            logger.exception("Erro ao enviar notificação da múltipla #%s", bet.id)
                         except Exception:
                             logger.exception(f"Erro ao atualizar apostas combinadas após jogo {game.id}")
                         
@@ -1622,26 +1647,26 @@ def setup_scheduler():
     # --- Busca periódica de resultados de jogos finalizados ---
     scheduler.add_job(
         fetch_finished_games_results_job,
-        trigger=IntervalTrigger(minutes=30),  # A cada 30 minutos
+        trigger=IntervalTrigger(minutes=FETCH_FINISHED_INTERVAL_MIN),
         id="fetch_finished_results",
         replace_existing=True,
         coalesce=True,
         max_instances=1,
         misfire_grace_time=300,
     )
-    logger.info("🔍 Busca de resultados de jogos finalizados agendada a cada 30 minutos")
-    
+    logger.info("🔍 Busca de resultados de jogos finalizados agendada a cada %d minutos", FETCH_FINISHED_INTERVAL_MIN)
+
     # --- Flush periódico de buffers de mensagens ---
     scheduler.add_job(
         flush_message_buffers_job,
-        trigger=IntervalTrigger(minutes=2),  # A cada 2 minutos
+        trigger=IntervalTrigger(minutes=FLUSH_BUFFERS_INTERVAL_MIN),
         id="flush_message_buffers",
         replace_existing=True,
         coalesce=True,
         max_instances=1,
         misfire_grace_time=60,
     )
-    logger.info("📦 Flush de buffers de mensagens agendado a cada 2 minutos")
+    logger.info("📦 Flush de buffers de mensagens agendado a cada %d minutos", FLUSH_BUFFERS_INTERVAL_MIN)
     
     # --- Reavaliação horária dos jogos do dia ---
     scheduler.add_job(
@@ -1657,24 +1682,25 @@ def setup_scheduler():
     # --- Atualização de status de jogos para 'live' ---
     scheduler.add_job(
         update_games_to_live_status,
-        trigger=IntervalTrigger(minutes=1),
+        trigger=IntervalTrigger(minutes=UPDATE_LIVE_STATUS_INTERVAL_MIN),
         id="update_games_to_live",
         replace_existing=True,
         coalesce=True,
         max_instances=1,
         misfire_grace_time=60,
     )
-    
+
     # --- Monitoramento de jogos ao vivo ---
     scheduler.add_job(
         monitor_live_games_job,
-        trigger=IntervalTrigger(minutes=1),
+        trigger=IntervalTrigger(minutes=MONITOR_LIVE_INTERVAL_MIN),
         id="monitor_live_games",
         replace_existing=True,
         coalesce=True,
         max_instances=1,
         misfire_grace_time=60,
     )
+    logger.info("📡 Monitor de jogos ao vivo agendado a cada %d minutos", MONITOR_LIVE_INTERVAL_MIN)
 
     # --- Coleta de jogos de amanhã (22h do dia anterior) ---
     collect_tomorrow_hour = int(os.getenv("COLLECT_TOMORROW_HOUR", "22"))

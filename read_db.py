@@ -131,7 +131,7 @@ def show_finished_games_with_results(limit=50):
             
             print(f"\n{result_symbol} {result_label}")
             print(f"   {game.team_home} vs {game.team_away}")
-            print(f"   {game.competition or 'N/A'} - {start_str}")
+            print(f"   {game.country or '—'} | {game.competition or 'N/A'} - {start_str}")
             
             if game.pick:
                 pick_label = _label_for_outcome(game, game.pick)
@@ -167,7 +167,7 @@ def show_recent_games(limit=10):
             start_str = start_local.strftime("%d/%m %H:%M") if start_local else "N/A"
             
             print(f"\n   {status_label} {game.team_home} vs {game.team_away}")
-            print(f"      {game.competition or 'N/A'} - {start_str}")
+            print(f"      {game.country or '—'} | {game.competition or 'N/A'} - {start_str}")
             
             if game.pick:
                 prob_str = f"{game.pick_prob:.1%}" if game.pick_prob else "N/A"
@@ -205,7 +205,7 @@ def show_live_games():
         for game in live_games:
             tracker = game.tracker
             print(f"\n   {game.team_home} vs {game.team_away}")
-            print(f"      {game.competition or 'N/A'}")
+            print(f"      {game.country or '—'} | {game.competition or 'N/A'}")
             
             if tracker:
                 print(f"      Placar: {tracker.current_score or 'N/A'}")
@@ -298,7 +298,7 @@ def show_selected_games(limit=20):
                 start_str = start_local.strftime("%d/%m/%Y %H:%M") if start_local else "N/A"
                 
                 print(f"\n   {game.team_home} vs {game.team_away}")
-                print(f"      {game.competition or 'N/A'} - {start_str}")
+                print(f"      {game.country or '—'} | {game.competition or 'N/A'} - {start_str}")
                 print(f"      Pick: {game.pick} (prob: {game.pick_prob:.1%}, EV: {game.pick_ev:.3f})")
                 
                 if game.pick_notified_at:
@@ -340,11 +340,30 @@ def show_selected_games(limit=20):
                     print(f"         [NOTIFICADO] em: {game.pick_notified_at.astimezone(ZONE).strftime('%d/%m/%Y %H:%M')}")
 
 
+def show_games_by_country(limit=20):
+    """Mostra distribuição de jogos por país (country)."""
+    with SessionLocal() as session:
+        rows = session.query(
+            Game.country,
+            func.count(Game.id).label("total"),
+        ).group_by(Game.country).order_by(func.count(Game.id).desc()).limit(limit).all()
+
+        if not rows:
+            print("\nJOGOS POR PAÍS")
+            print("   Nenhum jogo encontrado.")
+            return
+
+        print(f"\nJOGOS POR PAÍS (top {limit})")
+        for country, total in rows:
+            label = country or "—"
+            print(f"   {label}: {total}")
+
+
 def main():
     """Função principal."""
     if len(sys.argv) > 1:
         command = sys.argv[1].lower()
-        
+
         if command == "summary":
             show_summary()
         elif command == "accuracy":
@@ -362,6 +381,9 @@ def main():
         elif command == "selected":
             limit = int(sys.argv[2]) if len(sys.argv) > 2 else 20
             show_selected_games(limit)
+        elif command == "countries" or command == "country":
+            limit = int(sys.argv[2]) if len(sys.argv) > 2 else 20
+            show_games_by_country(limit)
         elif command == "all":
             show_summary()
             show_accuracy_stats()
@@ -380,6 +402,7 @@ def main():
             print("  python read_db.py live       - Jogos ao vivo")
             print("  python read_db.py today    - Jogos de hoje")
             print("  python read_db.py selected [N] - Jogos selecionados (padrão: 20)")
+            print("  python read_db.py countries [N] - Distribuição por país (padrão: 20)")
             print("  python read_db.py all       - Mostra tudo")
     else:
         # Mostra tudo por padrão

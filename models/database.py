@@ -17,6 +17,7 @@ class Game(Base):
     source_link = Column(Text)
     game_url = Column(Text)
     competition = Column(String)
+    country = Column(String, nullable=True, index=True)
     team_home = Column(String)
     team_away = Column(String)
     start_time = Column(DateTime, index=True)  # UTC
@@ -51,6 +52,7 @@ class Game(Base):
         Index('idx_game_outcome', 'outcome'),
         Index('idx_game_hit', 'hit'),
         Index('idx_game_pick_notified', 'pick_notified_at'),
+        Index('idx_game_country', 'country'),
     )
 
 
@@ -241,6 +243,8 @@ def init_database():
     _safe_add_column("games", "final_score_away INTEGER")
     _safe_add_column("games", "final_score TEXT")
     _safe_add_column("games", "result_fetched_at DATETIME")
+    # Migração: país (category_name da API) — separado do nome da liga
+    _safe_add_column("games", "country TEXT")
     # Migração: renomear coluna 'metadata' para 'event_metadata' em analytics_events
     _safe_migrate_metadata_column()
 

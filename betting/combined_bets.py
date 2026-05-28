@@ -5,8 +5,18 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Tuple
 import pytz
 from models.database import SessionLocal, Game, CombinedBet
-from config.settings import HIGH_CONF_THRESHOLD, ZONE
-from utils.logger import log_with_context
+from config.settings import (
+    HIGH_CONF_THRESHOLD,
+    ZONE,
+    COMBINED_BET_MAX_GAMES,
+    COMBINED_BET_MIN_GAMES,
+    COMBINED_BET_MIN_ODD,
+    COMBINED_BET_EXCLUDE_DRAWS,
+    COMBINED_BET_RANK_BY,
+    COMBINED_BET_ONE_PER_COMPETITION,
+    COMBINED_BET_ONE_PER_TEAM,
+)
+from utils.logger import log_with_context, logger
 
 
 def get_high_confidence_games_for_date(target_date: datetime, session) -> List[Game]:
@@ -116,6 +126,137 @@ def calculate_avg_confidence(games: List[Game]) -> float:
     return total_prob / len(games)
 
 
+def _odd_for_pick(game: Game) -> float:
+    """Retorna a odd correspondente ao pick do jogo (0.0 se inválida)."""
+    if game.pick == "home":
+        return float(game.odds_home or 0.0)
+    if game.pick == "draw":
+        return float(game.odds_draw or 0.0)
+    if game.pick == "away":
+        return float(game.odds_away or 0.0)
+    return 0.0
+
+
+def _score_for_game(game: Game, rank_by: str) -> float:
+    """
+    Calcula o score de ranking pra um jogo conforme COMBINED_BET_RANK_BY.
+
+    rank_by:
+        - "pick_prob"   → score = pick_prob
+        - "pick_ev"     → score = pick_ev (0.0 se None)
+        - "prob_x_odd"  → score = pick_prob * odd_picked
+    """
+    pick_prob = float(game.pick_prob or 0.0)
+    if rank_by == "pick_ev":
+        return float(game.pick_ev or 0.0)
+    if rank_by == "prob_x_odd":
+        return pick_prob * _odd_for_pick(game)
+    # Default e "pick_prob"
+    return pick_prob
+
+
+def select_games_for_combined_bet(session, date_filter: Optional[datetime] = None) -> List[Game]:
+    """
+    Seleciona jogos elegíveis pra uma aposta múltipla, com ranking, diversificação
+    e validação de mínimos.
+
+    Pipeline:
+        1. Candidatos: will_bet=True, pick_prob >= HIGH_CONF_THRESHOLD,
+           status='scheduled', pick válido, no dia (se date_filter).
+        2. Filtra draws se COMBINED_BET_EXCLUDE_DRAWS=true.
+        3. Ranqueia por COMBINED_BET_RANK_BY (pick_prob | pick_ev | prob_x_odd).
+        4. Greedy: 1 por competição/time (se ligado), até COMBINED_BET_MAX_GAMES.
+        5. Valida COMBINED_BET_MIN_GAMES e COMBINED_BET_MIN_ODD.
+
+    Args:
+        session: sessão SQLAlchemy
+        date_filter: data de referência (UTC). Se None, considera "hoje" em UTC.
+
+    Returns:
+        Lista de Game selecionados. Vazia se múltipla foi descartada por qualquer
+        critério (poucos jogos elegíveis, abaixo do mínimo, odd combinada baixa).
+    """
+    # 1. Janela do dia
+    if date_filter is None:
+        date_filter = datetime.now(pytz.UTC)
+    start_of_day = date_filter.replace(hour=0, minute=0, second=0, microsecond=0)
+    end_of_day = start_of_day + timedelta(days=1)
+
+    # 2. Busca candidatos elegíveis
+    candidates = session.query(Game).filter(
+        Game.will_bet == True,
+        Game.pick_prob >= HIGH_CONF_THRESHOLD,
+        Game.pick.isnot(None),
+        Game.pick != "",
+        Game.start_time >= start_of_day,
+        Game.start_time < end_of_day,
+        Game.status == "scheduled",
+    ).all()
+
+    total_eligible = len(candidates)
+
+    # 3. Filtra draws se configurado
+    if COMBINED_BET_EXCLUDE_DRAWS:
+        candidates = [g for g in candidates if g.pick != "draw"]
+
+    # 4. Ranqueia por score (desc)
+    candidates.sort(key=lambda g: _score_for_game(g, COMBINED_BET_RANK_BY), reverse=True)
+
+    # 5. Greedy com diversificação
+    selected: List[Game] = []
+    seen_competitions: set = set()
+    seen_teams: set = set()
+
+    for game in candidates:
+        if len(selected) >= COMBINED_BET_MAX_GAMES:
+            break
+
+        if COMBINED_BET_ONE_PER_COMPETITION:
+            comp_key = (game.country or "", game.competition or "")
+            if comp_key in seen_competitions:
+                continue
+
+        if COMBINED_BET_ONE_PER_TEAM:
+            if game.team_home in seen_teams or game.team_away in seen_teams:
+                continue
+
+        selected.append(game)
+        if COMBINED_BET_ONE_PER_COMPETITION:
+            seen_competitions.add((game.country or "", game.competition or ""))
+        if COMBINED_BET_ONE_PER_TEAM:
+            seen_teams.add(game.team_home)
+            seen_teams.add(game.team_away)
+
+    # 6. Valida piso de jogos
+    if len(selected) < COMBINED_BET_MIN_GAMES:
+        logger.info(
+            "Múltipla descartada: poucos jogos (selecionados=%d, mínimo=%d, elegíveis_iniciais=%d)",
+            len(selected), COMBINED_BET_MIN_GAMES, total_eligible,
+        )
+        return []
+
+    # 7. Valida odd combinada mínima
+    combined_odd = 1.0
+    for game in selected:
+        odd = _odd_for_pick(game)
+        if odd <= 0:
+            continue
+        combined_odd *= odd
+
+    if combined_odd < COMBINED_BET_MIN_ODD:
+        logger.info(
+            "Múltipla descartada: odd combinada muito baixa (combined_odd=%.3f, mínimo=%.2f, jogos=%d)",
+            combined_odd, COMBINED_BET_MIN_ODD, len(selected),
+        )
+        return []
+
+    logger.info(
+        "Múltipla selecionada: %d jogos (elegíveis_iniciais=%d, combined_odd=%.2f, rank_by=%s)",
+        len(selected), total_eligible, combined_odd, COMBINED_BET_RANK_BY,
+    )
+    return selected
+
+
 def create_combined_bet(
     games: List[Game],
     bet_date: datetime,
@@ -221,59 +362,80 @@ def create_combined_bet(
             session.close()
 
 
-def update_combined_bet_result(combined_bet: CombinedBet, session) -> bool:
+def update_combined_bet_result(combined_bet: CombinedBet, session) -> Optional[str]:
     """
-    Atualiza o resultado da aposta combinada após os jogos terminarem.
-    
+    Atualiza o resultado da aposta combinada conforme os jogos terminam.
+
+    Suporta early-cancel: se QUALQUER jogo da combinada já errou (hit=False),
+    a múltipla é marcada como 'lost' imediatamente, sem esperar os demais.
+
+    Idempotente: se a aposta já não está em status 'pending', retorna None
+    sem fazer nada — evita reprocessar combinadas finalizadas.
+
     Args:
         combined_bet: Aposta combinada
         session: Sessão do banco
-        
+
     Returns:
-        True se atualizado com sucesso
+        'won'  — combinada ganhou (todos os jogos terminaram e nenhum errou)
+        'lost' — combinada perdeu (algum jogo errou ou foi finalizada como lost)
+        None   — ainda pending (nem todos os jogos terminaram) ou já processada
     """
     try:
-        # Busca todos os jogos
+        # Idempotência: já processada → sai sem mexer
+        if combined_bet.status != "pending":
+            return None
+
+        # Busca todos os jogos da combinada
         games = session.query(Game).filter(Game.id.in_(combined_bet.game_ids)).all()
-        
-        # Verifica se todos os jogos já terminaram
-        all_finished = all(game.status == "ended" and game.outcome is not None for game in games)
-        
-        if not all_finished:
-            return False  # Ainda não terminou
-        
-        # Cria dicionário de resultados
-        outcomes = {}
-        all_hit = True
-        
-        for game in games:
-            outcomes[game.id] = game.outcome
-            # Verifica se acertou
-            if game.outcome != game.pick:
-                all_hit = False
-        
-        # Atualiza aposta combinada
-        combined_bet.outcome = outcomes
-        combined_bet.hit = all_hit
-        combined_bet.status = "won" if all_hit else "lost"
+
+        # Early-cancel: algum jogo já errou? Matematicamente já perdeu.
+        errors = [g for g in games if g.hit is False]
+        if errors:
+            combined_bet.status = "lost"
+            combined_bet.hit = False
+            combined_bet.outcome = {str(g.id): g.outcome for g in games if g.outcome}
+            combined_bet.updated_at = datetime.now(pytz.UTC)
+
+            log_with_context(
+                "info",
+                f"Aposta combinada {combined_bet.id} marcada como LOST por early-cancel ({len(errors)} jogo(s) erraram)",
+                stage="update_combined_bet",
+                status="success",
+                extra_fields={
+                    "combined_bet_id": combined_bet.id,
+                    "hit": False,
+                    "early_cancel": True,
+                    "errored_games": [g.id for g in errors],
+                    "total_games": len(games)
+                }
+            )
+            return "lost"
+
+        # Ainda há jogos sem resultado? Espera.
+        pending_games = [g for g in games if g.hit is None]
+        if pending_games:
+            return None  # Ainda esperando
+
+        # Todos terminaram e nenhum errou → ganhou
+        combined_bet.status = "won"
+        combined_bet.hit = True
+        combined_bet.outcome = {str(g.id): g.outcome for g in games}
         combined_bet.updated_at = datetime.now(pytz.UTC)
-        
-        session.commit()
-        
+
         log_with_context(
             "info",
-            f"Resultado da aposta combinada atualizado: {'VITÓRIA' if all_hit else 'DERROTA'}",
+            f"Aposta combinada {combined_bet.id} marcada como WON (todos os {len(games)} jogos acertaram)",
             stage="update_combined_bet",
             status="success",
             extra_fields={
                 "combined_bet_id": combined_bet.id,
-                "hit": all_hit,
+                "hit": True,
                 "total_games": len(games)
             }
         )
-        
-        return True
-        
+        return "won"
+
     except Exception as e:
         log_with_context(
             "error",
@@ -282,7 +444,7 @@ def update_combined_bet_result(combined_bet: CombinedBet, session) -> bool:
             status="failed"
         )
         session.rollback()
-        return False
+        return None
 
 
 def calculate_combined_bets_accuracy(session, days: int = 30) -> Dict[str, float]:

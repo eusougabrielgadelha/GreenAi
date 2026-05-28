@@ -32,6 +32,7 @@ class EventRow:
     odds_away: Optional[float]
     ext_id: Optional[str] = None
     is_live: bool = False
+    country: str = ""
 
 
 # ============================================
@@ -52,29 +53,28 @@ def extract_ids_from_url(url: str) -> Optional[Tuple[int, int, int]]:
     return None
 
 
-def fetch_events_from_api(sport_id: int, category_id: int = 0, tournament_id: int = 0, 
+def fetch_events_from_api(sport_id: int, category_id: int = 0, tournament_id: int = 0,
                           market_id: int = 1, rate_limiter=None) -> Optional[Dict[str, Any]]:
     """
     Busca eventos diretamente da API XHR da BetNacional.
-    
+
+    Implementação minimalista: requests.get() direto com headers básicos. A API
+    pública aceita esses headers e retorna JSON limpo (validado manualmente). Sem
+    BypassDetector, sem cookie_manager, sem warm-up — esses pesos quebravam o
+    parsing porque o fallback do bypass devolve HTML.
+
     Args:
         sport_id: ID do esporte (1 = futebol)
         category_id: ID da categoria (0 = todas)
         tournament_id: ID do torneio/campeonato (0 = todos)
         market_id: ID do mercado (1 = 1x2)
-        rate_limiter: Rate limiter opcional (não usado diretamente aqui, mas para compatibilidade)
-    
+        rate_limiter: Mantido para compatibilidade de assinatura (não usado).
+
     Returns:
         Dict com a resposta JSON da API ou None em caso de erro
     """
-    from utils.anti_block import (
-        get_enhanced_headers_for_api, api_throttle, 
-        add_random_delay
-    )
-    from utils.bypass_detection import get_bypass_detector
-    
     api_url = "https://prod-global-bff-events.bet6.com.br/api/odds/1/events-by-seasons"
-    
+
     params = {
         'sport_id': str(sport_id),
         'category_id': str(category_id),
@@ -82,65 +82,22 @@ def fetch_events_from_api(sport_id: int, category_id: int = 0, tournament_id: in
         'markets': str(market_id),
         'filter_time_event': ''
     }
-    
-    # Usar bypass detector para requisições mais robustas
-    detector = get_bypass_detector()
-    session = detector.create_stealth_session(use_cookies=True)
-    
-    # Verificar se precisa fazer warm-up da sessão (se não há cookies)
-    from utils.cookie_manager import get_cookie_manager
-    manager = get_cookie_manager()
-    stats = manager.get_stats()
-    if stats['valid_cookies'] == 0:
-        logger.debug("Nenhum cookie válido, fazendo warm-up de sessão...")
-        # Tentar fazer warm-up síncrono (visitando página principal)
-        try:
-            warmup_url = "https://betnacional.bet.br/"
-            warmup_response = session.get(warmup_url, timeout=10)
-            if warmup_response.status_code == 200:
-                from utils.cookie_manager import update_cookies_from_response
-                update_cookies_from_response(warmup_response)
-                logger.debug("Warm-up de sessão bem-sucedido")
-        except Exception as e:
-            logger.debug(f"Erro durante warm-up: {e}")
-    
-    # Usar headers otimizados com rotação de User-Agent
-    headers = get_enhanced_headers_for_api()
-    
+
+    headers = {
+        'User-Agent': USER_AGENT,
+        'Accept': 'application/json',
+        'Origin': 'https://betnacional.bet.br',
+        'Referer': 'https://betnacional.bet.br/',
+    }
+
     try:
-        # Fazer requisição com bypass automático (has_fallback=True reduz verbosidade)
-        response = detector.make_request_with_bypass(
-            session=session,
-            url=api_url,
-            method="GET",
-            params=params,
-            headers=headers,
-            max_retries=3,
-            use_cookies=True,
-            has_fallback=True  # Há fallback HTML disponível
-        )
-        
-        if response is None:
-            # Não logar warning quando há fallback - apenas debug
-            logger.debug("Falha ao fazer requisição com bypass, retornando None (fallback HTML disponível)")
-            return None
-        
+        response = requests.get(api_url, params=params, headers=headers, timeout=API_TIMEOUT)
         response.raise_for_status()
         return response.json()
     except Exception as e:
-        from utils.error_handler import log_error_with_context
-        log_error_with_context(
-            e,
-            context={
-                "sport_id": sport_id,
-                "category_id": category_id,
-                "tournament_id": tournament_id,
-                "market_id": market_id,
-                "stage": "fetch_events_from_api"
-            },
-            level="warning",
-            reraise=False,
-            suppress_403_if_fallback=True  # Reduz verbosidade de 403 quando há fallback HTML
+        logger.warning(
+            f"fetch_events_from_api falhou (sport={sport_id}, cat={category_id}, "
+            f"tour={tournament_id}, market={market_id}): {type(e).__name__}: {e}"
         )
         return None
 
@@ -273,6 +230,7 @@ def parse_events_from_api(json_data: Dict[str, Any], source_url: str) -> List[An
             source_link=source_url,
             game_url=game_url,
             competition=event_data.get('tournament_name', ''),
+            country=event_data.get('category_name', ''),
             team_home=validated_home,
             team_away=validated_away,
             start_local_str=start_local_str,
@@ -941,8 +899,9 @@ def try_parse_events(html: str, url: str) -> List[Any]:
             evs.append(NS(
                 ext_id=ext_id,
                 source_link=url,
-                game_url=game_url, 
+                game_url=game_url,
                 competition="",
+                country="",
                 team_home=team_home,
                 team_away=team_away,
                 start_local_str=start_local_str,

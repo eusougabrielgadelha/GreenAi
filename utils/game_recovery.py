@@ -71,26 +71,31 @@ async def recover_pending_games():
                     if time_since_start.total_seconds() / 60 >= game_duration_minutes:
                         logger.info(f"⏰ Jogo {game.id} ({game.ext_id}) já deveria ter terminado (iniciou há {int(time_since_start.total_seconds() / 60)} minutos), buscando resultado final...")
                         game.status = "ended"
-                        
+
                         # Buscar resultado final
-                        outcome = await fetch_game_result(game.ext_id, game.game_url or game.source_link)
-                        if outcome:
-                            game.outcome = outcome
-                            game.hit = (outcome == game.pick) if game.pick else None
+                        result_data = await fetch_game_result(game.ext_id, game.game_url or game.source_link)
+                        if result_data:
+                            game.outcome = result_data.get("outcome")
+                            game.final_score_home = result_data.get("home_goals")
+                            game.final_score_away = result_data.get("away_goals")
+                            game.final_score = result_data.get("score")
+                            game.result_fetched_at = datetime.now(pytz.UTC)
+                            game.hit = (game.outcome == game.pick) if game.pick else None
                             result_msg = "✅ ACERTOU" if game.hit else "❌ ERROU" if game.hit is False else "⚠️ SEM PALPITE"
-                            logger.info(f"✅ Resultado obtido para jogo {game.id}: {outcome} | {result_msg}")
-                            
+                            score_str = f" ({game.final_score})" if game.final_score else ""
+                            logger.info(f"✅ Resultado obtido para jogo {game.id}: {game.outcome}{score_str} | {result_msg}")
+
                             # Envia notificação de resultado
                             from utils.formatters import fmt_result
                             from notifications.telegram import tg_send_message
                             tg_send_message(fmt_result(game), message_type="result", game_id=game.id, ext_id=game.ext_id)
-                            
+
                             session.commit()
                         else:
                             logger.warning(f"⚠️  Não foi possível obter resultado para jogo {game.id} ainda (tentará novamente no próximo ciclo)")
                             session.commit()
                         continue
-                    
+
                     # Jogo ainda pode estar em andamento - fazer análise ao vivo
                     # Garantir que tracker existe
                     tracker = _ensure_tracker_exists(session, game, now_utc)
@@ -131,20 +136,25 @@ async def recover_pending_games():
                     if time_since_start.total_seconds() / 60 >= game_duration_minutes:
                         logger.info(f"⏰ Jogo agendado {game.id} ({game.ext_id}) já deveria ter terminado (iniciou há {int(time_since_start.total_seconds() / 60)} minutos), buscando resultado final...")
                         game.status = "ended"
-                        
+
                         # Buscar resultado final
-                        outcome = await fetch_game_result(game.ext_id, game.game_url or game.source_link)
-                        if outcome:
-                            game.outcome = outcome
-                            game.hit = (outcome == game.pick) if game.pick else None
+                        result_data = await fetch_game_result(game.ext_id, game.game_url or game.source_link)
+                        if result_data:
+                            game.outcome = result_data.get("outcome")
+                            game.final_score_home = result_data.get("home_goals")
+                            game.final_score_away = result_data.get("away_goals")
+                            game.final_score = result_data.get("score")
+                            game.result_fetched_at = datetime.now(pytz.UTC)
+                            game.hit = (game.outcome == game.pick) if game.pick else None
                             result_msg = "✅ ACERTOU" if game.hit else "❌ ERROU" if game.hit is False else "⚠️ SEM PALPITE"
-                            logger.info(f"✅ Resultado obtido para jogo {game.id}: {outcome} | {result_msg}")
-                            
+                            score_str = f" ({game.final_score})" if game.final_score else ""
+                            logger.info(f"✅ Resultado obtido para jogo {game.id}: {game.outcome}{score_str} | {result_msg}")
+
                             # Envia notificação de resultado
                             from utils.formatters import fmt_result
                             from notifications.telegram import tg_send_message
                             tg_send_message(fmt_result(game), message_type="result", game_id=game.id, ext_id=game.ext_id)
-                            
+
                             session.commit()
                         else:
                             logger.warning(f"⚠️  Não foi possível obter resultado para jogo {game.id} ainda (tentará novamente no próximo ciclo)")
@@ -206,18 +216,23 @@ async def recover_pending_games():
                         game.status = "ended"
                         logger.debug(f"📝 Status do jogo {game.id} atualizado para 'ended'")
                     
-                    outcome = await fetch_game_result(game.ext_id, game.game_url or game.source_link)
-                    if outcome:
-                        game.outcome = outcome
-                        game.hit = (outcome == game.pick) if game.pick else None
+                    result_data = await fetch_game_result(game.ext_id, game.game_url or game.source_link)
+                    if result_data:
+                        game.outcome = result_data.get("outcome")
+                        game.final_score_home = result_data.get("home_goals")
+                        game.final_score_away = result_data.get("away_goals")
+                        game.final_score = result_data.get("score")
+                        game.result_fetched_at = datetime.now(pytz.UTC)
+                        game.hit = (game.outcome == game.pick) if game.pick else None
                         result_msg = "✅ ACERTOU" if game.hit else "❌ ERROU" if game.hit is False else "⚠️ SEM PALPITE"
-                        logger.info(f"✅ Resultado obtido para jogo {game.id}: {outcome} | {result_msg}")
-                        
+                        score_str = f" ({game.final_score})" if game.final_score else ""
+                        logger.info(f"✅ Resultado obtido para jogo {game.id}: {game.outcome}{score_str} | {result_msg}")
+
                         # Envia notificação de resultado
                         from utils.formatters import fmt_result
                         from notifications.telegram import tg_send_message
                         tg_send_message(fmt_result(game), message_type="result", game_id=game.id, ext_id=game.ext_id)
-                        
+
                         session.commit()
                     else:
                         logger.warning(f"⚠️  Não foi possível obter resultado para jogo {game.id} ainda (tentará novamente no próximo ciclo)")

@@ -58,6 +58,7 @@ HEALTH_CHECK_TIMEOUT = float(os.getenv("HEALTH_CHECK_TIMEOUT", "10"))  # Health 
 PLAYWRIGHT_NAVIGATION_TIMEOUT = int(os.getenv("PLAYWRIGHT_NAVIGATION_TIMEOUT", "60000"))  # Navegação (60s)
 PLAYWRIGHT_SELECTOR_TIMEOUT = int(os.getenv("PLAYWRIGHT_SELECTOR_TIMEOUT", "15000"))  # Aguardar seletor (15s)
 PLAYWRIGHT_NETWORKIDLE_TIMEOUT = int(os.getenv("PLAYWRIGHT_NETWORKIDLE_TIMEOUT", "60000"))  # Network idle (60s)
+PLAYWRIGHT_RESULT_TIMEOUT = int(os.getenv("PLAYWRIGHT_RESULT_TIMEOUT", "25000"))  # Widget SportRadar tarda renderizar resultado final (25s)
 
 # Compatibilidade: manter REQUESTS_TIMEOUT para não quebrar código existente
 # Se não especificado, usa API_TIMEOUT como padrão
@@ -71,6 +72,22 @@ HIGH_CONF_THRESHOLD = float(os.getenv("HIGH_CONF_THRESHOLD", "0.60"))
 HIGH_CONF_SENT_MARK = "[HC_SENT]"
 # Flag para buscar apenas jogos de alta confiança (ignora outros critérios)
 ONLY_HIGH_CONF_GAMES = os.getenv("ONLY_HIGH_CONF_GAMES", "false").lower() == "true"
+
+# ================================
+# Apostas Combinadas
+# ================================
+# Teto e piso de jogos na múltipla. Se elegíveis < MIN, descarta a múltipla.
+COMBINED_BET_MAX_GAMES = int(os.getenv("COMBINED_BET_MAX_GAMES", "10"))
+COMBINED_BET_MIN_GAMES = int(os.getenv("COMBINED_BET_MIN_GAMES", "3"))
+# Odd combinada mínima (produto das odds dos picks). Se menor, descarta.
+COMBINED_BET_MIN_ODD = float(os.getenv("COMBINED_BET_MIN_ODD", "3.0"))
+# Exclui picks de empate por padrão (volatilidade alta).
+COMBINED_BET_EXCLUDE_DRAWS = os.getenv("COMBINED_BET_EXCLUDE_DRAWS", "true").lower() == "true"
+# Critério de ranking: pick_prob | pick_ev | prob_x_odd
+COMBINED_BET_RANK_BY = os.getenv("COMBINED_BET_RANK_BY", "pick_prob").lower()
+# Diversificação: 1 jogo por competição/time pra evitar correlação de risco.
+COMBINED_BET_ONE_PER_COMPETITION = os.getenv("COMBINED_BET_ONE_PER_COMPETITION", "true").lower() == "true"
+COMBINED_BET_ONE_PER_TEAM = os.getenv("COMBINED_BET_ONE_PER_TEAM", "true").lower() == "true"
 
 # ================================
 # Links Extras
@@ -94,7 +111,16 @@ LATE_WATCH_WINDOW_MIN = int(os.getenv("LATE_WATCH_WINDOW_MIN", "130"))
 # ================================
 WATCHLIST_DELTA = float(os.getenv("WATCHLIST_DELTA", "0.05"))
 WATCHLIST_MIN_LEAD_MIN = int(os.getenv("WATCHLIST_MIN_LEAD_MIN", "30"))
-WATCHLIST_RESCAN_MIN = int(os.getenv("WATCHLIST_RESCAN_MIN", "3"))
+WATCHLIST_RESCAN_MIN = int(os.getenv("WATCHLIST_RESCAN_MIN", "15"))
+
+# ================================
+# Configurações de Intervalos de Jobs (em minutos)
+# ================================
+# Intervalos reduzem CPU no VPS. Override via env var se precisar mais rápido.
+MONITOR_LIVE_INTERVAL_MIN = int(os.getenv("MONITOR_LIVE_INTERVAL_MIN", "3"))  # Antes: 1min
+FLUSH_BUFFERS_INTERVAL_MIN = int(os.getenv("FLUSH_BUFFERS_INTERVAL_MIN", "10"))  # Antes: 2min
+UPDATE_LIVE_STATUS_INTERVAL_MIN = int(os.getenv("UPDATE_LIVE_STATUS_INTERVAL_MIN", "3"))  # Antes: 1min
+FETCH_FINISHED_INTERVAL_MIN = int(os.getenv("FETCH_FINISHED_INTERVAL_MIN", "30"))  # Mantém 30min
 
 # ================================
 # Configurações de Apostas
