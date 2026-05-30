@@ -1471,16 +1471,22 @@ async def flush_message_buffers_job():
 
 async def snapshot_live_scores_from_betano(session) -> int:
     """
-    Pra cada Game scheduled/live no banco com ext_id Betano (8 dígitos),
+    Pra cada Game scheduled/live no banco com ext_id Betano,
     verifica se há score AO VIVO no overview Betano e atualiza
-    final_score_home/away. NÃO marca outcome/hit — só snapshot.
+    final_score_home/away. Adicionalmente, infere outcome quando
+    o snapshot está estável (jogo claramente terminou + score sem
+    mudança recente).
 
-    Defesa em profundidade: se Betano dropar o evento antes do
-    fetch_finished_games_results_job rodar (janela ~2h pós-FT),
-    o último snapshot já está salvo como melhor estimativa.
+    Defesa em profundidade: Betano retém eventos finalizados no overview
+    por ~106min pós start_time. Quando o evento é dropado antes do
+    fetch_finished_games_results_job conseguir buscar resultado,
+    a passada 2 aqui infere outcome a partir do último snapshot estável.
 
-    Retorna count de games atualizados. Não comita — caller comita.
+    Retorna count de games atualizados (snapshot + outcome inferido).
+    Não comita — caller comita.
     """
+    from datetime import datetime, timedelta
+    import pytz
     from scraping.betano import fetch_betano_overview
     from models.database import Game
 
@@ -1490,15 +1496,16 @@ async def snapshot_live_scores_from_betano(session) -> int:
 
     events = overview.get("events", {})
     updated = 0
+    now_utc = datetime.now(pytz.UTC)
 
-    # Pega games que ainda não foram resolvidos
-    games = session.query(Game).filter(
+    # PASSADA 1: snapshot incremental do overview (comportamento legado)
+    games_active = session.query(Game).filter(
         Game.outcome.is_(None),            # ainda não tem outcome final
         Game.result_fetched_at.is_(None),  # nunca foi resolvido
         Game.status.in_(("scheduled", "live")),
     ).all()
 
-    for g in games:
+    for g in games_active:
         ev = events.get(str(g.ext_id))
         if not ev:
             continue
@@ -1519,6 +1526,79 @@ async def snapshot_live_scores_from_betano(session) -> int:
             g.final_score_away = a_int
             g.final_score = f"{h_int}-{a_int}"
             updated += 1
+
+    # Flush passada 1 ANTES da passada 2 — assim a 2ª passada já vê
+    # final_score_* atualizados desta execução.
+    try:
+        session.flush()
+    except Exception:
+        try:
+            session.rollback()
+        except Exception:
+            logger.exception("Falha ao rollback após flush em snapshot_live_scores_from_betano")
+
+    # PASSADA 2: infere outcome quando snapshot está estável e jogo terminou
+    # Critérios CUMULATIVOS:
+    #   - final_score_home/away preenchidos (snapshot pegou)
+    #   - outcome ainda NULL
+    #   - start_time + 95min < now (jogo terminou regulamentar)
+    #   - updated_at há ≥10min (score estável) OU evento não está mais no overview
+    threshold_started = now_utc - timedelta(minutes=95)
+    threshold_stable = now_utc - timedelta(minutes=10)
+
+    candidates = session.query(Game).filter(
+        Game.outcome.is_(None),
+        Game.final_score_home.isnot(None),
+        Game.final_score_away.isnot(None),
+        Game.start_time < threshold_started,  # jogo já passou de 95min
+    ).all()
+
+    for g in candidates:
+        # Normaliza updated_at pra UTC-aware se vier naive
+        upd = g.updated_at
+        if upd is None:
+            # Nunca foi atualizado — não sabemos se score é estável. Pula.
+            continue
+        if upd.tzinfo is None:
+            upd = pytz.UTC.localize(upd)
+
+        # Estabilidade do score: updated_at há >=10min OU evento já não está mais no overview
+        is_stable = upd < threshold_stable
+        is_dropped = str(g.ext_id) not in events
+
+        if not (is_stable or is_dropped):
+            continue  # ainda no overview e score mudou recente — aguarda
+
+        # Infere outcome do score
+        try:
+            h_int = int(g.final_score_home)
+            a_int = int(g.final_score_away)
+        except (TypeError, ValueError):
+            continue
+
+        if h_int > a_int:
+            g.outcome = "home"
+        elif a_int > h_int:
+            g.outcome = "away"
+        else:
+            g.outcome = "draw"
+
+        g.hit = (g.outcome == g.pick) if g.pick else None  # mirror legado pra match_result
+        g.result_fetched_at = now_utc
+        g.status = "ended"
+
+        # Resolve picks multi-mercado (match_result + total_goals quando houver)
+        try:
+            from betting.result_resolver import resolve_picks_for_game
+            resolve_picks_for_game(session, g)
+        except Exception as exc:
+            logger.warning(f"Falha ao resolver picks (snapshot infer) pro game {g.id}: {exc}")
+
+        updated += 1
+        logger.info(
+            f"🎯 Outcome inferido via snapshot estável: game {g.id} → {g.outcome} "
+            f"({g.final_score_home}-{g.final_score_away}) | stable={is_stable} dropped={is_dropped}"
+        )
 
     return updated
 
@@ -1596,7 +1676,7 @@ async def fetch_finished_games_results_job():
                     # Normalizar start_time para UTC (offset-aware)
                     game_start_utc = _normalize_datetime_to_utc(game.start_time)
                     time_since_start = now_utc - game_start_utc
-                    game_duration_minutes = 105  # Duração típica de um jogo de futebol (90min + 15min de acréscimo)
+                    game_duration_minutes = 95  # Reduzido de 105→95: Betano dropa eventos ~106min pós start_time, janela de captura útil é ~11min. Com 95min, janela ativa vira ~21min.
                     
                     # Verificar se já passou tempo suficiente para o jogo ter terminado
                     if time_since_start.total_seconds() / 60 < game_duration_minutes:
@@ -1789,18 +1869,21 @@ def setup_scheduler():
     # logger.info("🏥 Health checks do sistema agendados a cada 30 minutos")
     
     # --- Busca periódica de resultados de jogos finalizados ---
-    # Intervalo reduzido pra 10min (era 30min) — Betano retém eventos finalizados
-    # no overview por ~2h pós-FT, então 12 chances de captura em vez de 4.
+    # Intervalo reduzido pra 5min (era 10min). Diagnóstico real: Betano retém
+    # eventos finalizados no overview por ~106min após start_time (não 2h).
+    # Janela útil pós-FT real é ~11min — com filtro +95min e ciclo de 5min,
+    # passa a ter 4 tentativas dentro da janela em vez de 2. Cache 60s no
+    # Betano overview amortiza custo (mesma overview é reusada pelo snapshot_job).
     scheduler.add_job(
         fetch_finished_games_results_job,
-        trigger=IntervalTrigger(minutes=10),
+        trigger=IntervalTrigger(minutes=5),
         id="fetch_finished_results",
         replace_existing=True,
         coalesce=True,
         max_instances=1,
         misfire_grace_time=300,
     )
-    logger.info("🔍 Busca de resultados de jogos finalizados agendada a cada 10 minutos")
+    logger.info("🔍 Busca de resultados de jogos finalizados agendada a cada 5 minutos")
 
     # --- Snapshot incremental de score AO VIVO ---
     # Salva score atual de games scheduled/live em final_score_home/away
