@@ -2018,6 +2018,7 @@ async def enrich_games_with_full_markets_job():
                 ctx = await browser.new_context(user_agent=UA, locale="pt-BR")
                 try:
                     page = await ctx.new_page()
+                    # ── 1ª passada: URL original (aba Popular) ──────────────
                     try:
                         await page.goto(
                             cand["game_url"],
@@ -2041,11 +2042,67 @@ async def enrich_games_with_full_markets_job():
                         home_hint=cand.get("team_home") or "",
                         away_hint=cand.get("team_away") or "",
                     )
-                    if (
-                        game_data
-                        and game_data.get("markets", {}).get("match_result")
+                    if not game_data or not game_data.get("markets", {}).get(
+                        "match_result"
                     ):
-                        results[cand["ext_id"]] = (cand["id"], game_data)
+                        return
+
+                    # ── 2ª passada: aba Handicap (?bt=11) SE ainda não veio ─
+                    if "handicap_asian" not in game_data.get("markets", {}):
+                        import re as _re
+                        url_tab = cand["game_url"]
+                        # Remove qualquer bt= existente, limpa separadores
+                        url_tab = _re.sub(r'([?&])bt=\d+', r'\1', url_tab)
+                        url_tab = _re.sub(r'[?&]$', '', url_tab).rstrip("&?")
+                        sep = "&" if "?" in url_tab else "?"
+                        url_tab = f"{url_tab}{sep}bt=11"
+
+                        try:
+                            await page.goto(
+                                url_tab,
+                                wait_until="networkidle",
+                                timeout=45000,
+                            )
+                            await page.wait_for_timeout(6000)
+                            html_h = await page.content()
+                            if (
+                                html_h
+                                and len(html_h) >= 5000
+                                and "Splash Screen" not in html_h
+                            ):
+                                from scraping.betano import (
+                                    _parse_handicap_from_html,
+                                )
+                                try:
+                                    h_only = _parse_handicap_from_html(
+                                        html_h,
+                                        cand.get("team_home") or "",
+                                        cand.get("team_away") or "",
+                                    )
+                                except Exception as exc_parse:
+                                    logger.debug(
+                                        f"enrich _parse_handicap_from_html "
+                                        f"falhou pra game id={cand['id']}: "
+                                        f"{exc_parse}"
+                                    )
+                                    h_only = None
+                                if h_only:
+                                    game_data["markets"]["handicap_asian"] = (
+                                        h_only
+                                    )
+                                    logger.info(
+                                        f"enrich: handicap via 2º fetch "
+                                        f"(game id={cand['id']}, "
+                                        f"linhas="
+                                        f"{len(h_only.get('options', {}))})"
+                                    )
+                        except Exception as exc2:
+                            logger.debug(
+                                f"enrich 2º fetch (?bt=11) falhou pra "
+                                f"game id={cand['id']}: {exc2}"
+                            )
+
+                    results[cand["ext_id"]] = (cand["id"], game_data)
                 finally:
                     try:
                         await ctx.close()

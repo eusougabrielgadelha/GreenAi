@@ -1104,8 +1104,21 @@ async def fetch_event_full_markets_from_page(
     *,
     settle_ms: int = 6000,
     timeout_ms: int = 45000,
+    fetch_handicap_tab: bool = True,
 ) -> Optional[dict]:
     """Extrai TODOS os mercados da página individual do jogo via HTML SSR.
+
+    Estratégia 2-pass:
+      1) Fetch URL original (aba Popular) → match_result + total_goals +
+         handicap_asian (se a aba Popular vier com AHRF/ASOU já populado).
+      2) Se handicap_asian NÃO veio E fetch_handicap_tab=True: faz 2º fetch
+         com `?bt=11` (aba Handicap Asiático) → extrai handicap_asian desse
+         HTML e faz merge no game_data.
+
+    Custo:
+      - 1 fetch quando o jogo já vem com handicap na aba Popular (raro).
+      - 2 fetches quando precisa abrir a aba Handicap (maioria dos jogos
+        grandes que ofertam handicap asiático).
 
     Retorna dict compatível com decide_picks:
         {
@@ -1117,7 +1130,8 @@ async def fetch_event_full_markets_from_page(
             }
         }
 
-    Se HTML retornar Splash Screen ou markets vazios: retorna None.
+    Se HTML retornar Splash Screen ou MRES ausente: retorna None.
+    Falhas no 2º fetch são toleradas — game_data ainda volta com 1x2+total_goals.
     """
     if not game_url:
         logger.warning(
@@ -1125,29 +1139,85 @@ async def fetch_event_full_markets_from_page(
         )
         return None
 
-    html = await _fetch_event_via_playwright(
+    # 1ª passada: URL original (aba Popular)
+    html_main = await _fetch_event_via_playwright(
         game_url, timeout_ms=timeout_ms, settle_ms=settle_ms
     )
-    if not html:
+    if not html_main:
         logger.warning(
             f"fetch_event_full_markets_from_page: HTML vazio (ext_id={ext_id})"
         )
         return None
 
-    result = _parse_full_markets_from_html(html)
-    if not result:
+    game_data = _parse_full_markets_from_html(html_main)
+    if not game_data or not game_data.get("markets", {}).get("match_result"):
         logger.warning(
             f"fetch_event_full_markets_from_page: parse falhou (ext_id={ext_id}, "
-            f"html_len={len(html)})"
+            f"html_len={len(html_main)})"
         )
         return None
 
-    mk = result.get("markets") or {}
+    # 2ª passada: SÓ se handicap_asian não veio E flag True
+    if fetch_handicap_tab and "handicap_asian" not in game_data.get("markets", {}):
+        # Constrói URL com ?bt=11 (remove qualquer bt= existente primeiro)
+        url_with_tab = re.sub(r'([?&])bt=\d+', r'\1', game_url)
+        # Limpa separadores órfãos (?& ou && residuais do regex sub)
+        url_with_tab = re.sub(r'[?&]$', '', url_with_tab).rstrip("&?")
+        # Adiciona ?bt=11 ou &bt=11 conforme já tenha query string
+        sep = "&" if "?" in url_with_tab else "?"
+        url_with_tab = f"{url_with_tab}{sep}bt=11"
+
+        logger.debug(
+            f"fetch_event_full_markets_from_page: 2º fetch (aba handicap) "
+            f"ext_id={ext_id} url={url_with_tab}"
+        )
+        html_handicap = await _fetch_event_via_playwright(
+            url_with_tab, timeout_ms=timeout_ms, settle_ms=settle_ms
+        )
+        if html_handicap and "Splash Screen" not in html_handicap:
+            # Extrai hints de time do slug da URL pra evitar codepath buggy
+            # do parser (referencia `event` undefined quando hints vazios).
+            # Ex: /odds/athletico-pr-mirassol/85915317/ → ("athletico-pr", "mirassol")
+            home_hint = ""
+            away_hint = ""
+            m_slug = re.search(r"/odds/([^/]+)/\d+", game_url)
+            if m_slug:
+                slug = m_slug.group(1)
+                parts = slug.split("-")
+                if len(parts) >= 2:
+                    mid = len(parts) // 2
+                    home_hint = "-".join(parts[:mid]) or slug
+                    away_hint = "-".join(parts[mid:]) or slug
+            home_hint = home_hint or "home"
+            away_hint = away_hint or "away"
+            try:
+                handicap_only = _parse_handicap_from_html(
+                    html_handicap, home_hint, away_hint
+                )
+            except Exception as exc:
+                logger.debug(
+                    f"_parse_handicap_from_html falhou (ext_id={ext_id}): {exc}"
+                )
+                handicap_only = None
+            if handicap_only:
+                game_data.setdefault("markets", {})["handicap_asian"] = handicap_only
+                logger.info(
+                    f"fetch_event_full_markets_from_page: handicap via 2º fetch "
+                    f"(ext_id={ext_id}, "
+                    f"linhas={len(handicap_only.get('options', {}))})"
+                )
+            else:
+                logger.debug(
+                    f"fetch_event_full_markets_from_page: 2º fetch sem handicap "
+                    f"(ext_id={ext_id})"
+                )
+
+    mk = game_data.get("markets") or {}
     logger.debug(
         f"fetch_event_full_markets_from_page: ext_id={ext_id} "
         f"markets={list(mk.keys())}"
     )
-    return result
+    return game_data
 
 
 # ─── Coleta proativa via páginas de liga (HTML SSR) ───────────────────────────
