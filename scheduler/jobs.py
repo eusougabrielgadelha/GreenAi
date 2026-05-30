@@ -1229,6 +1229,64 @@ async def send_combined_bet_job():
         logger.info(f"✅ Aposta combinada enviada: {len(games)} jogos, odd {combined_bet.combined_odd:.2f}, retorno R$ {combined_bet.potential_return:.2f}")
 
 
+async def send_handicap_combined_bet_job():
+    """
+    Job diário de múltipla paralela de Handicap Asiático.
+    Roda 08:30 (30min depois da múltipla de match_result pra não conflitar).
+
+    Em modo observação (HANDICAP_ASIAN_OBSERVATION_MODE=true, default):
+      - Cria CombinedBet no banco com sent_at=NULL
+      - NÃO envia Telegram
+      - Quando jogos terminam, hit/miss é calculado automaticamente
+      - Permite avaliação de hit rate sem expor risco real
+
+    Em modo ativo (HANDICAP_ASIAN_OBSERVATION_MODE=false):
+      - Mesma criação + envia Telegram (fmt_combined_bet)
+    """
+    from betting.combined_bets import (
+        select_picks_for_handicap_combined_bet,
+        create_handicap_combined_bet,
+    )
+
+    try:
+        with SessionLocal() as session:
+            picks = select_picks_for_handicap_combined_bet(session)
+            if not picks:
+                logger.info("📊 Nenhuma múltipla de handicap criada hoje")
+                return
+
+            bet = create_handicap_combined_bet(session, picks)
+            if not bet:
+                return
+
+            obs_mode = os.getenv("HANDICAP_ASIAN_OBSERVATION_MODE", "true").lower() == "true"
+
+            if obs_mode:
+                session.commit()
+                logger.info(
+                    "🔬 Múltipla handicap em OBSERVAÇÃO (bet_id=%d, %d picks, odd=%.2f) — não enviada ao Telegram",
+                    bet.id, bet.total_games, bet.combined_odd,
+                )
+            else:
+                games = session.query(Game).filter(Game.id.in_([p.game_id for p in picks])).all()
+                msg = fmt_combined_bet(bet, games)
+                tg_send_message(
+                    msg,
+                    parse_mode="HTML",
+                    message_type="combined_bet",
+                    game_id=None,
+                    ext_id=f"handicap_combined_{bet.id}",
+                )
+                bet.sent_at = datetime.now(pytz.UTC)
+                session.commit()
+                logger.info(
+                    "✅ Múltipla handicap enviada: %d picks, odd %.2f",
+                    bet.total_games, bet.combined_odd,
+                )
+    except Exception:
+        logger.exception("send_handicap_combined_bet_job falhou")
+
+
 async def send_today_games_job():
     """Envia jogos de hoje (06h-23h)."""
     from scanner.game_scanner import send_today_games
@@ -2000,6 +2058,18 @@ def setup_scheduler():
         misfire_grace_time=300,
     )
     logger.info("🎯 Envio de aposta combinada agendado para %02d:00", combined_bet_hour)
+
+    # --- Múltipla paralela de Handicap Asiático (30min depois da de match_result) ---
+    scheduler.add_job(
+        send_handicap_combined_bet_job,
+        trigger=CronTrigger(hour=8, minute=30),
+        id="send_handicap_combined_bet",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+        misfire_grace_time=60,
+    )
+    logger.info("⚖️ Múltipla de Handicap Asiático agendada para 08:30")
 
     # --- Resumo diário (opcional, via env) ---
     daily_summary_hour = os.getenv("DAILY_SUMMARY_HOUR", "")

@@ -257,6 +257,166 @@ def select_games_for_combined_bet(session, date_filter: Optional[datetime] = Non
     return selected
 
 
+def select_picks_for_handicap_combined_bet(session, date_filter: Optional[datetime] = None) -> list:
+    """
+    Seleciona picks de handicap_asian elegíveis pra múltipla paralela.
+
+    Critérios:
+      - pick.market == 'handicap_asian'
+      - pick.pick_ev >= MIN_EV (em obs mode, will_bet=False mas EV pode ser positivo)
+      - pick.pick_prob >= MIN_PROB
+      - pick.line é .5 puro (sem push em múltipla)
+      - game.status == 'scheduled'
+      - game.start_time dentro do dia (date_filter ou hoje)
+
+    Aplica diversificação igual à de match_result e ranqueia por pick_ev DESC.
+
+    Retorna lista de Pick. Vazia se múltipla descartada.
+    """
+    from config.settings import MIN_EV, MIN_PROB
+    from models.database import Pick
+
+    if date_filter is None:
+        date_filter = datetime.now(pytz.UTC)
+    start_of_day = date_filter.replace(hour=0, minute=0, second=0, microsecond=0)
+    end_of_day = start_of_day + timedelta(days=1)
+
+    candidates = (
+        session.query(Pick).join(Game, Pick.game_id == Game.id)
+        .filter(
+            Pick.market == "handicap_asian",
+            Pick.pick_ev >= MIN_EV,
+            Pick.pick_prob >= MIN_PROB,
+            Pick.line.isnot(None),
+            Game.start_time >= start_of_day,
+            Game.start_time < end_of_day,
+            Game.status == "scheduled",
+        )
+        .all()
+    )
+
+    total_eligible = len(candidates)
+
+    # Filtra apenas linhas .5 puras (sem push, sem quarter line)
+    valid = []
+    for p in candidates:
+        try:
+            line = float(p.line)
+        except (TypeError, ValueError):
+            continue
+        abs_decimal = abs(abs(line) - int(abs(line)))
+        if abs(abs_decimal - 0.5) > 1e-9:
+            continue
+        valid.append(p)
+
+    # Rank por EV desc
+    valid.sort(key=lambda p: float(p.pick_ev or 0), reverse=True)
+
+    selected: List = []
+    seen_competitions: set = set()
+    seen_teams: set = set()
+
+    for p in valid:
+        if len(selected) >= COMBINED_BET_MAX_GAMES:
+            break
+        g = p.game
+        if g is None:
+            continue
+        if COMBINED_BET_ONE_PER_COMPETITION:
+            comp_key = (g.country or "", g.competition or "")
+            if comp_key in seen_competitions:
+                continue
+        if COMBINED_BET_ONE_PER_TEAM:
+            if g.team_home in seen_teams or g.team_away in seen_teams:
+                continue
+        selected.append(p)
+        if COMBINED_BET_ONE_PER_COMPETITION:
+            seen_competitions.add((g.country or "", g.competition or ""))
+        if COMBINED_BET_ONE_PER_TEAM:
+            seen_teams.add(g.team_home)
+            seen_teams.add(g.team_away)
+
+    if len(selected) < COMBINED_BET_MIN_GAMES:
+        logger.info(
+            "Múltipla handicap descartada: poucos picks (selecionados=%d, mínimo=%d, elegíveis=%d)",
+            len(selected), COMBINED_BET_MIN_GAMES, total_eligible,
+        )
+        return []
+
+    combined_odd = 1.0
+    for p in selected:
+        odd = float(p.pick_odd or 0)
+        if odd <= 1.0:
+            continue
+        combined_odd *= odd
+
+    if combined_odd < COMBINED_BET_MIN_ODD:
+        logger.info(
+            "Múltipla handicap descartada: odd baixa (combined=%.2f, min=%.2f)",
+            combined_odd, COMBINED_BET_MIN_ODD,
+        )
+        return []
+
+    logger.info(
+        "Múltipla handicap selecionada: %d picks (elegíveis=%d, combined_odd=%.2f)",
+        len(selected), total_eligible, combined_odd,
+    )
+    return selected
+
+
+def create_handicap_combined_bet(session, picks: list) -> Optional[CombinedBet]:
+    """
+    Cria CombinedBet com market='handicap_asian' a partir de lista de Picks.
+
+    picks: lista de Pick (de select_picks_for_handicap_combined_bet)
+    Retorna CombinedBet criado ou None se vazio.
+    """
+    if not picks:
+        return None
+
+    game_ids = [p.game_id for p in picks]
+    pick_strs: List[str] = []
+    odds: List[float] = []
+    for p in picks:
+        g = p.game
+        side = (p.pick or "").lower()
+        line = float(p.line) if p.line is not None else 0.0
+        team = g.team_home if side == "home" else g.team_away if side == "away" else "?"
+        sign = "+" if line > 0 else "-"
+        pick_strs.append(f"{team} {sign}{abs(line):.1f}")
+        odds.append(float(p.pick_odd or 0))
+
+    combined_odd = 1.0
+    for o in odds:
+        if o > 1.0:
+            combined_odd *= o
+
+    EXAMPLE_STAKE = 10.0
+    potential_return = combined_odd * EXAMPLE_STAKE
+    avg_confidence = sum(float(p.pick_prob or 0) for p in picks) / len(picks)
+
+    bet = CombinedBet(
+        market="handicap_asian",
+        bet_date=datetime.now(pytz.UTC),
+        game_ids=game_ids,
+        picks=pick_strs,
+        odds=odds,
+        combined_odd=combined_odd,
+        example_stake=EXAMPLE_STAKE,
+        potential_return=potential_return,
+        avg_confidence=avg_confidence,
+        total_games=len(picks),
+        status="pending",
+    )
+    session.add(bet)
+    session.flush()
+    logger.info(
+        "Múltipla handicap criada: %d picks, odd combinada %.2f, retorno R$ %.2f",
+        len(picks), combined_odd, potential_return,
+    )
+    return bet
+
+
 def create_combined_bet(
     games: List[Game],
     bet_date: datetime,
@@ -386,24 +546,50 @@ def update_combined_bet_result(combined_bet: CombinedBet, session) -> Optional[s
         if combined_bet.status != "pending":
             return None
 
+        # Mercado da múltipla (default 'match_result' pra retrocompat)
+        market = getattr(combined_bet, "market", None) or "match_result"
+
         # Busca todos os jogos da combinada
         games = session.query(Game).filter(Game.id.in_(combined_bet.game_ids)).all()
 
-        # Early-cancel: algum jogo já errou? Matematicamente já perdeu.
-        errors = [g for g in games if g.hit is False]
+        # Helper: hit relevante pra ESTE mercado da múltipla
+        # - match_result: usa Game.hit (campo legado espelhado do pick 1x2)
+        # - outros mercados: busca Pick.hit filtrado por market
+        def _hit_for_market(g, mkt):
+            if mkt == "match_result":
+                return g.hit
+            for p in (g.picks or []):
+                if getattr(p, "market", None) == mkt:
+                    return getattr(p, "hit", None)
+            return None  # pick desse mercado não existe → trata como pending
+
+        def _outcome_for_market(g, mkt):
+            if mkt == "match_result":
+                return g.outcome
+            for p in (g.picks or []):
+                if getattr(p, "market", None) == mkt:
+                    return getattr(p, "outcome", None)
+            return None
+
+        hits_per_game = {g.id: _hit_for_market(g, market) for g in games}
+        outcomes_per_game = {g.id: _outcome_for_market(g, market) for g in games}
+
+        # Early-cancel: algum pick do mercado já errou? Matematicamente já perdeu.
+        errors = [g for g in games if hits_per_game[g.id] is False]
         if errors:
             combined_bet.status = "lost"
             combined_bet.hit = False
-            combined_bet.outcome = {str(g.id): g.outcome for g in games if g.outcome}
+            combined_bet.outcome = {str(g.id): outcomes_per_game[g.id] for g in games if outcomes_per_game[g.id]}
             combined_bet.updated_at = datetime.now(pytz.UTC)
 
             log_with_context(
                 "info",
-                f"Aposta combinada {combined_bet.id} marcada como LOST por early-cancel ({len(errors)} jogo(s) erraram)",
+                f"Aposta combinada {combined_bet.id} ({market}) marcada como LOST por early-cancel ({len(errors)} jogo(s) erraram)",
                 stage="update_combined_bet",
                 status="success",
                 extra_fields={
                     "combined_bet_id": combined_bet.id,
+                    "market": market,
                     "hit": False,
                     "early_cancel": True,
                     "errored_games": [g.id for g in errors],
@@ -413,14 +599,14 @@ def update_combined_bet_result(combined_bet: CombinedBet, session) -> Optional[s
             return "lost"
 
         # Ainda há jogos sem resultado? Espera.
-        pending_games = [g for g in games if g.hit is None]
+        pending_games = [g for g in games if hits_per_game[g.id] is None]
         if pending_games:
             return None  # Ainda esperando
 
         # Todos terminaram e nenhum errou → ganhou
         combined_bet.status = "won"
         combined_bet.hit = True
-        combined_bet.outcome = {str(g.id): g.outcome for g in games}
+        combined_bet.outcome = {str(g.id): outcomes_per_game[g.id] for g in games}
         combined_bet.updated_at = datetime.now(pytz.UTC)
 
         log_with_context(

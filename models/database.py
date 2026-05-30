@@ -196,6 +196,7 @@ class CombinedBet(Base):
     """Apostas combinadas com múltiplos jogos de alta confiança."""
     __tablename__ = "combined_bets"
     id = Column(Integer, primary_key=True)
+    market = Column(String, nullable=True, default='match_result', index=True)  # 'match_result' | 'handicap_asian' | ...
     bet_date = Column(DateTime, nullable=False, index=True)  # Data da aposta (dia dos jogos)
     game_ids = Column(JSON, nullable=False)  # Lista de IDs dos jogos incluídos [1, 2, 3]
     picks = Column(JSON, nullable=False)  # Lista de picks (nomes dos times ou "Empate")
@@ -216,6 +217,7 @@ class CombinedBet(Base):
         Index('idx_combined_bet_date', 'bet_date'),
         Index('idx_combined_bet_status', 'status'),
         Index('idx_combined_bet_hit', 'hit'),
+        Index('idx_combined_bet_market', 'market'),
     )
 
 
@@ -375,6 +377,16 @@ def init_database():
             conn.execute(text("CREATE INDEX IF NOT EXISTS idx_odd_history_market_option ON odd_history(game_id, market, option, line)"))
     except Exception:
         pass
+
+    # Migração: combined_bets ganha coluna 'market' (default 'match_result')
+    _safe_add_column("combined_bets", "market TEXT DEFAULT 'match_result'")
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS idx_combined_bet_market ON combined_bets(market)"
+            ))
+    except Exception:
+        pass  # idempotente
 
     # Backfill one-shot: Game.pick → Pick(market='match_result')
     try:
