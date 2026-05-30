@@ -1964,11 +1964,16 @@ async def enrich_games_with_full_markets_job():
     HCTG + AHRF quando ofertado), atualiza odds 1x2 do Game e roda decide_picks
     + persiste picks de match_result, total_goals, handicap_asian.
 
+    Arquitetura: FETCH paralelo (sem DB) → PERSIST sequencial (1 session).
+    Evita "database is locked" do SQLite (WAL ajuda na concorrência de
+    leitura, mas escrita ainda é serial). Idempotente — upsert_pick respeita
+    UniqueConstraint(game_id, market, line).
+
     Batch: 1 browser + concurrency (BETANO_ENRICH_CONCURRENCY, default 3).
-    Idempotente — upsert_pick respeita UniqueConstraint(game_id, market, line).
     """
+    from types import SimpleNamespace
     from playwright.async_api import async_playwright
-    from scraping.betano import _parse_full_markets_from_html, UA
+    from scraping.betano import _parse_full_markets_from_html, _parse_handicap_from_html, UA
     from betting.decision import (
         decide_picks, upsert_pick, mirror_match_result_to_game,
     )
@@ -1978,8 +1983,11 @@ async def enrich_games_with_full_markets_job():
     cutoff_min = now_utc - timedelta(minutes=30)
 
     limit = int(os.getenv("BETANO_ENRICH_BATCH_LIMIT", "30"))
+    concurrency = int(os.getenv("BETANO_ENRICH_CONCURRENCY", "3"))
+
+    # 1) Snapshot dos games sem odds (sessão curta, fecha rápido)
     with SessionLocal() as session:
-        games = session.query(Game).filter(
+        games_raw = session.query(Game).filter(
             Game.status == "scheduled",
             Game.odds_home <= 0.01,
             Game.game_url.isnot(None),
@@ -1989,88 +1997,89 @@ async def enrich_games_with_full_markets_job():
             Game.ext_id.isnot(None),
         ).order_by(Game.start_time.asc()).limit(limit).all()
 
-        # Snapshot defensivo dos campos necessários — evita DetachedInstanceError
-        candidates = [
-            {
-                "id": g.id,
-                "ext_id": g.ext_id,
-                "game_url": g.game_url,
-                "team_home": g.team_home,
-                "team_away": g.team_away,
-            }
-            for g in games
+        # Detach (cópia mínima de dados pra evitar DetachedInstanceError)
+        games_data = [
+            (g.id, g.ext_id, g.game_url, g.team_home, g.team_away)
+            for g in games_raw
         ]
 
-    if not candidates:
+    if not games_data:
         logger.debug("enrich_games_with_full_markets_job: 0 candidatos")
         return
 
-    concurrency = int(os.getenv("BETANO_ENRICH_CONCURRENCY", "3"))
     logger.info(
-        f"🔍 Enrich pages: {len(candidates)} Games sem odds (concurrency={concurrency}, limit={limit})"
+        f"🔍 Enrich pages: {len(games_data)} Games sem odds "
+        f"(concurrency={concurrency}, limit={limit})"
     )
 
-    sem = asyncio.Semaphore(max(1, concurrency))
-    results: Dict[str, Any] = {}  # ext_id -> (game_id, game_data)
+    # 2) FETCH PARALELO (sem tocar em DB)
+    snapshots = [
+        SimpleNamespace(id=gid, ext_id=eid, game_url=u, team_home=h, team_away=a)
+        for (gid, eid, u, h, a) in games_data
+    ]
 
-    async def _process(browser, cand: dict) -> None:
+    sem = asyncio.Semaphore(max(1, concurrency))
+
+    async def _process_fetch_only(browser, game):
+        """Apenas fetch + parse. Retorna (game_id, game_data) ou None.
+        NÃO toca em sessão SQLAlchemy."""
         async with sem:
             try:
                 ctx = await browser.new_context(user_agent=UA, locale="pt-BR")
                 try:
                     page = await ctx.new_page()
                     logger.info(
-                        f"🔍 enrich [{cand['id']}] {cand.get('team_home')} vs "
-                        f"{cand.get('team_away')}: 1st fetch..."
+                        f"🔍 enrich [{game.id}] {game.team_home} vs "
+                        f"{game.team_away}: 1st fetch..."
                     )
                     # ── 1ª passada: URL original (aba Popular) ──────────────
                     try:
                         await page.goto(
-                            cand["game_url"],
+                            game.game_url,
                             wait_until="domcontentloaded",
                             timeout=45000,
                         )
                     except Exception as exc:
                         logger.debug(
-                            f"enrich goto {cand['game_url']} timeout/erro tolerado: {exc}"
+                            f"enrich goto {game.game_url} timeout/erro tolerado: {exc}"
                         )
                     await page.wait_for_timeout(3000)
                     try:
                         html = await page.content()
                     except Exception as exc:
                         logger.debug(f"enrich page.content falhou: {exc}")
-                        return
+                        return None
                     if not html or len(html) < 5000 or "Splash Screen" in html:
-                        logger.info(
-                            f"🔍 enrich [{cand['id']}]: 1st HTML inválido "
-                            f"(len={len(html) if html else 0}) — skip"
+                        logger.warning(
+                            f"⚠️ enrich [{game.id}]: 1st HTML inválido "
+                            f"({len(html) if html else 0}b) — skip"
                         )
-                        return
+                        return None
                     logger.info(
-                        f"🔍 enrich [{cand['id']}]: 1st OK "
+                        f"🔍 enrich [{game.id}]: 1st OK "
                         f"({len(html)/1000:.0f}KB) — parsing..."
                     )
                     game_data = _parse_full_markets_from_html(
                         html,
-                        home_hint=cand.get("team_home") or "",
-                        away_hint=cand.get("team_away") or "",
+                        home_hint=game.team_home or "",
+                        away_hint=game.team_away or "",
                     )
                     if not game_data or not game_data.get("markets", {}).get(
                         "match_result"
                     ):
-                        logger.info(
-                            f"🔍 enrich [{cand['id']}]: sem match_result no 1st — skip"
+                        logger.warning(
+                            f"⚠️ enrich [{game.id}]: sem match_result no 1st"
                         )
-                        return
+                        return None
                     n_markets = len(game_data.get('markets', {}))
                     logger.info(
-                        f"🔍 enrich [{cand['id']}]: {n_markets} mercados extraídos"
+                        f"🔍 enrich [{game.id}]: {n_markets} mercados extraídos"
                     )
 
                     # ── 2ª passada: aba Handicap (?bt=11) SE ainda não veio ─
                     if "handicap_asian" not in game_data.get("markets", {}):
                         import re as _re
-                        url_tab = cand["game_url"]
+                        url_tab = game.game_url
                         # Remove qualquer bt= existente, limpa separadores
                         url_tab = _re.sub(r'([?&])bt=\d+', r'\1', url_tab)
                         url_tab = _re.sub(r'[?&]$', '', url_tab).rstrip("&?")
@@ -2078,7 +2087,7 @@ async def enrich_games_with_full_markets_job():
                         url_tab = f"{url_tab}{sep}bt=11"
 
                         logger.info(
-                            f"🔍 enrich [{cand['id']}]: 2nd fetch (?bt=11)..."
+                            f"🔍 enrich [{game.id}]: 2nd fetch (?bt=11)..."
                         )
                         try:
                             await page.goto(
@@ -2093,19 +2102,16 @@ async def enrich_games_with_full_markets_job():
                                 and len(html_h) >= 5000
                                 and "Splash Screen" not in html_h
                             ):
-                                from scraping.betano import (
-                                    _parse_handicap_from_html,
-                                )
                                 try:
                                     h_only = _parse_handicap_from_html(
                                         html_h,
-                                        cand.get("team_home") or "",
-                                        cand.get("team_away") or "",
+                                        game.team_home or "",
+                                        game.team_away or "",
                                     )
                                 except Exception as exc_parse:
                                     logger.debug(
                                         f"enrich _parse_handicap_from_html "
-                                        f"falhou pra game id={cand['id']}: "
+                                        f"falhou pra game id={game.id}: "
                                         f"{exc_parse}"
                                     )
                                     h_only = None
@@ -2114,45 +2120,53 @@ async def enrich_games_with_full_markets_job():
                                         h_only
                                     )
                                     logger.info(
-                                        f"🔍 enrich [{cand['id']}]: handicap via 2nd "
+                                        f"🔍 enrich [{game.id}]: handicap via 2nd "
                                         f"({len(h_only.get('options', {}))} linhas)"
                                     )
                                 else:
                                     logger.info(
-                                        f"🔍 enrich [{cand['id']}]: 2nd sem handicap"
+                                        f"🔍 enrich [{game.id}]: 2nd sem handicap"
                                     )
                         except Exception as exc2:
                             logger.debug(
                                 f"enrich 2º fetch (?bt=11) falhou pra "
-                                f"game id={cand['id']}: {exc2}"
+                                f"game id={game.id}: {exc2}"
                             )
 
-                    results[cand["ext_id"]] = (cand["id"], game_data)
+                    return (game.id, game_data)
                 finally:
                     try:
                         await ctx.close()
                     except Exception:
                         pass
             except Exception as exc:
-                logger.warning(
-                    f"enrich falhou pra game id={cand['id']}: {exc}"
-                )
+                logger.warning(f"⚠️ enrich [{game.id}] falhou: {exc}")
+                return None
 
-    async def _process_safe(browser, cand: dict) -> None:
+    async def _process_fetch_safe(browser, game):
+        """Wrapper com timeout HARD de 30s."""
         try:
-            await asyncio.wait_for(_process(browser, cand), timeout=30.0)
+            return await asyncio.wait_for(
+                _process_fetch_only(browser, game), timeout=30.0
+            )
         except asyncio.TimeoutError:
             logger.warning(
-                f"⏱ enrich timeout 30s pra game {cand['id']} "
-                f"({cand.get('team_home')} vs {cand.get('team_away')})"
+                f"⏱ enrich timeout 30s pra game {game.id} "
+                f"({game.team_home} vs {game.team_away})"
             )
+            return None
 
+    results: List[tuple] = []  # list de (game_id, game_data)
+    t0 = time.time()
     try:
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True)
             try:
-                tasks = [_process_safe(browser, c) for c in candidates]
-                await asyncio.gather(*tasks, return_exceptions=True)
+                tasks = [_process_fetch_safe(browser, g) for g in snapshots]
+                raw_results = await asyncio.gather(*tasks, return_exceptions=True)
+                for r in raw_results:
+                    if r and isinstance(r, tuple):
+                        results.append(r)
             finally:
                 try:
                     await browser.close()
@@ -2162,31 +2176,33 @@ async def enrich_games_with_full_markets_job():
         logger.exception("enrich_games_with_full_markets_job: erro Playwright")
         return
 
-    total_enriched = 0
+    elapsed = time.time() - t0
+    logger.info(
+        f"🔍 Fetch terminado: {len(results)}/{len(snapshots)} games | ⏱ {elapsed:.0f}s"
+    )
+
+    # 3) PERSIST SEQUENCIAL (1 session, sem race)
+    total_odds_set = 0
     total_picks = 0
     with SessionLocal() as session:
-        for ext_id, (game_id, game_data) in results.items():
+        for game_id, game_data in results:
             game = session.query(Game).filter_by(id=game_id).first()
             if not game:
                 continue
-
-            mr = (
-                game_data.get("markets", {})
-                .get("match_result", {})
-                .get("options", {})
-            )
-            if mr:
-                try:
+            try:
+                # Atualiza odds 1x2
+                mr = (
+                    game_data.get("markets", {})
+                    .get("match_result", {})
+                    .get("options", {})
+                )
+                if mr:
                     game.odds_home = float(mr.get("Casa", 0.0)) or 0.0
                     game.odds_draw = float(mr.get("Empate", 0.0)) or 0.0
                     game.odds_away = float(mr.get("Fora", 0.0)) or 0.0
-                    total_enriched += 1
-                except Exception:
-                    logger.exception(
-                        f"enrich: falha atualizando odds Game id={game.id}"
-                    )
+                    total_odds_set += 1
 
-            try:
+                # decide_picks + persiste picks
                 picks = decide_picks(
                     game_data,
                     game_id=game.id,
@@ -2203,17 +2219,16 @@ async def enrich_games_with_full_markets_job():
                         except Exception:
                             pass
                     total_picks += 1
+
+                # Commit a cada game (preserva progresso parcial em caso de erro)
+                session.commit()
             except Exception:
-                logger.exception(f"decide_picks falhou pra game id={game.id}")
-        try:
-            session.commit()
-        except Exception:
-            session.rollback()
-            logger.exception("enrich_games_with_full_markets_job: commit falhou")
+                logger.exception(f"persist falhou pra game {game_id}")
+                session.rollback()
 
     logger.info(
-        f"🔍 Enrich pages: {total_enriched} odds preenchidas, "
-        f"{total_picks} picks criados"
+        f"🔍 Enrich pages BATCH: {total_odds_set} odds preenchidas, "
+        f"{total_picks} picks criados | ⏱ {elapsed:.0f}s"
     )
 
 

@@ -356,6 +356,22 @@ def _backfill_picks_from_games():
 
 def init_database():
     """Inicializa o banco de dados criando todas as tabelas e migrações."""
+    # Write-Ahead Logging: permite múltiplas leituras + 1 escrita concorrente
+    # sem locks excessivos. Reduz drasticamente "database is locked" em ambiente
+    # multi-task. Persiste no banco (idempotente, só seta 1ª vez se necessário).
+    try:
+        with engine.begin() as conn:
+            result = conn.execute(text("PRAGMA journal_mode=WAL;")).fetchone()
+            mode = result[0] if result else "?"
+            conn.execute(text("PRAGMA synchronous=NORMAL;"))  # NORMAL é OK com WAL e é mais rápido
+            conn.execute(text("PRAGMA busy_timeout=5000;"))  # 5s antes de levantar SQLITE_BUSY
+        import logging
+        logging.getLogger("betauto").info(
+            f"📚 SQLite mode: journal_mode={mode}, synchronous=NORMAL, busy_timeout=5000ms"
+        )
+    except Exception:
+        pass  # Best-effort, não bloqueia init
+
     Base.metadata.create_all(engine)
     Base.metadata.create_all(engine, tables=[OddHistory.__table__], checkfirst=True)
     Base.metadata.create_all(engine, tables=[AnalyticsEvent.__table__], checkfirst=True)
