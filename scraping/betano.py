@@ -696,12 +696,13 @@ def _parse_ah_ou_market(market: dict) -> Dict[str, float]:
 def _extract_market_block_at(html: str, type_value: str) -> Optional[dict]:
     """Acha o 1º bloco JSON {...} que contém `"type":"<type_value>"` no HTML.
 
-    Estratégia: localiza `"type":"<type_value>"`, volta caracter-por-caracter
-    achando o `{` que abre esse objeto (depth=0 considerando aspas escapadas),
-    e parseia balanced braces até o `}` correspondente.
+    Estratégia robusta: localiza `"type":"<type_value>"`, depois varre '{'
+    para trás como candidatos. Pra cada candidato, faz parse forward balanced
+    (string-aware com escape) até o '}' fechador. Se o range engloba o needle,
+    parseia o JSON e retorna.
 
-    Mais robusto que extrair `window["initial_state"]` completo (que tem
-    >200KB e pode dar erro de JSON parse em chunks com strings problemáticas).
+    Robusto contra parsing forward-only (não tenta inferir estado de string
+    andando ao contrário — abordagem antiga falhava em HTML real).
     """
     import json as _json
 
@@ -710,63 +711,55 @@ def _extract_market_block_at(html: str, type_value: str) -> Optional[dict]:
     if pos < 0:
         return None
 
-    # Volta achando o '{' que abre esse objeto.
-    # Conta abre/fecha (considerando strings) de trás pra frente.
-    depth = 0
-    in_string = False
-    i = pos
-    open_idx = -1
-    while i >= 0:
-        c = html[i]
-        # Detecta limites de string. Como estamos andando ao contrário,
-        # apenas checamos '"' sem escape mais simples (suficiente p/ HTML).
-        if c == '"' and (i == 0 or html[i - 1] != "\\"):
-            in_string = not in_string
-        elif not in_string:
-            if c == "}":
+    # Limite de busca pra trás — markets Betano são tipicamente < 8 KB
+    search_limit = max(0, pos - 16000)
+
+    # Itera por '{' candidatos andando pra trás
+    cand = pos
+    while cand >= search_limit:
+        cand = html.rfind("{", search_limit, cand)
+        if cand < 0:
+            break
+
+        # Forward balanced parse a partir desse '{'
+        depth = 0
+        in_string = False
+        escape = False
+        end_idx = -1
+        for j in range(cand, len(html)):
+            c = html[j]
+            if escape:
+                escape = False
+                continue
+            if c == "\\":
+                escape = True
+                continue
+            if c == '"':
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if c == "{":
                 depth += 1
-            elif c == "{":
-                if depth == 0:
-                    open_idx = i
-                    break
+            elif c == "}":
                 depth -= 1
-        i -= 1
-    if open_idx < 0:
-        return None
+                if depth == 0:
+                    end_idx = j + 1
+                    break
 
-    # Agora vai pra frente do open_idx fazendo parsing balanced
-    depth = 0
-    in_string = False
-    escape = False
-    end_idx = -1
-    for j in range(open_idx, len(html)):
-        c = html[j]
-        if escape:
-            escape = False
-            continue
-        if c == "\\":
-            escape = True
-            continue
-        if c == '"':
-            in_string = not in_string
-            continue
-        if in_string:
-            continue
-        if c == "{":
-            depth += 1
-        elif c == "}":
-            depth -= 1
-            if depth == 0:
-                end_idx = j + 1
-                break
-    if end_idx < 0:
-        return None
+        if end_idx > pos:
+            try:
+                return _json.loads(html[cand:end_idx])
+            except Exception:
+                # Esse candidato não fecha em JSON válido — tenta o próximo '{' anterior
+                pass
 
-    try:
-        return _json.loads(html[open_idx:end_idx])
-    except Exception as exc:
-        logger.debug(f"_extract_market_block_at({type_value}) JSON parse falhou: {exc}")
-        return None
+        cand -= 1  # avança pra próxima iteração de rfind
+
+    logger.debug(
+        f"_extract_market_block_at({type_value}): nenhum bloco JSON válido envolvendo a posição {pos}"
+    )
+    return None
 
 
 def _parse_handicap_from_html(
@@ -945,6 +938,214 @@ async def fetch_event_handicap_asian(
         f"fetch_event_handicap_asian: ext_id={ext_id} "
         f"betano_type={result.get('betano_type')} "
         f"options={len(result['options'])}"
+    )
+    return result
+
+
+# ─── Full markets — fetch por evento (HTML SSR) ───────────────────────────────
+#
+# Página individual /odds/<slug>/<id>/ embute TODOS os mercados no HTML SSR,
+# muito antes do overview/latest expor (~2h antes do jogo). Estratégia:
+# Playwright → HTML → _extract_market_block_at por tipo (MRES/HCTG/AHRF) →
+# dict compatível com decide_picks. Substitui o fetch_event_handicap_asian
+# como fonte de enrich pré-jogo (handicap fica como sub-mercado opcional).
+
+def _parse_mres_market_from_block(market: dict) -> Optional[Dict[str, float]]:
+    """Transforma 1 bloco MRES (Resultado Final 1x2) em {Casa/Empate/Fora: odd}.
+
+    Estratégia: selection.name vem como "1" (home), "X" (draw), "2" (away)
+    no SSR — validado empiricamente. Aceita também variantes "Casa"/"Empate"/
+    "Fora" (caso a Betano mude pra label-friendly). Fallback: ordem das
+    selections (home, draw, away) com price válido.
+    """
+    selections = market.get("selections", []) or []
+    options: Dict[str, float] = {}
+
+    for s in selections:
+        if not isinstance(s, dict):
+            continue
+        price = s.get("price")
+        if not _is_valid_price(price):
+            continue
+        raw_name = (s.get("name") or "").strip()
+        key: Optional[str] = None
+        if raw_name == "1":
+            key = "Casa"
+        elif raw_name in ("X", "x"):
+            key = "Empate"
+        elif raw_name == "2":
+            key = "Fora"
+        else:
+            lower = raw_name.lower()
+            if lower == "casa":
+                key = "Casa"
+            elif lower in ("empate", "draw"):
+                key = "Empate"
+            elif lower == "fora":
+                key = "Fora"
+        if key and key not in options:
+            options[key] = float(price)
+
+    # Fallback: usa ordem se faltar alguma key
+    if len(options) < 3 and len(selections) >= 3:
+        ordered_keys = ["Casa", "Empate", "Fora"]
+        for idx, s in enumerate(selections[:3]):
+            if not isinstance(s, dict):
+                continue
+            price = s.get("price")
+            if not _is_valid_price(price):
+                continue
+            k = ordered_keys[idx]
+            if k not in options:
+                options[k] = float(price)
+
+    if len(options) != 3:
+        return None
+    return options
+
+
+def _parse_hctg_market_from_block(market: dict) -> Dict[str, float]:
+    """Transforma 1 bloco HCTG (Total de Gols Mais/Menos) em dict {label: odd}.
+
+    Reutiliza _OU_NAME_RE pra parsear "Mais de X.X" / "Menos de X.X". Aceita
+    só linhas .0 ou .5 (descarta asiáticas .25/.75 — esses ficam em ASOU).
+    """
+    options: Dict[str, float] = {}
+    for s in market.get("selections", []) or []:
+        if not isinstance(s, dict):
+            continue
+        price = s.get("price")
+        if not _is_valid_price(price):
+            continue
+        name = (s.get("name") or "").strip()
+        if not name:
+            continue
+        normalized = re.sub(r"(\d),(\d)", r"\1.\2", name)
+        match = _OU_NAME_RE.match(normalized)
+        if not match:
+            continue
+        line_str = match.group(2)
+        try:
+            line_val = float(line_str)
+        except ValueError:
+            continue
+        decimal = line_val - int(line_val)
+        if abs(decimal - 0.5) > 1e-6 and abs(decimal) > 1e-6:
+            continue
+        side = match.group(1).capitalize()
+        key = f"{side} de {line_str}"
+        if key not in options:
+            options[key] = float(price)
+    return options
+
+
+def _parse_full_markets_from_html(
+    html: str, home_hint: str = "", away_hint: str = ""
+) -> Optional[dict]:
+    """Parser puro: HTML SSR da página individual → dict de markets.
+
+    Localiza blocos JSON por tipo via _extract_market_block_at:
+      - MRES (match_result, obrigatório)
+      - HCTG (total_goals, opcional)
+      - AHRF (handicap_asian, opcional)
+
+    Retorna {"stats": {}, "markets": {...}} ou None se MRES ausente/inválido.
+    Formato compatível com decide_picks.
+    """
+    if not html or len(html) < 5000 or "Splash Screen" in html:
+        return None
+
+    mres_block = _extract_market_block_at(html, "MRES")
+    if not isinstance(mres_block, dict):
+        return None
+
+    mres_options = _parse_mres_market_from_block(mres_block)
+    if not mres_options:
+        return None
+
+    markets: Dict[str, Any] = {
+        "match_result": {
+            "display_name": mres_block.get("name") or "Resultado Final",
+            "options": mres_options,
+            "market_id": mres_block.get("id"),
+        }
+    }
+
+    # total_goals (opcional)
+    hctg_block = _extract_market_block_at(html, "HCTG")
+    if isinstance(hctg_block, dict):
+        tg_options = _parse_hctg_market_from_block(hctg_block)
+        if tg_options:
+            markets["total_goals"] = {
+                "display_name": hctg_block.get("name") or "Total de Gols Mais/Menos",
+                "options": tg_options,
+                "market_id": hctg_block.get("id"),
+            }
+
+    # handicap_asian (opcional)
+    ahrf_block = _extract_market_block_at(html, _BETANO_AH_PRIMARY_TYPE)
+    if isinstance(ahrf_block, dict):
+        ah_options = _parse_ah_market(ahrf_block, home_hint, away_hint)
+        if ah_options:
+            markets["handicap_asian"] = {
+                "display_name": ahrf_block.get("name") or "Handicap Asiático",
+                "options": ah_options,
+                "market_type": "handicap_asian",
+                "market_id": ahrf_block.get("id"),
+                "betano_type": _BETANO_AH_PRIMARY_TYPE,
+            }
+
+    return {"stats": {}, "markets": markets}
+
+
+async def fetch_event_full_markets_from_page(
+    ext_id: str,
+    game_url: str,
+    *,
+    settle_ms: int = 6000,
+    timeout_ms: int = 45000,
+) -> Optional[dict]:
+    """Extrai TODOS os mercados da página individual do jogo via HTML SSR.
+
+    Retorna dict compatível com decide_picks:
+        {
+            "stats": {...},
+            "markets": {
+                "match_result": {"display_name": ..., "options": {Casa, Empate, Fora}},
+                "total_goals": {...},       # opcional
+                "handicap_asian": {...},    # opcional
+            }
+        }
+
+    Se HTML retornar Splash Screen ou markets vazios: retorna None.
+    """
+    if not game_url:
+        logger.warning(
+            f"fetch_event_full_markets_from_page: game_url vazio (ext_id={ext_id})"
+        )
+        return None
+
+    html = await _fetch_event_via_playwright(
+        game_url, timeout_ms=timeout_ms, settle_ms=settle_ms
+    )
+    if not html:
+        logger.warning(
+            f"fetch_event_full_markets_from_page: HTML vazio (ext_id={ext_id})"
+        )
+        return None
+
+    result = _parse_full_markets_from_html(html)
+    if not result:
+        logger.warning(
+            f"fetch_event_full_markets_from_page: parse falhou (ext_id={ext_id}, "
+            f"html_len={len(html)})"
+        )
+        return None
+
+    mk = result.get("markets") or {}
+    logger.debug(
+        f"fetch_event_full_markets_from_page: ext_id={ext_id} "
+        f"markets={list(mk.keys())}"
     )
     return result
 

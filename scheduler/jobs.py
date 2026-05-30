@@ -1956,6 +1956,176 @@ async def fetch_finished_games_results_job():
         logger.exception(f"Erro ao executar job de busca de resultados: {e}")
 
 
+async def enrich_games_with_full_markets_job():
+    """Enriquece Games agendados (próximas 24h) sem odds via página individual.
+
+    Pra cada Game agendado sem odds preenchidas (odds_home <= 0.01), abre a
+    página individual do jogo via Playwright, extrai TODOS os mercados (MRES +
+    HCTG + AHRF quando ofertado), atualiza odds 1x2 do Game e roda decide_picks
+    + persiste picks de match_result, total_goals, handicap_asian.
+
+    Batch: 1 browser + concurrency (BETANO_ENRICH_CONCURRENCY, default 3).
+    Idempotente — upsert_pick respeita UniqueConstraint(game_id, market, line).
+    """
+    from playwright.async_api import async_playwright
+    from scraping.betano import _parse_full_markets_from_html, UA
+    from betting.decision import (
+        decide_picks, upsert_pick, mirror_match_result_to_game,
+    )
+
+    now_utc = datetime.now(pytz.UTC)
+    cutoff_max = now_utc + timedelta(hours=24)
+    cutoff_min = now_utc - timedelta(minutes=30)
+
+    with SessionLocal() as session:
+        games = session.query(Game).filter(
+            Game.status == "scheduled",
+            Game.odds_home <= 0.01,
+            Game.game_url.isnot(None),
+            Game.game_url != "",
+            Game.start_time >= cutoff_min,
+            Game.start_time < cutoff_max,
+            Game.ext_id.isnot(None),
+        ).order_by(Game.start_time).all()
+
+        # Snapshot defensivo dos campos necessários — evita DetachedInstanceError
+        candidates = [
+            {
+                "id": g.id,
+                "ext_id": g.ext_id,
+                "game_url": g.game_url,
+                "team_home": g.team_home,
+                "team_away": g.team_away,
+            }
+            for g in games
+        ]
+
+    if not candidates:
+        logger.debug("enrich_games_with_full_markets_job: 0 candidatos")
+        return
+
+    concurrency = int(os.getenv("BETANO_ENRICH_CONCURRENCY", "3"))
+    logger.info(
+        f"🔍 Enrich pages: {len(candidates)} Games sem odds (concurrency={concurrency})"
+    )
+
+    sem = asyncio.Semaphore(max(1, concurrency))
+    results: Dict[str, Any] = {}  # ext_id -> (game_id, game_data)
+
+    async def _process(browser, cand: dict) -> None:
+        async with sem:
+            try:
+                ctx = await browser.new_context(user_agent=UA, locale="pt-BR")
+                try:
+                    page = await ctx.new_page()
+                    try:
+                        await page.goto(
+                            cand["game_url"],
+                            wait_until="networkidle",
+                            timeout=45000,
+                        )
+                    except Exception as exc:
+                        logger.debug(
+                            f"enrich goto {cand['game_url']} timeout/erro tolerado: {exc}"
+                        )
+                    await page.wait_for_timeout(6000)
+                    try:
+                        html = await page.content()
+                    except Exception as exc:
+                        logger.debug(f"enrich page.content falhou: {exc}")
+                        return
+                    if not html or len(html) < 5000 or "Splash Screen" in html:
+                        return
+                    game_data = _parse_full_markets_from_html(
+                        html,
+                        home_hint=cand.get("team_home") or "",
+                        away_hint=cand.get("team_away") or "",
+                    )
+                    if (
+                        game_data
+                        and game_data.get("markets", {}).get("match_result")
+                    ):
+                        results[cand["ext_id"]] = (cand["id"], game_data)
+                finally:
+                    try:
+                        await ctx.close()
+                    except Exception:
+                        pass
+            except Exception as exc:
+                logger.warning(
+                    f"enrich falhou pra game id={cand['id']}: {exc}"
+                )
+
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            try:
+                tasks = [_process(browser, c) for c in candidates]
+                await asyncio.gather(*tasks, return_exceptions=True)
+            finally:
+                try:
+                    await browser.close()
+                except Exception:
+                    pass
+    except Exception:
+        logger.exception("enrich_games_with_full_markets_job: erro Playwright")
+        return
+
+    total_enriched = 0
+    total_picks = 0
+    with SessionLocal() as session:
+        for ext_id, (game_id, game_data) in results.items():
+            game = session.query(Game).filter_by(id=game_id).first()
+            if not game:
+                continue
+
+            mr = (
+                game_data.get("markets", {})
+                .get("match_result", {})
+                .get("options", {})
+            )
+            if mr:
+                try:
+                    game.odds_home = float(mr.get("Casa", 0.0)) or 0.0
+                    game.odds_draw = float(mr.get("Empate", 0.0)) or 0.0
+                    game.odds_away = float(mr.get("Fora", 0.0)) or 0.0
+                    total_enriched += 1
+                except Exception:
+                    logger.exception(
+                        f"enrich: falha atualizando odds Game id={game.id}"
+                    )
+
+            try:
+                picks = decide_picks(
+                    game_data,
+                    game_id=game.id,
+                    competition=game.competition,
+                    teams=(game.team_home, game.team_away),
+                )
+                for pr in picks:
+                    pick_row = upsert_pick(
+                        session, game.id, pr, "enrich_full_markets"
+                    )
+                    if pr.market == "match_result":
+                        try:
+                            mirror_match_result_to_game(game, pick_row)
+                        except Exception:
+                            pass
+                    total_picks += 1
+            except Exception:
+                logger.exception(f"decide_picks falhou pra game id={game.id}")
+        try:
+            session.commit()
+        except Exception:
+            session.rollback()
+            logger.exception("enrich_games_with_full_markets_job: commit falhou")
+
+    logger.info(
+        f"🔍 Enrich pages: {total_enriched} odds preenchidas, "
+        f"{total_picks} picks criados"
+    )
+
+
 def setup_scheduler():
     """
     Registra todos os jobs no AsyncIOScheduler.
@@ -2174,6 +2344,21 @@ def setup_scheduler():
             misfire_grace_time=300,
         )
         logger.info("📚 Coleta proativa agendada: 05:30 + 12:00 (era a cada 1h)")
+
+    # --- Enrich Games sem odds via página individual (a cada 30min) ---
+    # Páginas individuais /odds/<slug>/<id>/ expõem todos os mercados (MRES,
+    # HCTG, AHRF) muito antes do overview/latest. Cobre jogos coletados pelas
+    # league pages (193 hoje) que ainda têm odds=0.
+    scheduler.add_job(
+        enrich_games_with_full_markets_job,
+        trigger=IntervalTrigger(minutes=30),
+        id="enrich_games_full_markets",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+        misfire_grace_time=120,
+    )
+    logger.info("🔍 Enrich Games via página individual agendado a cada 30min")
 
     # --- Envio de jogos da madrugada (23h do dia anterior) ---
     dawn_hour = int(os.getenv("DAWN_GAMES_HOUR", "23"))
