@@ -256,22 +256,29 @@ async def fetch_events_from_link(url: str, backend: str):
 async def fetch_game_result(ext_id: str, source_link: str) -> Optional[dict]:
     """
     Busca o resultado de um jogo específico.
-    
-    Usa cache para evitar múltiplas requisições para o mesmo jogo.
-    Usa APENAS HTML scraping (XHR desativado).
-    
+
+    Modo Betano (USE_BETANO_AS_PRIMARY=true): usa overview Betano cacheado e
+    extrai resultado via extract_result_from_event. Se USE_BETNACIONAL_FALLBACK=true
+    e o evento Betano não tiver score válido, cai pro caminho BetNacional.
+
+    Modo BetNacional (default): comportamento atual — HTML scraping via Playwright
+    com seletores liveMatchTracker e lmt-match-preview do widget SportRadar.
+
+    Usa cache para evitar múltiplas requisições para o mesmo jogo (vale pros 2 modos).
+
     Args:
         ext_id: ID externo do jogo (event_id)
-        source_link: URL do jogo
-    
+        source_link: URL do jogo (usado no caminho BetNacional)
+
     Returns:
         Dict com keys: "outcome" (home/draw/away), "home_goals", "away_goals", "score" (formato "2-1")
         Ou None se não conseguir extrair
     """
+    from config.settings import USE_BETANO_AS_PRIMARY, USE_BETNACIONAL_FALLBACK
     from scraping.betnacional import scrape_game_result
     from utils.cache import result_cache, negative_result_cache
-    
-    # ETAPA 0: Verificar cache primeiro
+
+    # ETAPA 0: Verificar cache primeiro (vale pros 2 modos)
     cached_result = result_cache.get(ext_id)
     if cached_result:
         # Se cache retornar string (legado), converter para dict
@@ -285,13 +292,51 @@ async def fetch_game_result(ext_id: str, source_link: str) -> Optional[dict]:
             }
         logger.info(f"✅ Resultado encontrado no cache para jogo {ext_id}: {cached_result.get('outcome')}")
         return cached_result
-    
+
     # ETAPA 0.5: Verificar cache negativo (jogo recém-pesquisado sem resultado)
     if negative_result_cache.get(ext_id) is not None:
         logger.debug(f"⏭️ Cache negativo HIT para jogo {ext_id} — pulando refetch (será tentado novamente após TTL)")
         return None
 
-    # ETAPA 1: Usar APENAS HTML scraping (XHR desativado)
+    # ETAPA 1: Caminho primário Betano (overview cacheado + extract_result_from_event)
+    if USE_BETANO_AS_PRIMARY:
+        try:
+            from scraping.betano import fetch_betano_overview, extract_result_from_event
+            overview = await fetch_betano_overview()
+            if overview:
+                events = overview.get("events", {}) or {}
+                # Betano usa keys como string; tenta str primeiro, depois raw
+                event = events.get(str(ext_id))
+                if event is None:
+                    event = events.get(ext_id)
+                if event:
+                    result = extract_result_from_event(event)
+                    if result:
+                        logger.info(
+                            f"✅ Betano resultado: ext_id={ext_id} → "
+                            f"{result['outcome']} ({result['score']})"
+                        )
+                        result_cache.set(ext_id, result)
+                        return result
+                    logger.debug(
+                        f"Betano: evento {ext_id} sem score válido (jogo em andamento?)"
+                    )
+                else:
+                    logger.debug(f"Betano: evento {ext_id} não está na overview")
+            else:
+                logger.debug(f"Betano overview vazio pra ext_id={ext_id}")
+        except ImportError as exc:
+            logger.warning(f"Módulo betano indisponível ({exc})")
+        except Exception as exc:
+            logger.exception(f"Betano result_fetch falhou pra {ext_id}: {exc}")
+
+        # Se Betano falhou e fallback BetNacional não habilitado, retorna None
+        # e marca cache negativo pra evitar refetch imediato no próximo ciclo.
+        if not USE_BETNACIONAL_FALLBACK:
+            negative_result_cache.set(ext_id, "_not_found_")
+            return None
+
+    # ETAPA 2: Caminho BetNacional — HTML scraping (XHR desativado)
     try:
         logger.debug(f"🌐 Buscando resultado via HTML scraping para jogo {ext_id}")
         # Para jogos finalizados, usar Playwright com mais tempo de espera para garantir que o widget carregue
@@ -352,17 +397,65 @@ async def fetch_game_full_markets(ext_id: str, game_url: Optional[str] = None) -
     """
     Busca markets completos de um jogo (todos os mercados disponíveis).
 
-    Tenta primeiro XHR (fetch_event_odds_from_api_async → parse_event_odds_from_api).
-    Cai pra HTML scraping (scrape_live_game_data) se XHR falhar ou vier sem markets.
+    Modo Betano (USE_BETANO_AS_PRIMARY=true): usa overview Betano cacheado e
+    procura o evento pelo ext_id. Se USE_BETNACIONAL_FALLBACK=true e o evento
+    não for encontrado, cai pro caminho BetNacional.
+
+    Modo BetNacional (default): tenta XHR (fetch_event_odds_from_api_async →
+    parse_event_odds_from_api) e cai pra HTML scraping (scrape_live_game_data)
+    se XHR falhar ou vier sem markets.
 
     Args:
-        ext_id: ID do jogo no BetNacional (string, pode conter dígitos)
-        game_url: URL completa do jogo (usada no fallback HTML)
+        ext_id: ID do jogo (string, pode conter dígitos)
+        game_url: URL completa do jogo (usada no fallback HTML do BetNacional)
 
     Returns:
         dict {"stats": {...}, "markets": {...}}.
-        Se ambos os caminhos falharem, retorna {"stats": {}, "markets": {}}.
+        Se nenhum caminho funcionar, retorna {"stats": {}, "markets": {}}.
     """
+    from config.settings import USE_BETANO_AS_PRIMARY, USE_BETNACIONAL_FALLBACK
+
+    # ── Caminho primário: Betano ─────────────────────────────────────────────
+    if USE_BETANO_AS_PRIMARY:
+        try:
+            from scraping.betano import (
+                fetch_betano_overview,
+                build_game_data_from_event,
+            )
+            overview = await fetch_betano_overview()
+            if overview:
+                events = overview.get("events", {}) or {}
+                # Betano usa keys como string; tenta str primeiro, depois raw
+                event = events.get(str(ext_id))
+                if event is None:
+                    event = events.get(ext_id)
+                if event:
+                    game_data = build_game_data_from_event(event, overview)
+                    if game_data.get("markets"):
+                        logger.debug(
+                            f"Betano markets pra ext_id={ext_id}: "
+                            f"{list(game_data['markets'].keys())}"
+                        )
+                        return game_data
+                    logger.warning(
+                        f"Betano: evento {ext_id} sem markets relevantes"
+                    )
+                else:
+                    logger.warning(
+                        f"Betano: evento {ext_id} não encontrado na overview"
+                    )
+            else:
+                logger.warning(f"Betano overview vazio pra ext_id={ext_id}")
+        except ImportError as exc:
+            logger.warning(f"Módulo betano indisponível ({exc})")
+        except Exception as exc:
+            logger.exception(f"Betano full_markets falhou pra {ext_id}: {exc}")
+
+        # Se Betano falhou e fallback BetNacional não habilitado, retorna vazio
+        if not USE_BETNACIONAL_FALLBACK:
+            return {"stats": {}, "markets": {}}
+
+    # ── Caminho BetNacional (XHR primary + HTML fallback) ────────────────────
     from scraping.betnacional import (
         fetch_event_odds_from_api_async,
         parse_event_odds_from_api,

@@ -213,3 +213,25 @@ def mark_high_conf_notified(pick_reason: str) -> str:
     """Marca um jogo como notificado de alta confiança."""
     return (f"{(pick_reason or '').strip()} {HIGH_CONF_SENT_MARK}").strip()
 
+# ============================================
+# Migração BetNacional → Betano
+# ============================================
+# Quando True, sistema usa Betano como fonte primária de eventos/markets.
+# Default False = comportamento atual (BetNacional via Playwright XHR).
+USE_BETANO_AS_PRIMARY = os.getenv("USE_BETANO_AS_PRIMARY", "false").lower() == "true"
+
+# Quando True, BetNacional fica disponível como fallback. Default False
+# (não chama BetNacional se Betano falhar).
+USE_BETNACIONAL_FALLBACK = os.getenv("USE_BETNACIONAL_FALLBACK", "false").lower() == "true"
+
+# Betano endpoints + parâmetros
+BETANO_BASE_URL = os.getenv("BETANO_BASE_URL", "https://www.betano.bet.br")
+BETANO_OVERVIEW_URL = os.getenv(
+    "BETANO_OVERVIEW_URL",
+    "https://www.betano.bet.br/danae-webapi/api/live/overview/latest"
+)
+BETANO_QUERY_LANGUAGE_ID = int(os.getenv("BETANO_QUERY_LANGUAGE_ID", "5"))
+BETANO_QUERY_OPERATOR_ID = int(os.getenv("BETANO_QUERY_OPERATOR_ID", "8"))
+BETANO_FETCH_TIMEOUT = float(os.getenv("BETANO_FETCH_TIMEOUT", "20"))
+BETANO_OVERVIEW_CACHE_TTL_SEC = int(os.getenv("BETANO_OVERVIEW_CACHE_TTL_SEC", "60"))
+

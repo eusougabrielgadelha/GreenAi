@@ -1855,7 +1855,17 @@ async def refresh_bn_cookies_job():
     Job periódico que renova cookies BetNacional via Playwright.
     Roda a cada BN_COOKIE_TTL_HOURS - 1 (margem de segurança).
     Também roda ao iniciar (chamado em main.py via on_startup hook).
+
+    Skip se BetNacional não é fallback ativo (USE_BETNACIONAL_FALLBACK=false).
     """
+    try:
+        from config.settings import USE_BETNACIONAL_FALLBACK
+    except Exception:
+        USE_BETNACIONAL_FALLBACK = False
+    if not USE_BETNACIONAL_FALLBACK:
+        logger.debug("BN fallback OFF — pulando refresh de cookies")
+        return
+
     try:
         from utils.bn_cookie_manager import refresh_cookies_async, is_expired
         forced = is_expired()
@@ -1875,6 +1885,10 @@ async def fetch_events_smart(
 ) -> list:
     """
     Roteamento inteligente de fetch:
+    0. Se USE_BETANO_AS_PRIMARY=true: tenta Betano primeiro.
+       - Se Betano retornar eventos: retorna direto.
+       - Se Betano falhar/vazio E USE_BETNACIONAL_FALLBACK=false: retorna [].
+       - Se Betano falhar/vazio E USE_BETNACIONAL_FALLBACK=true: cai pro BetNacional.
     1. Se USE_API_JSON_FETCH=true E cookies disponíveis: tenta via API
        a) Se tournament_id_hint vier: usa esse
        b) Senão: extrai do URL (regex /events/{sport}/{cat}/{tour})
@@ -1883,6 +1897,38 @@ async def fetch_events_smart(
     """
     import re
 
+    # ─── 0) Caminho primário: Betano ───────────────────────────────────────
+    try:
+        from config.settings import USE_BETANO_AS_PRIMARY, USE_BETNACIONAL_FALLBACK
+    except Exception:
+        USE_BETANO_AS_PRIMARY = False
+        USE_BETNACIONAL_FALLBACK = False
+
+    if USE_BETANO_AS_PRIMARY:
+        try:
+            from scraping.betano import fetch_events_via_betano_api
+            events = await fetch_events_via_betano_api(source_link=url)
+            if events:
+                logger.info(
+                    f"✅ Betano fetch OK ({len(events)} eventos) | url={url}"
+                )
+                return events
+            logger.warning(f"⚠️ Betano fetch retornou 0 eventos | url={url}")
+        except ImportError as exc:
+            logger.warning(
+                f"Módulo betano indisponível ({exc}) — caindo pro fallback se disponível"
+            )
+        except Exception as exc:
+            logger.exception(f"Betano fetch falhou: {exc}")
+
+        # Se Betano falhou/vazio e fallback BetNacional não habilitado, retorna []
+        if not USE_BETNACIONAL_FALLBACK:
+            logger.warning(
+                "USE_BETNACIONAL_FALLBACK=false — não tentando BetNacional"
+            )
+            return []
+
+    # ─── 1) Caminho atual: BetNacional via API JSON ────────────────────────
     use_api = os.getenv("USE_API_JSON_FETCH", "false").lower() == "true"
 
     if use_api:

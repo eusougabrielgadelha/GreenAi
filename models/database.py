@@ -14,6 +14,7 @@ class Game(Base):
     __tablename__ = "games"
     id = Column(Integer, primary_key=True)
     ext_id = Column(String, index=True)
+    betradar_match_id = Column(Integer, nullable=True, index=True)  # Identificador universal (Betano → cross-source matching)
     source_link = Column(Text)
     game_url = Column(Text)
     competition = Column(String)
@@ -53,6 +54,7 @@ class Game(Base):
         Index('idx_game_hit', 'hit'),
         Index('idx_game_pick_notified', 'pick_notified_at'),
         Index('idx_game_country', 'country'),
+        Index('idx_game_betradar', 'betradar_match_id'),
     )
 
 
@@ -346,6 +348,15 @@ def init_database():
     _safe_add_column("games", "result_fetched_at DATETIME")
     # Migração: país (category_name da API) — separado do nome da liga
     _safe_add_column("games", "country TEXT")
+    # Migração: betradar match id (Betano → cross-source matching)
+    _safe_add_column("games", "betradar_match_id INTEGER")
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS idx_game_betradar ON games(betradar_match_id)"
+            ))
+    except Exception:
+        pass  # idempotente
     # Migração: renomear coluna 'metadata' para 'event_metadata' em analytics_events
     _safe_migrate_metadata_column()
 
