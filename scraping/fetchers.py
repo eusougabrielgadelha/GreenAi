@@ -405,6 +405,12 @@ async def fetch_game_full_markets(ext_id: str, game_url: Optional[str] = None) -
     return {"stats": {}, "markets": {}}
 
 
+# Cache em memória pra evitar Playwright redundante quando scan itera múltiplas URLs.
+# Key: sport_id. Value: (timestamp, list[EventDigest])
+_API_FETCH_CACHE: dict = {}
+_API_FETCH_CACHE_TTL_SECONDS = 90
+
+
 async def fetch_events_via_api(
     sport_id: int = 1,
     category_id: int = 0,
@@ -418,22 +424,29 @@ async def fetch_events_via_api(
     mas permite o XHR quando ele é disparado pelo contexto da página real. Por isso,
     navegamos via Playwright e interceptamos a resposta `events-by-seasons`.
 
-    Args:
-        sport_id: ID do esporte (1 = futebol)
-        category_id: ID da categoria (0 = todas)
-        tournament_id: ID do torneio (0 = todos)
-        market_id: ignorado (a página decide o que pedir)
+    A URL global do esporte (`/events/{sport}/0/0`) é a única que dispara o XHR
+    com TODOS os jogos. Cacheamos por 90s pra evitar Playwright redundante quando
+    o scan itera múltiplas URLs configuradas no .env. NÃO filtramos por
+    tournament_id/category_id localmente porque os IDs no .env (path da URL,
+    tipo 23, 390) são DIFERENTES dos ids internos da API (tipo 950000330).
 
     Returns:
-        list[EventDigest] agrupado por event_id, com 1x2 já extraído.
+        list[EventDigest] com TODOS os eventos do esporte (sem filtro local).
     """
+    import time
     from scraping.betnacional import parse_events_from_api_json
     from playwright.async_api import async_playwright
 
-    # IMPORTANTE: sempre navegar pra URL global do esporte (events/{sport}/0/0).
-    # Páginas de torneio específico não disparam a chamada events-by-seasons via XHR
-    # (são renderizadas direto). A URL global dispara o XHR com TODOS os jogos.
-    # Filtramos o tournament_id localmente após capturar.
+    cache_key = sport_id
+    cached = _API_FETCH_CACHE.get(cache_key)
+    if cached:
+        ts, events = cached
+        if time.time() - ts < _API_FETCH_CACHE_TTL_SECONDS:
+            logger.info(
+                f"API fetch: cache HIT ({len(events)} eventos, age={int(time.time()-ts)}s)"
+            )
+            return events
+
     page_url = f"https://betnacional.bet.br/events/{sport_id}/0/0"
     UA = (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
@@ -474,22 +487,17 @@ async def fetch_events_via_api(
         )
         return []
 
-    # Merge respostas se houver múltiplas
+    # Merge respostas se houver múltiplas (mesma chamada pode ter paginação)
     merged_odds, merged_scores = [], []
     for body in captured:
         merged_odds.extend(body.get("odds", []))
         merged_scores.extend(body.get("scores", []))
 
-    # Filtragem local por tournament/category quando especificado (>0)
-    if tournament_id and tournament_id > 0:
-        merged_odds = [o for o in merged_odds if o.get("tournament_id") == tournament_id]
-    if category_id and category_id > 0:
-        merged_odds = [o for o in merged_odds if o.get("category_id") == category_id]
-
     merged = {"odds": merged_odds, "outrights": [], "scores": merged_scores}
     events = parse_events_from_api_json(merged, source_link=page_url)
+    _API_FETCH_CACHE[cache_key] = (time.time(), events)
     logger.info(
         f"API fetch: {len(events)} eventos extraídos via Playwright XHR capture "
-        f"(sport={sport_id}, cat={category_id}, tour={tournament_id})"
+        f"(sport={sport_id}, cached por {_API_FETCH_CACHE_TTL_SECONDS}s)"
     )
     return events
