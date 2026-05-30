@@ -160,6 +160,7 @@ async def night_scan_for_early_games():
                     # detalhado se feature flag ativa. mirror_match_result_to_game preenche
                     # os campos legados de pick no Game.
                     g = session.query(Game).filter_by(ext_id=ev.ext_id, start_time=start_utc).one_or_none()
+                    _ev_betradar = getattr(ev, "betradar_match_id", None)
                     if g:
                         g.source_link = url
                         g.game_url = getattr(ev, "game_url", None) or g.game_url
@@ -169,6 +170,9 @@ async def night_scan_for_early_games():
                         g.odds_home = ev.odds_home
                         g.odds_draw = ev.odds_draw
                         g.odds_away = ev.odds_away
+                        # Pedra de Roseta: só atualiza se vier valor (BetNacional não tem)
+                        if _ev_betradar is not None:
+                            g.betradar_match_id = _ev_betradar
                         if g.status not in ("live", "ended"):
                             g.status = "scheduled"
                     else:
@@ -184,6 +188,7 @@ async def night_scan_for_early_games():
                             odds_home=ev.odds_home,
                             odds_draw=ev.odds_draw,
                             odds_away=ev.odds_away,
+                            betradar_match_id=_ev_betradar,
                             status="scheduled",
                         )
                         session.add(g)
@@ -203,6 +208,8 @@ async def night_scan_for_early_games():
                             g.odds_home = ev.odds_home
                             g.odds_draw = ev.odds_draw
                             g.odds_away = ev.odds_away
+                            if _ev_betradar is not None:
+                                g.betradar_match_id = _ev_betradar
 
                     # Decisão multi-market
                     picks_list = await fetch_and_decide_picks(
@@ -424,6 +431,7 @@ async def rescan_watchlist_job():
                 # Upsert do Game primeiro (sem pick), depois decide_picks com fetch detalhado.
                 # mirror_match_result_to_game preenche os campos legados de pick no Game.
                 g = session.query(Game).filter_by(ext_id=ext_id, start_time=start_utc).one_or_none()
+                _ev_betradar = getattr(ev, "betradar_match_id", None)
                 if g:
                     g.source_link = link
                     g.game_url = getattr(ev, "game_url", None) or g.game_url
@@ -433,6 +441,9 @@ async def rescan_watchlist_job():
                     g.odds_home = ev.odds_home
                     g.odds_draw = ev.odds_draw
                     g.odds_away = ev.odds_away
+                    # Pedra de Roseta: só atualiza se vier valor (BetNacional não tem)
+                    if _ev_betradar is not None:
+                        g.betradar_match_id = _ev_betradar
                     g.status = "scheduled"
                 else:
                     g = Game(
@@ -447,6 +458,7 @@ async def rescan_watchlist_job():
                         odds_home=ev.odds_home,
                         odds_draw=ev.odds_draw,
                         odds_away=ev.odds_away,
+                        betradar_match_id=_ev_betradar,
                         status="scheduled",
                     )
                     session.add(g)
@@ -466,6 +478,8 @@ async def rescan_watchlist_job():
                         g.odds_home = ev.odds_home
                         g.odds_draw = ev.odds_draw
                         g.odds_away = ev.odds_away
+                        if _ev_betradar is not None:
+                            g.betradar_match_id = _ev_betradar
                         g.status = "scheduled"
 
                 # Decisão multi-market com fetch (se feature flag ativa)
@@ -1455,6 +1469,73 @@ async def flush_message_buffers_job():
         logger.exception(f"Erro ao fazer flush dos buffers: {e}")
 
 
+async def snapshot_live_scores_from_betano(session) -> int:
+    """
+    Pra cada Game scheduled/live no banco com ext_id Betano (8 dígitos),
+    verifica se há score AO VIVO no overview Betano e atualiza
+    final_score_home/away. NÃO marca outcome/hit — só snapshot.
+
+    Defesa em profundidade: se Betano dropar o evento antes do
+    fetch_finished_games_results_job rodar (janela ~2h pós-FT),
+    o último snapshot já está salvo como melhor estimativa.
+
+    Retorna count de games atualizados. Não comita — caller comita.
+    """
+    from scraping.betano import fetch_betano_overview
+    from models.database import Game
+
+    overview = await fetch_betano_overview()
+    if not overview:
+        return 0
+
+    events = overview.get("events", {})
+    updated = 0
+
+    # Pega games que ainda não foram resolvidos
+    games = session.query(Game).filter(
+        Game.outcome.is_(None),            # ainda não tem outcome final
+        Game.result_fetched_at.is_(None),  # nunca foi resolvido
+        Game.status.in_(("scheduled", "live")),
+    ).all()
+
+    for g in games:
+        ev = events.get(str(g.ext_id))
+        if not ev:
+            continue
+        live = ev.get("liveData") or {}
+        score = live.get("score") or {}
+        h = score.get("home")
+        a = score.get("away")
+        if h is None or a is None:
+            continue
+        try:
+            h_int = int(h)
+            a_int = int(a)
+        except (TypeError, ValueError):
+            continue
+        # Só atualiza se mudou
+        if g.final_score_home != h_int or g.final_score_away != a_int:
+            g.final_score_home = h_int
+            g.final_score_away = a_int
+            g.final_score = f"{h_int}-{a_int}"
+            updated += 1
+
+    return updated
+
+
+async def score_snapshot_job():
+    """Job dedicado de snapshot incremental — roda a cada 5min."""
+    from models.database import SessionLocal
+    try:
+        with SessionLocal() as session:
+            count = await snapshot_live_scores_from_betano(session)
+            if count > 0:
+                session.commit()
+                logger.info(f"📸 Score snapshot incremental: {count} games")
+    except Exception:
+        logger.exception("score_snapshot_job falhou")
+
+
 async def fetch_finished_games_results_job():
     """
     Job periódico que busca resultados de jogos finalizados que ainda não têm resultado.
@@ -1597,7 +1678,16 @@ async def fetch_finished_games_results_job():
                     tg_send_message(msg)  # HTML por padrão
             except Exception:
                 logger.exception("Erro ao enviar mensagem em lote de resultados")
-                    
+
+            # Snapshot incremental dos games ainda live (defesa em profundidade)
+            try:
+                snap_count = await snapshot_live_scores_from_betano(session)
+                if snap_count > 0:
+                    session.commit()
+                    logger.info(f"📸 Score snapshot: {snap_count} games atualizados")
+            except Exception:
+                logger.exception("Falha ao snapshot scores")
+
     except Exception as e:
         logger.exception(f"Erro ao executar job de busca de resultados: {e}")
 
@@ -1699,16 +1789,33 @@ def setup_scheduler():
     # logger.info("🏥 Health checks do sistema agendados a cada 30 minutos")
     
     # --- Busca periódica de resultados de jogos finalizados ---
+    # Intervalo reduzido pra 10min (era 30min) — Betano retém eventos finalizados
+    # no overview por ~2h pós-FT, então 12 chances de captura em vez de 4.
     scheduler.add_job(
         fetch_finished_games_results_job,
-        trigger=IntervalTrigger(minutes=FETCH_FINISHED_INTERVAL_MIN),
+        trigger=IntervalTrigger(minutes=10),
         id="fetch_finished_results",
         replace_existing=True,
         coalesce=True,
         max_instances=1,
         misfire_grace_time=300,
     )
-    logger.info("🔍 Busca de resultados de jogos finalizados agendada a cada %d minutos", FETCH_FINISHED_INTERVAL_MIN)
+    logger.info("🔍 Busca de resultados de jogos finalizados agendada a cada 10 minutos")
+
+    # --- Snapshot incremental de score AO VIVO ---
+    # Salva score atual de games scheduled/live em final_score_home/away
+    # SEM marcar outcome/hit. Defesa em profundidade contra perda de resultado
+    # caso Betano dropie o evento antes do fetch_finished rodar.
+    scheduler.add_job(
+        score_snapshot_job,
+        trigger=IntervalTrigger(minutes=5),
+        id="score_snapshot",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+        misfire_grace_time=60,
+    )
+    logger.info("📸 Score snapshot incremental agendado a cada 5 minutos")
 
     # --- Flush periódico de buffers de mensagens ---
     scheduler.add_job(

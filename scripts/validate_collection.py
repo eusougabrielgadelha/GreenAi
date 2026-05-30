@@ -98,6 +98,7 @@ def persist(events):
                 odds_home=ev.odds_home,
                 odds_draw=ev.odds_draw,
                 odds_away=ev.odds_away,
+                betradar_match_id=getattr(ev, "betradar_match_id", None),
                 status="live" if getattr(ev, "is_live", False) else "scheduled",
             )
             s.add(g)

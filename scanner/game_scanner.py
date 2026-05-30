@@ -75,6 +75,7 @@ async def scan_games_for_date(
                     # de pick (g.pick, pick_prob, pick_ev, pick_reason, will_bet) serão
                     # preenchidos via mirror_match_result_to_game dentro de fetch_and_decide_picks.
                     g = session.query(Game).filter_by(ext_id=ev.ext_id, start_time=start_utc).one_or_none()
+                    _ev_betradar = getattr(ev, "betradar_match_id", None)
                     if g:
                         g.source_link = url
                         g.game_url = getattr(ev, "game_url", None) or g.game_url
@@ -84,6 +85,9 @@ async def scan_games_for_date(
                         g.odds_home = ev.odds_home
                         g.odds_draw = ev.odds_draw
                         g.odds_away = ev.odds_away
+                        # Pedra de Roseta: só atualiza se vier valor (BetNacional não tem)
+                        if _ev_betradar is not None:
+                            g.betradar_match_id = _ev_betradar
                         if g.status not in ("live", "ended"):
                             g.status = "live" if getattr(ev, "is_live", False) else "scheduled"
                     else:
@@ -99,6 +103,7 @@ async def scan_games_for_date(
                             odds_home=ev.odds_home,
                             odds_draw=ev.odds_draw,
                             odds_away=ev.odds_away,
+                            betradar_match_id=_ev_betradar,
                             status="live" if getattr(ev, "is_live", False) else "scheduled",
                         )
                         session.add(g)
@@ -118,6 +123,8 @@ async def scan_games_for_date(
                             g.odds_home = ev.odds_home
                             g.odds_draw = ev.odds_draw
                             g.odds_away = ev.odds_away
+                            if _ev_betradar is not None:
+                                g.betradar_match_id = _ev_betradar
 
                     # Decisão multi-market (1x2 sempre + total_goals atrás de feature flag)
                     picks_list = await fetch_and_decide_picks(

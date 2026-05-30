@@ -32,7 +32,8 @@ def upsert_game_from_event(
     Retorna o Game criado/atualizado ou None em caso de erro.
     """
     g = session.query(Game).filter_by(ext_id=ev.ext_id, start_time=start_utc).one_or_none()
-    
+    _ev_betradar = getattr(ev, "betradar_match_id", None)
+
     if g:
         # Update existente
         g.source_link = url
@@ -43,6 +44,9 @@ def upsert_game_from_event(
         g.odds_home = ev.odds_home
         g.odds_draw = ev.odds_draw
         g.odds_away = ev.odds_away
+        # Pedra de Roseta: só atualiza se vier valor (BetNacional não tem)
+        if _ev_betradar is not None:
+            g.betradar_match_id = _ev_betradar
         g.pick = pick
         g.pick_prob = pprob
         g.pick_ev = pev
@@ -68,6 +72,7 @@ def upsert_game_from_event(
             odds_home=ev.odds_home,
             odds_draw=ev.odds_draw,
             odds_away=ev.odds_away,
+            betradar_match_id=_ev_betradar,
             pick=pick,
             pick_prob=pprob,
             pick_ev=pev,
@@ -92,6 +97,8 @@ def upsert_game_from_event(
                 g.odds_home = ev.odds_home
                 g.odds_draw = ev.odds_draw
                 g.odds_away = ev.odds_away
+                if _ev_betradar is not None:
+                    g.betradar_match_id = _ev_betradar
                 g.pick = pick
                 g.pick_prob = pprob
                 g.pick_ev = pev
