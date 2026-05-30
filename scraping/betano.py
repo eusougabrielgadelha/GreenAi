@@ -2,9 +2,11 @@
 
 Endpoint: /danae-webapi/api/live/overview/latest (queryLanguageId=5, queryOperatorId=8).
 
-Estratégia: usa `requests` síncrono via `asyncio.to_thread` — NÃO Playwright.
-Endpoint validado na Fase 0: HTTP 200 em ~0.4s, sem Cloudflare 403, sem 429
-em 20 requests sequenciais.
+Estratégia: Playwright XHR capture. Validado em produção: IPs datacenter
+recebem HTTP 403 "Betano Splash Screen" em requests diretos (curl/requests),
+mas Playwright headless navegando pra página de futebol passa pelo gate e
+captura a resposta XHR `events-by-seasons`/`overview/latest` normalmente.
+Cache 60s amortiza o custo extra do Playwright.
 
 Contrato público (estável — outros agentes dependem):
     - fetch_betano_overview() -> dict | None
@@ -77,36 +79,60 @@ _OVERVIEW_CACHE: dict = {}
 
 # ─── Fetcher (sync + async wrapper) ───────────────────────────────────────────
 
-def _fetch_sync() -> Optional[dict]:
-    """Fetcher síncrono. Chamado via asyncio.to_thread pelo wrapper async."""
-    headers = {
-        "User-Agent": UA,
-        "Accept": "application/json",
-        "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
-        "Referer": f"{BETANO_BASE_URL}/",
-    }
+async def _fetch_via_playwright() -> Optional[dict]:
+    """
+    Fetcher via Playwright: navega pra /sport/futebol/jogos-de-hoje/ e
+    intercepta a resposta XHR de overview/latest. Necessário porque IPs
+    datacenter recebem HTTP 403 ("Splash Screen") em requests diretos.
+    """
     try:
-        r = requests.get(
-            OVERVIEW_URL,
-            params=OVERVIEW_PARAMS,
-            headers=headers,
-            timeout=TIMEOUT,
-        )
-        if r.status_code != 200:
-            logger.warning(
-                f"Betano overview HTTP {r.status_code} (body bytes={len(r.content)})"
+        from playwright.async_api import async_playwright
+    except ImportError as exc:
+        logger.error(f"Playwright não disponível: {exc}")
+        return None
+
+    captured: List[dict] = []
+
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            ctx = await browser.new_context(user_agent=UA, locale="pt-BR")
+            page = await ctx.new_page()
+
+            async def _on_response(resp):
+                if "overview/latest" not in resp.url:
+                    return
+                if resp.status != 200:
+                    return
+                try:
+                    body = await resp.json()
+                    if isinstance(body, dict) and body.get("events"):
+                        captured.append(body)
+                except Exception:
+                    pass
+
+            page.on(
+                "response",
+                lambda r: asyncio.create_task(_on_response(r)),
             )
-            return None
-        return r.json()
-    except requests.exceptions.RequestException as exc:
-        logger.warning(f"Betano fetch RequestException: {exc}")
+
+            await page.goto(
+                f"{BETANO_BASE_URL}/sport/futebol/jogos-de-hoje/",
+                wait_until="networkidle",
+                timeout=int(TIMEOUT * 1000) + 25000,
+            )
+            await page.wait_for_timeout(5000)
+            await browser.close()
+    except Exception as exc:
+        logger.exception(f"Betano fetch (Playwright) falhou: {exc}")
         return None
-    except ValueError as exc:
-        logger.warning(f"Betano fetch JSON parse falhou: {exc}")
+
+    if not captured:
+        logger.warning("Betano fetch: nenhuma resposta overview/latest capturada")
         return None
-    except Exception as exc:  # noqa: BLE001
-        logger.exception(f"Betano fetch erro inesperado: {exc}")
-        return None
+
+    # Se múltiplas respostas (refresh interno), pega a maior
+    return max(captured, key=lambda d: len(d.get("events", {})))
 
 
 async def fetch_betano_overview() -> Optional[dict]:
@@ -125,7 +151,7 @@ async def fetch_betano_overview() -> Optional[dict]:
         )
         return cached["data"]
 
-    data = await asyncio.to_thread(_fetch_sync)
+    data = await _fetch_via_playwright()
     if data is not None:
         _OVERVIEW_CACHE["entry"] = {"data": data, "ts": time.time()}
         logger.debug(
