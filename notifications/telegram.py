@@ -110,50 +110,57 @@ def h(b: str) -> str:
     return f"<b>{b}</b>"
 
 
-def send_pick_message(game, pick) -> None:
-    """
-    Envia notificação de UM pick específico ao Telegram, via buffer.
-
-    Renderiza usando fmt_pick_now_v2(game, pick) e envia via buffer existente
-    (mesmo mecanismo de send_pick_with_buffer — message_type='pick_now').
-
-    Se pick.notified_at já está setado, NÃO reenvia (idempotência).
-    Não comita session — só envia mensagem.
-    """
-    # Idempotência: não reenvia se já notificado
+def send_pick_message(game, pick) -> bool:
+    """Retorna True se o envio foi confirmado (direto ou bufferizado com sucesso),
+    False se houve falha conhecida. Idempotência via pick.notified_at preservada."""
+    # Idempotência: já notificado, não é falha
     if getattr(pick, "notified_at", None) is not None:
-        return
+        return True
 
-    # Import lazy pra evitar circular (e tolerar formatters em produção paralela)
-    from utils.formatters import fmt_pick_now_v2
-    from utils.telegram_message_buffer import add_to_buffer
+    pick_id = getattr(pick, "id", None)
+    game_id = getattr(game, "id", None)
+    ext_id = getattr(game, "ext_id", None)
+    game_name = f"{getattr(game, 'team_home', '?')} vs {getattr(game, 'team_away', '?')}"
 
-    text = fmt_pick_now_v2(game, pick)
+    try:
+        from utils.formatters import fmt_pick_now_v2
+        from utils.telegram_message_buffer import add_to_buffer
 
-    metadata = {
-        "team_home": getattr(game, "team_home", None),
-        "team_away": getattr(game, "team_away", None),
-        "market": getattr(pick, "market", None),
-        "line": getattr(pick, "line", None),
-        "pick_id": getattr(pick, "id", None),
-    }
+        text = fmt_pick_now_v2(game, pick)
 
-    buffered = add_to_buffer(
-        message_type="pick_now",
-        content=text,
-        game_id=getattr(game, "id", None),
-        ext_id=getattr(game, "ext_id", None),
-        metadata=metadata,
-    )
+        metadata = {
+            "team_home": getattr(game, "team_home", None),
+            "team_away": getattr(game, "team_away", None),
+            "market": getattr(pick, "market", None),
+            "line": getattr(pick, "line", None),
+            "pick_id": pick_id,
+        }
 
-    if not buffered:
-        # Buffer não aceitou — envia imediatamente
+        buffered = add_to_buffer(
+            message_type="pick_now",
+            content=text,
+            game_id=game_id,
+            ext_id=ext_id,
+            metadata=metadata,
+        )
+
+        if buffered:
+            return True
+
+        # Buffer desativado/cheio — envia direto. tg_send_message engole exceptions
+        # internas e retorna None; tratamos ausência de exception como sucesso.
         tg_send_message(
             text,
             message_type="pick_now",
-            game_id=getattr(game, "id", None),
-            ext_id=getattr(game, "ext_id", None),
+            game_id=game_id,
+            ext_id=ext_id,
         )
+        return True
+    except Exception:
+        logger.exception(
+            "Falha ao enviar pick (pick_id=%s, game=%s)", pick_id, game_name
+        )
+        return False
 
 
 def send_picks_for_game(game, session) -> int:
@@ -180,7 +187,16 @@ def send_picks_for_game(game, session) -> int:
         ok, _reason = should_notify_pick(pick, check_high_conf=True)
         if not ok:
             continue
-        send_pick_message(game, pick)
+        sent = send_pick_message(game, pick)
+        if not sent:
+            # Não marca notified_at — tentar de novo no próximo ciclo
+            logger.warning(
+                "Pick não enviado, será reprocessado (pick_id=%s, game=%s vs %s)",
+                getattr(pick, "id", None),
+                getattr(game, "team_home", "?"),
+                getattr(game, "team_away", "?"),
+            )
+            continue
         mark_pick_notified(pick, session)
         count += 1
 
