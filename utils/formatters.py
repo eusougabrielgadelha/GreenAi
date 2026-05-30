@@ -357,32 +357,7 @@ def fmt_results_batch(games: List[Game], date_local: datetime = None) -> str:
         hhmm = (g.start_time.astimezone(ZONE).strftime("%H:%M") if g.start_time else "--:--")
         picks = _picks_for_results(g)
 
-        # Linhas por pick (label + emoji + resultado real)
-        pick_lines = []
-        if picks:
-            for p in picks:
-                hit = getattr(p, "hit", None)
-                if hit is None and getattr(p, "market", "") == "match_result":
-                    hit = g.hit
-                pick_odd = float(getattr(p, "pick_odd", 0) or 0.0)
-                label = _pick_label_for_results(g, p)
-                emoji = "✅" if hit is True else ("❌" if hit is False else "ℹ️")
-                pick_lines.append(f"{label} @ {pick_odd:.2f} {emoji}")
-        else:
-            # Fallback total — só Game.hit
-            pick_map = {"home": g.team_home, "draw": "Empate", "away": g.team_away}
-            pick_str = pick_map.get(g.pick, g.pick or "—")
-            odd = 0.0
-            if g.pick == "home":
-                odd = float(g.odds_home or 0.0)
-            elif g.pick == "draw":
-                odd = float(g.odds_draw or 0.0)
-            elif g.pick == "away":
-                odd = float(g.odds_away or 0.0)
-            emoji = "✅" if g.hit is True else ("❌" if g.hit is False else "ℹ️")
-            pick_lines.append(f"{esc(pick_str)} @ {odd:.2f} {emoji}")
-
-        # Emoji macro do jogo: ✅ se todos acertaram, ❌ se algum errou, ℹ️ se nada verificado
+        # Coleta status pra emoji macro do jogo
         statuses = []
         if picks:
             for p in picks:
@@ -402,9 +377,72 @@ def fmt_results_batch(games: List[Game], date_local: datetime = None) -> str:
         else:
             macro_emoji = "⚠️"
 
-        msg += f"{macro_emoji} <b>{idx}.</b> <b>{esc(g.team_home)}</b> vs <b>{esc(g.team_away)}</b>\n"
+        # Placar final (se disponível)
+        placar_str = ""
+        if g.final_score_home is not None and g.final_score_away is not None:
+            placar_str = f" <b>{g.final_score_home}-{g.final_score_away}</b>"
+
+        # Header do jogo
+        msg += f"{macro_emoji} <b>{idx}.</b> <b>{esc(g.team_home)}</b>{placar_str} vs <b>{esc(g.team_away)}</b>\n"
         msg += f"   🕐 {hhmm}h\n"
-        msg += "   " + " | ".join(pick_lines) + "\n\n"
+
+        # Blocos por mercado (estruturado)
+        if picks:
+            n = len(picks)
+            for i, p in enumerate(picks):
+                is_last = (i == n - 1)
+                connector = "└─" if is_last else "├─"
+                inner = "  " if is_last else "│ "
+
+                market = getattr(p, "market", "match_result") or "match_result"
+                if market == "match_result":
+                    market_label = "📊 Resultado Final"
+                elif market == "total_goals":
+                    market_label = "⚽ Total de Gols"
+                elif market == "handicap_asian":
+                    market_label = "⚖️ Handicap Asiático"
+                else:
+                    market_label = market
+
+                hit = getattr(p, "hit", None)
+                if hit is None and market == "match_result":
+                    hit = g.hit
+                hit_emoji = "✅" if hit is True else ("❌" if hit is False else "ℹ️")
+
+                pick_odd = float(getattr(p, "pick_odd", 0) or 0.0)
+                pick_label = _pick_label_for_results(g, p)
+                # Pra match_result, expandir o time
+                if market == "match_result":
+                    pick_side = getattr(p, "pick", None) or g.pick or ""
+                    pick_map = {"home": g.team_home, "draw": "Empate", "away": g.team_away}
+                    pick_str = pick_map.get(pick_side, pick_side or "—")
+                else:
+                    pick_str = pick_label
+
+                real_str = _pick_outcome_str(g, p)
+
+                msg += f"   {connector} <b>{market_label}</b>\n"
+                msg += f"   {inner} 🎯 {esc(pick_str)} @ {pick_odd:.2f}\n"
+                msg += f"   {inner} 🏁 {esc(real_str)} {hit_emoji}\n"
+        else:
+            # Fallback total — só Game.hit
+            pick_map = {"home": g.team_home, "draw": "Empate", "away": g.team_away}
+            pick_str = pick_map.get(g.pick, g.pick or "—")
+            odd = 0.0
+            if g.pick == "home":
+                odd = float(g.odds_home or 0.0)
+            elif g.pick == "draw":
+                odd = float(g.odds_draw or 0.0)
+            elif g.pick == "away":
+                odd = float(g.odds_away or 0.0)
+            real_map = {"home": g.team_home, "draw": "Empate", "away": g.team_away}
+            real_str = real_map.get(g.outcome, g.outcome or "—")
+            emoji = "✅" if g.hit is True else ("❌" if g.hit is False else "ℹ️")
+            msg += f"   └─ <b>📊 Resultado Final</b>\n"
+            msg += f"      🎯 {esc(pick_str)} @ {odd:.2f}\n"
+            msg += f"      🏁 {esc(real_str)} {emoji}\n"
+
+        msg += "\n"
 
     return msg
 
