@@ -2022,8 +2022,8 @@ async def enrich_games_with_full_markets_job():
 
     async def _process_fetch_only(browser, game):
         """Apenas fetch + parse. Retorna (game_id, game_data) ou None.
-        NÃO toca em sessão SQLAlchemy."""
-        async with sem:
+        NÃO toca em sessão SQLAlchemy. Semaphore aplicado pelo caller."""
+        if True:  # mantém indentação do bloco abaixo
             try:
                 ctx = await browser.new_context(user_agent=UA, locale="pt-BR")
                 try:
@@ -2144,17 +2144,20 @@ async def enrich_games_with_full_markets_job():
                 return None
 
     async def _process_fetch_safe(browser, game):
-        """Wrapper com timeout HARD de 30s."""
-        try:
-            return await asyncio.wait_for(
-                _process_fetch_only(browser, game), timeout=30.0
-            )
-        except asyncio.TimeoutError:
-            logger.warning(
-                f"⏱ enrich timeout 30s pra game {game.id} "
-                f"({game.team_home} vs {game.team_away})"
-            )
-            return None
+        """Wrapper: adquire semaphore PRIMEIRO, depois aplica timeout HARD 45s.
+        Bug anterior: timeout começava antes da task entrar no sem → fila
+        de espera consumia o timeout. Solução: timeout SÓ depois do sem."""
+        async with sem:
+            try:
+                return await asyncio.wait_for(
+                    _process_fetch_only(browser, game), timeout=45.0
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    f"⏱ enrich timeout 45s pra game {game.id} "
+                    f"({game.team_home} vs {game.team_away})"
+                )
+                return None
 
     results: List[tuple] = []  # list de (game_id, game_data)
     t0 = time.time()
