@@ -21,6 +21,8 @@ class Game(Base):
     country = Column(String, nullable=True, index=True)
     team_home = Column(String)
     team_away = Column(String)
+    home_team_id = Column(Integer, nullable=True, index=True)  # FK opcional pra teams.id (sem FK formal — evita lock issues no SQLite)
+    away_team_id = Column(Integer, nullable=True, index=True)
     start_time = Column(DateTime, index=True)  # UTC
     odds_home = Column(Float)
     odds_draw = Column(Float)
@@ -40,11 +42,11 @@ class Game(Base):
     result_fetched_at = Column(DateTime, nullable=True)  # Quando o resultado foi obtido
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, onupdate=func.now())
-    
+
     # Relacionamentos
     tracker = relationship("LiveGameTracker", back_populates="game", uselist=False, cascade="all, delete-orphan")
     odd_history = relationship("OddHistory", back_populates="game", cascade="all, delete-orphan")
-    
+
     __table_args__ = (
         UniqueConstraint("ext_id", "start_time", name="uq_game_extid_start"),
         Index('idx_game_status', 'status'),
@@ -55,6 +57,30 @@ class Game(Base):
         Index('idx_game_pick_notified', 'pick_notified_at'),
         Index('idx_game_country', 'country'),
         Index('idx_game_betradar', 'betradar_match_id'),
+        Index('idx_game_home_team', 'home_team_id'),
+        Index('idx_game_away_team', 'away_team_id'),
+    )
+
+
+class Team(Base):
+    """Times de futebol coletados via páginas de liga Betano.
+
+    Identificação canônica: betano_team_id (extraído do bloco participants).
+    Sem FK formal pro Game.home_team_id/away_team_id — escolha consciente pra
+    evitar lock issues no SQLite e permitir Games sem team_id (legado).
+    """
+    __tablename__ = "teams"
+    id = Column(Integer, primary_key=True)
+    betano_team_id = Column(Integer, unique=True, nullable=False, index=True)
+    name = Column(String, nullable=False, index=True)
+    country = Column(String, nullable=True, index=True)
+    league_id = Column(Integer, nullable=True, index=True)  # league_id Betano (ex: 10016 = Brasileirão Série A)
+    slug = Column(String, nullable=True)
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, onupdate=func.now())
+
+    __table_args__ = (
+        Index('idx_team_name', 'name'),
     )
 
 
@@ -391,6 +417,19 @@ def init_database():
     # Backfill one-shot: Game.pick → Pick(market='match_result')
     try:
         _backfill_picks_from_games()
+    except Exception:
+        pass
+
+    # Migração: tabela teams (nova) — coleta proativa via páginas de liga Betano
+    Base.metadata.create_all(engine, tables=[Team.__table__], checkfirst=True)
+
+    # Migração: colunas team_id no Game (idempotentes)
+    _safe_add_column("games", "home_team_id INTEGER")
+    _safe_add_column("games", "away_team_id INTEGER")
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_game_home_team ON games(home_team_id)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_game_away_team ON games(away_team_id)"))
     except Exception:
         pass
 

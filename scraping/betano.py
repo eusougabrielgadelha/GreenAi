@@ -693,26 +693,116 @@ def _parse_ah_ou_market(market: dict) -> Dict[str, float]:
     return options
 
 
+def _extract_market_block_at(html: str, type_value: str) -> Optional[dict]:
+    """Acha o 1º bloco JSON {...} que contém `"type":"<type_value>"` no HTML.
+
+    Estratégia: localiza `"type":"<type_value>"`, volta caracter-por-caracter
+    achando o `{` que abre esse objeto (depth=0 considerando aspas escapadas),
+    e parseia balanced braces até o `}` correspondente.
+
+    Mais robusto que extrair `window["initial_state"]` completo (que tem
+    >200KB e pode dar erro de JSON parse em chunks com strings problemáticas).
+    """
+    import json as _json
+
+    needle = f'"type":"{type_value}"'
+    pos = html.find(needle)
+    if pos < 0:
+        return None
+
+    # Volta achando o '{' que abre esse objeto.
+    # Conta abre/fecha (considerando strings) de trás pra frente.
+    depth = 0
+    in_string = False
+    i = pos
+    open_idx = -1
+    while i >= 0:
+        c = html[i]
+        # Detecta limites de string. Como estamos andando ao contrário,
+        # apenas checamos '"' sem escape mais simples (suficiente p/ HTML).
+        if c == '"' and (i == 0 or html[i - 1] != "\\"):
+            in_string = not in_string
+        elif not in_string:
+            if c == "}":
+                depth += 1
+            elif c == "{":
+                if depth == 0:
+                    open_idx = i
+                    break
+                depth -= 1
+        i -= 1
+    if open_idx < 0:
+        return None
+
+    # Agora vai pra frente do open_idx fazendo parsing balanced
+    depth = 0
+    in_string = False
+    escape = False
+    end_idx = -1
+    for j in range(open_idx, len(html)):
+        c = html[j]
+        if escape:
+            escape = False
+            continue
+        if c == "\\":
+            escape = True
+            continue
+        if c == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                end_idx = j + 1
+                break
+    if end_idx < 0:
+        return None
+
+    try:
+        return _json.loads(html[open_idx:end_idx])
+    except Exception as exc:
+        logger.debug(f"_extract_market_block_at({type_value}) JSON parse falhou: {exc}")
+        return None
+
+
 def _parse_handicap_from_html(
     html: str, home_hint: str = "", away_hint: str = ""
 ) -> Optional[dict]:
     """Parser HTML SSR → dict de mercado de Handicap Asiático.
 
-    Estratégia: extrai window["initial_state"], navega até data.event.markets,
-    seleciona o market AHRF (preferencial). Se AHRF ausente, usa ASOU como
-    fallback (handicap em totais asiáticos).
+    Estratégia: localiza blocos JSON com `"type":"AHRF"` (preferencial) ou
+    `"type":"ASOU"` (fallback) diretamente no HTML via balanced braces
+    isolado. Mais robusto que extrair window["initial_state"] inteiro.
     """
-    state = _extract_initial_state(html)
-    if not state:
-        logger.debug("_parse_handicap_from_html: initial_state ausente")
-        return None
+    # Inferir nomes de times — defaults
+    home = home_hint or ""
+    away = home_hint or ""
+    # 1) AHRF (preferencial: Handicap Asiático Resultado Final)
+    ahrf = _extract_market_block_at(html, _BETANO_AH_PRIMARY_TYPE)
+    asou = _extract_market_block_at(html, "ASOU")
 
-    event = (state.get("data") or {}).get("event") or {}
-    if not isinstance(event, dict):
-        return None
+    # Fallback opcional pra extrair times via initial_state se hints vazios.
+    if not (home and away):
+        state = _extract_initial_state(html)
+        ev = (state or {}).get("data", {}).get("event") or {}
+        if not isinstance(ev, dict):
+            ev = {}
+        home = home_hint or ev.get("homeTeam") or home
+        away = away_hint or ev.get("awayTeam") or away
+        if not (home and away):
+            short = ev.get("shortName") or ""
+            m = re.match(r"^(.+?)\s+(?:vs|x|-)\s+(.+)$", short, re.IGNORECASE)
+            if m:
+                home = home or m.group(1).strip()
+                away = away or m.group(2).strip()
 
-    markets = event.get("markets") or []
-    if not isinstance(markets, list):
+    # Simula API antiga: encapsula em list pra reuso do código abaixo
+    markets = [m for m in (ahrf, asou) if m]
+    if not markets:
         return None
 
     # Inferir nomes de times se não vieram (campos do próprio event)
@@ -762,7 +852,7 @@ def _parse_handicap_from_html(
 
 
 async def _fetch_event_via_playwright(
-    game_url: str, timeout_ms: int = 45000, settle_ms: int = 6000
+    game_url: str, timeout_ms: int = 45000, settle_ms: int = 12000
 ) -> Optional[str]:
     """Carrega game_url via Playwright e retorna o HTML pós-render.
 
@@ -857,3 +947,213 @@ async def fetch_event_handicap_asian(
         f"options={len(result['options'])}"
     )
     return result
+
+
+# ─── Coleta proativa via páginas de liga (HTML SSR) ───────────────────────────
+#
+# Overview Betano só traz jogos AO VIVO + iminentes (~2h antes). Pra coletar
+# jogos de campeonatos com horário fixo (ex: Brasileirão das 19h) horas antes,
+# usamos as páginas de liga (/sport/futebol/brasil/brasileirao-serie-a-betano/10016/).
+# Elas embutem no HTML SSR:
+#   1) <script type="application/ld+json"> com @type=SportsEvent (padrão Schema.org)
+#   2) Bloco JSON `participants` com team_ids da Betano (8 dígitos)
+#
+# Estratégia: regex pra extrair ambos, match por nome (home/away), monta EventDigest
+# sem odds (overview enriquece depois quando o evento entrar ao vivo).
+
+_JSON_LD_RE = re.compile(
+    r'<script type="application/ld\+json">(.*?)</script>',
+    re.DOTALL,
+)
+_PARTICIPANTS_RE = re.compile(r'"participants":\[([^\]]+)\]')
+_TEAM_RE = re.compile(
+    r'\{"name":"([^"]+)","url":"([^"]+)","color":"[^"]*","id":"(\d+)"\}'
+)
+_EXT_ID_RE = re.compile(r'/(\d{6,10})/?$')
+
+
+async def fetch_events_from_league_page(url: str) -> List[NS]:
+    """Coleta jogos de uma página de liga Betano via HTML SSR.
+
+    Estratégia:
+        1. Carrega URL via Playwright (necessário pelo gate Cloudflare em VPS).
+        2. Extrai todos os <script type="application/ld+json"> com @type=SportsEvent.
+        3. Extrai blocos `participants` via regex pra pegar team_ids da Betano.
+        4. Faz match entre eventos JSON-LD e participants por nome (home/away).
+        5. Constrói EventDigest com ext_id Betano + team_ids + nomes + horário.
+
+    Returns:
+        List[NS] com keys do contrato EventDigest + extras:
+            ext_id, source_link, game_url, competition (nome da liga),
+            country, team_home, team_away, start_local_str,
+            odds_home/draw/away (=0.0, sem odds ainda — overview enriquece depois),
+            is_live (False), betradar_match_id (None),
+            markets_dict (vazio),
+            home_team_id, away_team_id (NOVOS — id Betano dos times).
+
+        Se URL retornar Splash Screen ou HTML < 5000 bytes: retorna [].
+    """
+    try:
+        from playwright.async_api import async_playwright
+    except ImportError as exc:
+        logger.error(f"Playwright não disponível: {exc}")
+        return []
+
+    html = ""
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            ctx = await browser.new_context(user_agent=UA, locale="pt-BR")
+            page = await ctx.new_page()
+            try:
+                await page.goto(url, wait_until="networkidle", timeout=45000)
+            except Exception as exc:
+                logger.debug(f"goto {url} timeout/erro tolerado: {exc}")
+            await page.wait_for_timeout(4000)
+            try:
+                html = await page.content()
+            except Exception as exc:
+                logger.debug(f"page.content() falhou: {exc}")
+                html = ""
+            await browser.close()
+    except Exception as exc:
+        logger.warning(f"fetch_events_from_league_page falhou ({url}): {exc}")
+        return []
+
+    if not html or len(html) < 5000 or "Splash Screen" in html:
+        logger.warning(
+            f"League page bloqueada ou vazia: {url} (html_len={len(html)})"
+        )
+        return []
+
+    # ── 1) Extrai eventos JSON-LD do tipo SportsEvent ─────────────────────
+    import json as _json
+
+    events_meta: List[dict] = []
+    for m in _JSON_LD_RE.finditer(html):
+        try:
+            data = _json.loads(m.group(1))
+        except Exception:
+            continue
+        items = data if isinstance(data, list) else [data]
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            if item.get("@type") != "SportsEvent":
+                continue
+            events_meta.append(item)
+
+    if not events_meta:
+        logger.warning(f"Nenhum SportsEvent em JSON-LD: {url}")
+        return []
+
+    # ── 2) Extrai team_ids via bloco participants ─────────────────────────
+    name_to_team_id: Dict[str, dict] = {}
+    for pm in _PARTICIPANTS_RE.finditer(html):
+        for tm in _TEAM_RE.finditer(pm.group(1)):
+            t_name, t_url, t_id = tm.group(1), tm.group(2), int(tm.group(3))
+            # Extrai league_id da URL: /sport/futebol/competicoes/brasil/10016/...
+            lm = re.search(r'/competicoes/[^/]+/(\d+)/', t_url)
+            league_id = int(lm.group(1)) if lm else None
+            slug_m = re.search(r'/([^/]+)/\d+-t/?$', t_url)
+            name_to_team_id[t_name.strip()] = {
+                "betano_team_id": t_id,
+                "url": t_url,
+                "league_id": league_id,
+                "slug": slug_m.group(1) if slug_m else None,
+            }
+
+    # ── 3) Constrói EventDigests ──────────────────────────────────────────
+    digests: List[NS] = []
+    for ev in events_meta:
+        ev_url = ev.get("url") or ""
+        em = _EXT_ID_RE.search(ev_url.rstrip("/") + "/")
+        if not em:
+            continue
+        ext_id = em.group(1)
+
+        home_team_obj = ev.get("homeTeam") or {}
+        away_team_obj = ev.get("awayTeam") or {}
+        home = home_team_obj.get("name") if isinstance(home_team_obj, dict) else None
+        away = away_team_obj.get("name") if isinstance(away_team_obj, dict) else None
+        if not (home and away):
+            continue
+
+        start = ev.get("startDate") or ""
+        # ISO 8601 → "YYYY-MM-DD HH:MM:SS" (UTC, sem timezone — alinha c/ schema Game.start_time)
+        try:
+            start_dt = datetime.fromisoformat(start.replace("Z", "+00:00"))
+            start_str = start_dt.strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            start_str = start
+
+        home_info = name_to_team_id.get(home.strip(), {})
+        away_info = name_to_team_id.get(away.strip(), {})
+
+        # Competition: pega location.name do JSON-LD se houver
+        loc = ev.get("location") or {}
+        competition = loc.get("name") if isinstance(loc, dict) else None
+
+        digests.append(NS(
+            ext_id=ext_id,
+            source_link=url,
+            game_url=ev_url,
+            competition=competition or "",
+            country="Brasil",  # heurística: páginas /brasil/... — refinar via parser se quiser
+            team_home=home,
+            team_away=away,
+            start_local_str=start_str,
+            odds_home=0.0,
+            odds_draw=0.0,
+            odds_away=0.0,
+            is_live=False,
+            betradar_match_id=None,
+            markets_dict={},  # sem odds inicialmente — overview enriquece
+            home_team_id=home_info.get("betano_team_id"),
+            away_team_id=away_info.get("betano_team_id"),
+            _teams_meta=(home_info, away_info),  # interno — pra persistir Team
+        ))
+
+    logger.info(f"League page {url}: {len(digests)} eventos extraídos")
+    return digests
+
+
+def upsert_team(
+    session,
+    betano_team_id: int,
+    name: str,
+    country: Optional[str] = None,
+    league_id: Optional[int] = None,
+    slug: Optional[str] = None,
+):
+    """Upsert idempotente de Team.
+
+    Cria se não existir. Se já existir, atualiza name (sempre) e os outros
+    campos APENAS se ainda vazios — não sobrescreve dados curados.
+
+    Returns: Team ou None se betano_team_id falsy.
+    """
+    from models.database import Team
+    if not betano_team_id:
+        return None
+    team = session.query(Team).filter_by(betano_team_id=betano_team_id).first()
+    if team:
+        if name and team.name != name:
+            team.name = name
+        if country and not team.country:
+            team.country = country
+        if league_id and not team.league_id:
+            team.league_id = league_id
+        if slug and not team.slug:
+            team.slug = slug
+    else:
+        team = Team(
+            betano_team_id=betano_team_id,
+            name=name,
+            country=country,
+            league_id=league_id,
+            slug=slug,
+        )
+        session.add(team)
+        session.flush()
+    return team

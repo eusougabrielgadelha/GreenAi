@@ -1157,10 +1157,118 @@ async def generate_daily_analytics_report_job():
 async def collect_tomorrow_games_job():
     """Coleta jogos de amanhã e salva no banco (sem enviar mensagem)."""
     from scanner.game_scanner import scan_games_for_date
-    
+
     logger.info("📥 Iniciando coleta de jogos de AMANHÃ...")
     result = await scan_games_for_date(date_offset=1, send_summary=False)
     logger.info("✅ Coleta concluída: %d analisados, %d selecionados", result["analyzed"], result["selected"])
+
+
+async def collect_betano_league_pages_job():
+    """Coleta proativa: varre páginas de liga Betano configuradas em
+    BETANO_LEAGUE_URLS (CSV). Pra cada URL, extrai eventos via JSON-LD
+    + team_ids, persiste como Game no banco (sem odds — overview enriquece depois).
+
+    Idempotente: usa (ext_id, start_time) UNIQUE pra evitar duplicação.
+    Cron sugerido: a cada 1h (IntervalTrigger).
+    """
+    urls_csv = os.getenv("BETANO_LEAGUE_URLS", "")
+    if not urls_csv.strip():
+        logger.debug("BETANO_LEAGUE_URLS vazio — pulando")
+        return
+    urls = [u.strip() for u in urls_csv.split(",") if u.strip()]
+
+    from models.database import SessionLocal, Game
+    from scraping.betano import fetch_events_from_league_page, upsert_team
+
+    total_new = 0
+    total_updated = 0
+
+    for url in urls:
+        try:
+            digests = await fetch_events_from_league_page(url)
+        except Exception:
+            logger.exception(f"league_page fetch falhou: {url}")
+            continue
+
+        with SessionLocal() as session:
+            for d in digests:
+                try:
+                    # Upsert teams se vier IDs
+                    teams_meta = getattr(d, "_teams_meta", (None, None))
+                    home_info, away_info = teams_meta
+                    if home_info and home_info.get("betano_team_id"):
+                        upsert_team(
+                            session,
+                            home_info["betano_team_id"],
+                            d.team_home,
+                            country=d.country,
+                            league_id=home_info.get("league_id"),
+                            slug=home_info.get("slug"),
+                        )
+                    if away_info and away_info.get("betano_team_id"):
+                        upsert_team(
+                            session,
+                            away_info["betano_team_id"],
+                            d.team_away,
+                            country=d.country,
+                            league_id=away_info.get("league_id"),
+                            slug=away_info.get("slug"),
+                        )
+
+                    # Upsert Game — start_time precisa ser datetime UTC-aware
+                    try:
+                        st = datetime.strptime(d.start_local_str, "%Y-%m-%d %H:%M:%S")
+                        st = pytz.UTC.localize(st)
+                    except Exception:
+                        st = None
+
+                    existing = None
+                    if st:
+                        existing = session.query(Game).filter_by(
+                            ext_id=d.ext_id, start_time=st
+                        ).first()
+
+                    if existing:
+                        # Atualiza team_ids se faltava
+                        if d.home_team_id and not existing.home_team_id:
+                            existing.home_team_id = d.home_team_id
+                        if d.away_team_id and not existing.away_team_id:
+                            existing.away_team_id = d.away_team_id
+                        if not existing.game_url and d.game_url:
+                            existing.game_url = d.game_url
+                        total_updated += 1
+                    else:
+                        new_game = Game(
+                            ext_id=d.ext_id,
+                            source_link=d.source_link,
+                            game_url=d.game_url,
+                            competition=d.competition,
+                            country=d.country,
+                            team_home=d.team_home,
+                            team_away=d.team_away,
+                            start_time=st,
+                            odds_home=0.0,
+                            odds_draw=0.0,
+                            odds_away=0.0,
+                            home_team_id=d.home_team_id,
+                            away_team_id=d.away_team_id,
+                            status="scheduled",
+                            will_bet=False,  # sem odds → não decide
+                        )
+                        session.add(new_game)
+                        try:
+                            session.flush()
+                            total_new += 1
+                        except IntegrityError:
+                            session.rollback()
+                except Exception:
+                    logger.exception(f"Erro processando digest {getattr(d, 'ext_id', '?')}")
+                    session.rollback()
+            session.commit()
+
+    logger.info(
+        f"📚 collect_betano_league_pages_job: {total_new} novos + {total_updated} atualizados"
+    )
 
 
 async def send_dawn_games_job():
@@ -2019,6 +2127,22 @@ def setup_scheduler():
         misfire_grace_time=300,
     )
     logger.info("📥 Coleta de jogos de amanhã agendada para %02d:00", collect_tomorrow_hour)
+
+    # --- Coleta proativa via páginas de liga Betano (cada 1h) ---
+    # Pesca jogos de campeonatos com horário fixo (ex: Brasileirão das 19h)
+    # horas antes do overview/latest mostrar — overview só traz live + iminentes.
+    # Games são criados com odds=0.0; overview enriquece odds quando entram ao vivo.
+    if os.getenv("BETANO_LEAGUE_URLS"):
+        scheduler.add_job(
+            collect_betano_league_pages_job,
+            trigger=IntervalTrigger(hours=1),
+            id="collect_betano_league_pages",
+            replace_existing=True,
+            coalesce=True,
+            max_instances=1,
+            misfire_grace_time=60,
+        )
+        logger.info("📚 Coleta proativa de páginas de liga agendada a cada 1h")
 
     # --- Envio de jogos da madrugada (23h do dia anterior) ---
     dawn_hour = int(os.getenv("DAWN_GAMES_HOUR", "23"))
