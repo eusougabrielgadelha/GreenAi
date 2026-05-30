@@ -1029,9 +1029,13 @@ async def monitor_live_games_job():
     Monitora jogos ao vivo em busca de oportunidades de aposta.
     Só monitora jogos que estão dentro do horário previsto (start_time até start_time + 2h30min).
     Só executa se houver jogos pré-selecionados (will_bet=True) no banco.
-    
+
     Usa lock assíncrono para prevenir execuções simultâneas.
     """
+    if os.getenv("ENABLE_LIVE_ANALYSIS", "false").lower() != "true":
+        logger.debug("ENABLE_LIVE_ANALYSIS=false — monitor live desativado")
+        return
+
     # Verificar se já está em execução
     if _monitor_live_games_lock.locked():
         logger.debug("Monitor de jogos ao vivo já em execução, pulando esta execução")
@@ -1266,6 +1270,10 @@ async def watch_game_until_end_job(game_id: int):
     Monitora um jogo específico até que ele termine, verificando o resultado.
     Tenta atualizar o status do jogo e notificar o resultado.
     """
+    if os.getenv("ENABLE_LIVE_ANALYSIS", "false").lower() != "true":
+        logger.debug("ENABLE_LIVE_ANALYSIS=false — watch_game_until_end_job(%s) desativado", game_id)
+        return
+
     logger.info("👀 Iniciando monitoramento do jogo id=%s até o fim...", game_id)
     
     with SessionLocal() as session:
@@ -1736,17 +1744,20 @@ def setup_scheduler():
         misfire_grace_time=60,
     )
 
-    # --- Monitoramento de jogos ao vivo ---
-    scheduler.add_job(
-        monitor_live_games_job,
-        trigger=IntervalTrigger(minutes=MONITOR_LIVE_INTERVAL_MIN),
-        id="monitor_live_games",
-        replace_existing=True,
-        coalesce=True,
-        max_instances=1,
-        misfire_grace_time=60,
-    )
-    logger.info("📡 Monitor de jogos ao vivo agendado a cada %d minutos", MONITOR_LIVE_INTERVAL_MIN)
+    # --- Monitoramento de jogos ao vivo (condicional) ---
+    if os.getenv("ENABLE_LIVE_ANALYSIS", "false").lower() == "true":
+        scheduler.add_job(
+            monitor_live_games_job,
+            trigger=IntervalTrigger(minutes=MONITOR_LIVE_INTERVAL_MIN),
+            id="monitor_live_games",
+            replace_existing=True,
+            coalesce=True,
+            max_instances=1,
+            misfire_grace_time=60,
+        )
+        logger.info("📡 Monitor de jogos ao vivo agendado a cada %d minutos", MONITOR_LIVE_INTERVAL_MIN)
+    else:
+        logger.info("🚫 Monitor de jogos ao vivo DESATIVADO (ENABLE_LIVE_ANALYSIS=false)")
 
     # --- Coleta de jogos de amanhã (22h do dia anterior) ---
     collect_tomorrow_hour = int(os.getenv("COLLECT_TOMORROW_HOUR", "22"))
