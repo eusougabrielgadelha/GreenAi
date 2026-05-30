@@ -1079,6 +1079,44 @@ async def fetch_and_decide_picks(
         teams=teams,
     )
 
+    # 4.1) Enrichment seletivo: handicap asiático SÓ pra jogos de alta confiança
+    # Custa ~10s/jogo via Playwright. Só vale pra candidatos top.
+    # Pré-condição: pick de match_result com prob >= HIGH_CONF_THRESHOLD
+    _hcp_already_decided = any(pr.market == "handicap_asian" for pr in pick_results)
+    if not _hcp_already_decided and ext_id and game_url:
+        try:
+            from config.settings import HIGH_CONF_THRESHOLD
+            mr_pick = next((pr for pr in pick_results if pr.market == "match_result"), None)
+            if mr_pick and (mr_pick.pick_prob or 0) >= HIGH_CONF_THRESHOLD:
+                from scraping.betano import fetch_event_handicap_asian
+                hcp_market = await fetch_event_handicap_asian(str(ext_id), game_url)
+                if hcp_market and hcp_market.get("options"):
+                    # Injeta no game_data e re-roda só o handicap
+                    enriched_markets = dict(game_data.get("markets") or {})
+                    enriched_markets["handicap_asian"] = hcp_market
+                    enriched = {"stats": game_data.get("stats", {}), "markets": enriched_markets}
+                    enriched_picks = decide_picks(
+                        enriched,
+                        game_id=game.id,
+                        competition=competition,
+                        teams=teams,
+                    )
+                    # Pega só o pick de handicap (já temos os outros)
+                    hcp_pick = next(
+                        (p for p in enriched_picks if p.market == "handicap_asian"),
+                        None,
+                    )
+                    if hcp_pick:
+                        pick_results.append(hcp_pick)
+                        _logger.info(
+                            "🎯 Enrichment handicap pra %s: %s @ %.2f (prob=%.0f%%, EV=%+.1f%%)",
+                            teams, hcp_pick.pick, hcp_pick.pick_odd or 0,
+                            (hcp_pick.pick_prob or 0) * 100,
+                            (hcp_pick.pick_ev or 0) * 100,
+                        )
+        except Exception:
+            _logger.exception("Enrichment handicap falhou pra ext_id=%s", ext_id)
+
     # 5) Persistência
     persisted: List["Pick"] = []
     for pr in pick_results:
