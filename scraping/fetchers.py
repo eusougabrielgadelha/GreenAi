@@ -412,60 +412,76 @@ async def fetch_events_via_api(
     market_id: int = 1,
 ) -> list:
     """
-    Busca eventos via API JSON da BetNacional (rápido, sem Playwright).
+    Busca eventos via Playwright capturando a resposta XHR interna da BetNacional.
 
-    Usa cookies de utils.bn_cookie_manager + headers padrão. Cai pra [] se cookies
-    estiverem vazios ou a API responder 403 — o caller decide o fallback.
+    Cloudflare bloqueia requests Python direto de IPs datacenter (mesmo com cookies),
+    mas permite o XHR quando ele é disparado pelo contexto da página real. Por isso,
+    navegamos via Playwright e interceptamos a resposta `events-by-seasons`.
 
     Args:
         sport_id: ID do esporte (1 = futebol)
         category_id: ID da categoria (0 = todas)
         tournament_id: ID do torneio (0 = todos)
-        market_id: ID do mercado (1 = 1x2)
+        market_id: ignorado (a página decide o que pedir)
 
     Returns:
         list[EventDigest] agrupado por event_id, com 1x2 já extraído.
     """
-    # Import lazy: o módulo bn_cookie_manager pode ainda não existir em algumas
-    # instalações, então adiamos a importação pra dentro da função.
-    try:
-        from utils.bn_cookie_manager import get_cookies, get_headers
-    except ImportError as exc:
-        logger.warning(f"API fetch: bn_cookie_manager indisponível ({exc}) — retornando []")
-        return []
-
     from scraping.betnacional import parse_events_from_api_json
+    from playwright.async_api import async_playwright
 
-    cookies = get_cookies()
-    if not cookies:
-        logger.warning("API fetch: sem cookies disponíveis — retornando []")
-        return []
-
-    headers = get_headers()
-    url = (
-        f"https://prod-global-bff-events.bet6.com.br/api/odds/{sport_id}/events-by-seasons"
-        f"?sport_id={sport_id}&category_id={category_id}&tournament_id={tournament_id}"
-        f"&markets={market_id}&filter_time_event="
+    page_url = (
+        f"https://betnacional.bet.br/events/{sport_id}/{category_id}/{tournament_id}"
+    )
+    UA = (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     )
 
+    captured: list = []
+
+    async def _on_response(resp):
+        if "events-by-seasons" not in resp.url:
+            return
+        if resp.status != 200:
+            return
+        try:
+            body = await resp.json()
+            if isinstance(body, dict) and (body.get("odds") or body.get("scores")):
+                captured.append(body)
+        except Exception:
+            pass
+
     try:
-        # requests é sync — roda em thread pra não bloquear o loop
-        resp = await asyncio.to_thread(
-            requests.get, url, headers=headers, cookies=cookies, timeout=20
-        )
-        if resp.status_code == 403:
-            logger.warning("API fetch: 403 Cloudflare — cookies podem ter expirado")
-            return []
-        if resp.status_code != 200:
-            logger.warning(f"API fetch: HTTP {resp.status_code}")
-            return []
-        data = resp.json()
-        events = parse_events_from_api_json(data, source_link=url)
-        logger.info(
-            f"API fetch: {len(events)} eventos extraídos "
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            ctx = await browser.new_context(user_agent=UA, locale="pt-BR")
+            page = await ctx.new_page()
+            page.on("response", lambda r: asyncio.create_task(_on_response(r)))
+            await page.goto(page_url, wait_until="networkidle", timeout=45000)
+            await page.wait_for_timeout(4000)
+            await browser.close()
+    except Exception as exc:
+        logger.exception(f"API fetch (Playwright XHR capture) falhou: {exc}")
+        return []
+
+    if not captured:
+        logger.warning(
+            f"API fetch: nenhuma resposta events-by-seasons capturada "
             f"(sport={sport_id}, cat={category_id}, tour={tournament_id})"
         )
-        return events
-    except Exception as exc:
-        logger.exception(f"API fetch falhou: {exc}")
         return []
+
+    # Merge respostas se houver múltiplas
+    merged_odds, merged_scores = [], []
+    for body in captured:
+        merged_odds.extend(body.get("odds", []))
+        merged_scores.extend(body.get("scores", []))
+    merged = {"odds": merged_odds, "outrights": [], "scores": merged_scores}
+
+    events = parse_events_from_api_json(merged, source_link=page_url)
+    logger.info(
+        f"API fetch: {len(events)} eventos extraídos via Playwright XHR capture "
+        f"(sport={sport_id}, cat={category_id}, tour={tournament_id})"
+    )
+    return events
