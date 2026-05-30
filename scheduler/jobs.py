@@ -1977,6 +1977,7 @@ async def enrich_games_with_full_markets_job():
     cutoff_max = now_utc + timedelta(hours=24)
     cutoff_min = now_utc - timedelta(minutes=30)
 
+    limit = int(os.getenv("BETANO_ENRICH_BATCH_LIMIT", "30"))
     with SessionLocal() as session:
         games = session.query(Game).filter(
             Game.status == "scheduled",
@@ -1986,7 +1987,7 @@ async def enrich_games_with_full_markets_job():
             Game.start_time >= cutoff_min,
             Game.start_time < cutoff_max,
             Game.ext_id.isnot(None),
-        ).order_by(Game.start_time).all()
+        ).order_by(Game.start_time.asc()).limit(limit).all()
 
         # Snapshot defensivo dos campos necessários — evita DetachedInstanceError
         candidates = [
@@ -2006,7 +2007,7 @@ async def enrich_games_with_full_markets_job():
 
     concurrency = int(os.getenv("BETANO_ENRICH_CONCURRENCY", "3"))
     logger.info(
-        f"🔍 Enrich pages: {len(candidates)} Games sem odds (concurrency={concurrency})"
+        f"🔍 Enrich pages: {len(candidates)} Games sem odds (concurrency={concurrency}, limit={limit})"
     )
 
     sem = asyncio.Semaphore(max(1, concurrency))
@@ -2018,25 +2019,37 @@ async def enrich_games_with_full_markets_job():
                 ctx = await browser.new_context(user_agent=UA, locale="pt-BR")
                 try:
                     page = await ctx.new_page()
+                    logger.info(
+                        f"🔍 enrich [{cand['id']}] {cand.get('team_home')} vs "
+                        f"{cand.get('team_away')}: 1st fetch..."
+                    )
                     # ── 1ª passada: URL original (aba Popular) ──────────────
                     try:
                         await page.goto(
                             cand["game_url"],
-                            wait_until="networkidle",
+                            wait_until="domcontentloaded",
                             timeout=45000,
                         )
                     except Exception as exc:
                         logger.debug(
                             f"enrich goto {cand['game_url']} timeout/erro tolerado: {exc}"
                         )
-                    await page.wait_for_timeout(6000)
+                    await page.wait_for_timeout(3000)
                     try:
                         html = await page.content()
                     except Exception as exc:
                         logger.debug(f"enrich page.content falhou: {exc}")
                         return
                     if not html or len(html) < 5000 or "Splash Screen" in html:
+                        logger.info(
+                            f"🔍 enrich [{cand['id']}]: 1st HTML inválido "
+                            f"(len={len(html) if html else 0}) — skip"
+                        )
                         return
+                    logger.info(
+                        f"🔍 enrich [{cand['id']}]: 1st OK "
+                        f"({len(html)/1000:.0f}KB) — parsing..."
+                    )
                     game_data = _parse_full_markets_from_html(
                         html,
                         home_hint=cand.get("team_home") or "",
@@ -2045,7 +2058,14 @@ async def enrich_games_with_full_markets_job():
                     if not game_data or not game_data.get("markets", {}).get(
                         "match_result"
                     ):
+                        logger.info(
+                            f"🔍 enrich [{cand['id']}]: sem match_result no 1st — skip"
+                        )
                         return
+                    n_markets = len(game_data.get('markets', {}))
+                    logger.info(
+                        f"🔍 enrich [{cand['id']}]: {n_markets} mercados extraídos"
+                    )
 
                     # ── 2ª passada: aba Handicap (?bt=11) SE ainda não veio ─
                     if "handicap_asian" not in game_data.get("markets", {}):
@@ -2057,13 +2077,16 @@ async def enrich_games_with_full_markets_job():
                         sep = "&" if "?" in url_tab else "?"
                         url_tab = f"{url_tab}{sep}bt=11"
 
+                        logger.info(
+                            f"🔍 enrich [{cand['id']}]: 2nd fetch (?bt=11)..."
+                        )
                         try:
                             await page.goto(
                                 url_tab,
-                                wait_until="networkidle",
+                                wait_until="domcontentloaded",
                                 timeout=45000,
                             )
-                            await page.wait_for_timeout(6000)
+                            await page.wait_for_timeout(3000)
                             html_h = await page.content()
                             if (
                                 html_h
@@ -2091,10 +2114,12 @@ async def enrich_games_with_full_markets_job():
                                         h_only
                                     )
                                     logger.info(
-                                        f"enrich: handicap via 2º fetch "
-                                        f"(game id={cand['id']}, "
-                                        f"linhas="
-                                        f"{len(h_only.get('options', {}))})"
+                                        f"🔍 enrich [{cand['id']}]: handicap via 2nd "
+                                        f"({len(h_only.get('options', {}))} linhas)"
+                                    )
+                                else:
+                                    logger.info(
+                                        f"🔍 enrich [{cand['id']}]: 2nd sem handicap"
                                     )
                         except Exception as exc2:
                             logger.debug(
@@ -2113,11 +2138,20 @@ async def enrich_games_with_full_markets_job():
                     f"enrich falhou pra game id={cand['id']}: {exc}"
                 )
 
+    async def _process_safe(browser, cand: dict) -> None:
+        try:
+            await asyncio.wait_for(_process(browser, cand), timeout=30.0)
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"⏱ enrich timeout 30s pra game {cand['id']} "
+                f"({cand.get('team_home')} vs {cand.get('team_away')})"
+            )
+
     try:
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True)
             try:
-                tasks = [_process(browser, c) for c in candidates]
+                tasks = [_process_safe(browser, c) for c in candidates]
                 await asyncio.gather(*tasks, return_exceptions=True)
             finally:
                 try:

@@ -773,7 +773,7 @@ def _parse_handicap_from_html(
     """
     # Inferir nomes de times — defaults
     home = home_hint or ""
-    away = home_hint or ""
+    away = away_hint or ""
     # 1) AHRF (preferencial: Handicap Asiático Resultado Final)
     ahrf = _extract_market_block_at(html, _BETANO_AH_PRIMARY_TYPE)
     asou = _extract_market_block_at(html, "ASOU")
@@ -797,17 +797,6 @@ def _parse_handicap_from_html(
     markets = [m for m in (ahrf, asou) if m]
     if not markets:
         return None
-
-    # Inferir nomes de times se não vieram (campos do próprio event)
-    home = home_hint or event.get("homeTeam") or ""
-    away = away_hint or event.get("awayTeam") or ""
-    if not (home and away):
-        # Tenta extrair de shortName tipo "PSG vs Arsenal"
-        short = event.get("shortName") or ""
-        m = re.match(r"^(.+?)\s+(?:vs|x|-)\s+(.+)$", short, re.IGNORECASE)
-        if m:
-            home = home or m.group(1).strip()
-            away = away or m.group(2).strip()
 
     # 1) AHRF (preferencial: Handicap Asiático Resultado Final)
     ahrf = next(
