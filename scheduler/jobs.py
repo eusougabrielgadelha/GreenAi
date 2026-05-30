@@ -2,7 +2,7 @@
 import os
 import asyncio
 from datetime import datetime, timedelta
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 import pytz
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -26,7 +26,10 @@ from models.database import Game, LiveGameTracker, SessionLocal, CombinedBet
 from scraping.fetchers import fetch_events_from_link, fetch_game_result, _fetch_requests_async, _fetch_with_playwright
 from config.settings import HAS_PLAYWRIGHT
 from scraping.betnacional import parse_local_datetime, scrape_live_game_data
-from betting.decision import decide_bet, decide_live_bet_opportunity
+from betting.decision import (
+    decide_bet, decide_live_bet_opportunity,
+    fetch_and_decide_picks, _is_total_goals_picks_enabled,
+)
 from notifications.telegram import tg_send_message
 from watchlist.manager import wl_load, wl_save, wl_add, wl_remove
 
@@ -134,7 +137,7 @@ async def night_scan_for_early_games():
         for url in get_all_betting_links():
             evs: List[Any] = []
             try:
-                evs = await fetch_events_from_link(url, backend_cfg)
+                evs = await fetch_events_smart(url, backend_cfg)
             except Exception as e:
                 logger.warning("Falha ao buscar %s: %s", url, e)
                 continue
@@ -153,32 +156,11 @@ async def night_scan_for_early_games():
                     if not (start_window <= start_utc < end_window):
                         continue
 
-                    # Decisão
-                    will, pick, pprob, pev, reason = decide_bet(
-                        ev.odds_home, ev.odds_draw, ev.odds_away, ev.competition, (ev.team_home, ev.team_away)
-                    )
-
-                    # PASSE LIVRE: alta confiança entra mesmo sem will
-                    free_pass = is_high_conf(pprob)
-                    
-                    # Se flag ONLY_HIGH_CONF_GAMES estiver ativa, apenas seleciona alta confiança
-                    if ONLY_HIGH_CONF_GAMES:
-                        should_save = free_pass  # Apenas alta confiança
-                        if free_pass and not will:
-                            will = True
-                            reason = (reason or "Apenas alta confiança") + " | HIGH_CONF_ONLY"
-                    else:
-                        # Comportamento normal
-                        if not will and free_pass:
-                            will = True
-                            reason = (reason or "Passe livre") + " | HIGH_TRUST"
-                        should_save = will  # Para madrugada, só salva se will=True (já inclui free_pass)
-                    
-                    # SALVAR TODOS OS JOGOS NO BANCO (mesmo os não selecionados)
-                    # Upsert do jogo (salva sempre, mas will_bet só é True se selecionado)
+                    # Upsert do Game primeiro (sem pick), depois decide_picks com fetch
+                    # detalhado se feature flag ativa. mirror_match_result_to_game preenche
+                    # os campos legados de pick no Game.
                     g = session.query(Game).filter_by(ext_id=ev.ext_id, start_time=start_utc).one_or_none()
                     if g:
-                        # Atualiza jogo existente
                         g.source_link = url
                         g.game_url = getattr(ev, "game_url", None) or g.game_url
                         g.competition = ev.competition or g.competition
@@ -187,17 +169,9 @@ async def night_scan_for_early_games():
                         g.odds_home = ev.odds_home
                         g.odds_draw = ev.odds_draw
                         g.odds_away = ev.odds_away
-                        g.pick = pick
-                        g.pick_prob = pprob
-                        g.pick_ev = pev
-                        g.pick_reason = reason
-                        if should_save:
-                            g.will_bet = True
                         if g.status not in ("live", "ended"):
                             g.status = "scheduled"
-                        session.commit()
                     else:
-                        # Cria novo jogo (sempre salva, mesmo se não selecionado)
                         g = Game(
                             ext_id=ev.ext_id,
                             source_link=url,
@@ -210,36 +184,63 @@ async def night_scan_for_early_games():
                             odds_home=ev.odds_home,
                             odds_draw=ev.odds_draw,
                             odds_away=ev.odds_away,
-                            pick=pick,
-                            pick_prob=pprob,
-                            pick_ev=pev,
-                            will_bet=should_save,  # True se selecionado, False caso contrário
-                            pick_reason=reason,
                             status="scheduled",
                         )
                         session.add(g)
                         try:
-                            session.commit()
+                            session.flush()
                         except IntegrityError:
                             session.rollback()
                             g = session.query(Game).filter_by(ext_id=ev.ext_id, start_time=start_utc).one_or_none()
-                            if g:
-                                g.source_link = url
-                                g.game_url = getattr(ev, "game_url", None) or g.game_url
-                                g.competition = ev.competition or g.competition
-                                g.country = getattr(ev, "country", None) or g.country
-                                g.team_home = ev.team_home or g.team_home
-                                g.team_away = ev.team_away or g.team_away
-                                g.odds_home = ev.odds_home
-                                g.odds_draw = ev.odds_draw
-                                g.odds_away = ev.odds_away
-                                g.pick = pick
-                                g.pick_prob = pprob
-                                g.pick_ev = pev
-                                g.pick_reason = reason
-                                if should_save:
-                                    g.will_bet = True
-                                session.commit()
+                            if not g:
+                                continue
+                            g.source_link = url
+                            g.game_url = getattr(ev, "game_url", None) or g.game_url
+                            g.competition = ev.competition or g.competition
+                            g.country = getattr(ev, "country", None) or g.country
+                            g.team_home = ev.team_home or g.team_home
+                            g.team_away = ev.team_away or g.team_away
+                            g.odds_home = ev.odds_home
+                            g.odds_draw = ev.odds_draw
+                            g.odds_away = ev.odds_away
+
+                    # Decisão multi-market
+                    picks_list = await fetch_and_decide_picks(
+                        session, g, ev,
+                        decision_source="night_scan",
+                        use_full_markets=_is_total_goals_picks_enabled(),
+                    )
+                    match_pick = next((p for p in picks_list if p.market == "match_result"), None)
+                    will = bool(match_pick.will_bet) if match_pick else False
+                    pick = match_pick.pick if match_pick else ""
+                    pprob = float(match_pick.pick_prob or 0.0) if match_pick else 0.0
+                    pev = float(match_pick.pick_ev or 0.0) if match_pick else 0.0
+                    reason = match_pick.pick_reason if match_pick else ""
+
+                    # PASSE LIVRE: alta confiança entra mesmo sem will
+                    free_pass = is_high_conf(pprob)
+
+                    # Se flag ONLY_HIGH_CONF_GAMES estiver ativa, apenas seleciona alta confiança
+                    if ONLY_HIGH_CONF_GAMES:
+                        should_save = free_pass  # Apenas alta confiança
+                        if free_pass and not will:
+                            will = True
+                            reason = (reason or "Apenas alta confiança") + " | HIGH_CONF_ONLY"
+                    else:
+                        # Comportamento normal
+                        if not will and free_pass:
+                            will = True
+                            reason = (reason or "Passe livre") + " | HIGH_TRUST"
+                        should_save = will  # Para madrugada, só salva se will=True (já inclui free_pass)
+
+                    # Atualiza will_bet legado se foi selecionado
+                    if should_save:
+                        g.will_bet = True
+                    elif g.will_bet is None:
+                        g.will_bet = False
+                    if reason:
+                        g.pick_reason = reason
+                    session.commit()
                     
                     if not should_save:
                         # Ainda assim, avaliar ADD na watchlist
@@ -294,25 +295,21 @@ async def night_scan_for_early_games():
                         getattr(ev, "start_local_str", "?")
                     )
 
-                    # Envio do pick — SOMENTE se alta confiança e sem duplicar (usando banco de dados)
+                    # Envio per-pick: send_picks_for_game filtra picks individualmente
+                    # (gate de high_conf agora aplica por pick, não por jogo inteiro).
                     try:
-                        from utils.notification_tracker import should_notify_pick, mark_pick_notified
-                        
-                        should_notify, reason = should_notify_pick(g, check_high_conf=True)
-                        
-                        if should_notify:
-                            from utils.telegram_helpers import send_pick_with_buffer
-                            send_pick_with_buffer(g)
-                            # Marca como notificado no banco de dados (persiste após reiniciar)
-                            mark_pick_notified(g, session)
-                            # Mantém compatibilidade com sistema antigo (pick_reason)
-                            g.pick_reason = mark_high_conf_notified(g.pick_reason or "")
-                            session.commit()
-                            logger.info(f"✅ Palpite notificado (madrugada) para jogo {g.id} ({g.ext_id})")
-                        else:
-                            logger.debug(f"⏭️  Palpite suprimido (madrugada) para jogo {g.id}: {reason}")
-                    except Exception:
-                        logger.exception("Falha ao enviar pick noturno id=%s", g.id)
+                        from notifications.telegram import send_picks_for_game
+                        sent_count = send_picks_for_game(g, session)
+                    except Exception as exc:
+                        logger.exception("Falha em send_picks_for_game (madrugada) id=%s: %s", g.id, exc)
+                        sent_count = 0
+
+                    if sent_count > 0:
+                        g.pick_reason = mark_high_conf_notified(g.pick_reason or "")
+                        session.commit()
+                        logger.info(f"✅ Palpite notificado (madrugada) para jogo {g.id} ({g.ext_id}) — sent={sent_count}")
+                    else:
+                        logger.debug(f"⏭️  Nenhum pick passou o gate (madrugada) para jogo {g.id}")
 
                     # Agendamentos
                     await _schedule_all_for_game(g)
@@ -361,7 +358,7 @@ async def rescan_watchlist_job():
         page_cache: Dict[str, Dict[str, Any]] = {}
         for link, its in by_link.items():
             try:
-                evs = await fetch_events_from_link(link, "playwright")  # força playwright
+                evs = await fetch_events_smart(link, "playwright")  # força playwright (com bypass API se ativo)
             except Exception as e:
                 logger.warning("Falha ao buscar página da watchlist %s: %s", link, e)
                 evs = []
@@ -407,14 +404,16 @@ async def rescan_watchlist_job():
                 # evento sumiu da página; pode ser mudança de card/rota — mantemos temporariamente
                 continue
 
-            # recalcular decisão
+            # Decisão preliminar (lightweight, sem DB writes) só pra decidir se promove.
+            # Quando promove, refazemos com fetch_and_decide_picks pra persistir Pick e
+            # opcionalmente analisar Over/Under.
             will, pick, pprob, pev, reason = decide_bet(
                 ev.odds_home, ev.odds_draw, ev.odds_away, ev.competition, (ev.team_home, ev.team_away)
             )
 
             # PASSE LIVRE: alta confiança promove mesmo sem cruzar thresholds
             free_pass = is_high_conf(pprob)
-            
+
             # Se flag ONLY_HIGH_CONF_GAMES estiver ativa, apenas promove alta confiança
             if ONLY_HIGH_CONF_GAMES:
                 promote = free_pass  # Apenas alta confiança
@@ -422,12 +421,8 @@ async def rescan_watchlist_job():
                 promote = free_pass or (will and (pprob >= MIN_PROB) and (pev >= MIN_EV))
 
             if promote:
-                # UPSERT seguro
-                if free_pass:
-                    reason = (reason or "Upgrade watchlist") + " | HIGH_TRUST"
-                else:
-                    reason = "Upgrade watchlist"
-
+                # Upsert do Game primeiro (sem pick), depois decide_picks com fetch detalhado.
+                # mirror_match_result_to_game preenche os campos legados de pick no Game.
                 g = session.query(Game).filter_by(ext_id=ext_id, start_time=start_utc).one_or_none()
                 if g:
                     g.source_link = link
@@ -438,13 +433,7 @@ async def rescan_watchlist_job():
                     g.odds_home = ev.odds_home
                     g.odds_draw = ev.odds_draw
                     g.odds_away = ev.odds_away
-                    g.pick = pick
-                    g.pick_prob = pprob
-                    g.pick_ev = pev
-                    g.will_bet = True
-                    g.pick_reason = reason
                     g.status = "scheduled"
-                    session.commit()
                 else:
                     g = Game(
                         ext_id=ext_id,
@@ -458,38 +447,51 @@ async def rescan_watchlist_job():
                         odds_home=ev.odds_home,
                         odds_draw=ev.odds_draw,
                         odds_away=ev.odds_away,
-                        pick=pick,
-                        pick_prob=pprob,
-                        pick_ev=pev,
-                        will_bet=True,
-                        pick_reason=reason,
                         status="scheduled",
                     )
                     session.add(g)
                     try:
-                        session.commit()
+                        session.flush()
                     except IntegrityError:
                         session.rollback()
                         g = session.query(Game).filter_by(ext_id=ext_id, start_time=start_utc).one_or_none()
-                        if g:
-                            g.source_link = link
-                            g.game_url = getattr(ev, "game_url", None) or g.game_url
-                            g.competition = ev.competition or g.competition
-                            g.country = getattr(ev, "country", None) or g.country
-                            g.team_home = ev.team_home or g.team_home
-                            g.team_away = ev.team_away or g.team_away
-                            g.odds_home = ev.odds_home
-                            g.odds_draw = ev.odds_draw
-                            g.odds_away = ev.odds_away
-                            g.pick = pick
-                            g.pick_prob = pprob
-                            g.pick_ev = pev
-                            g.will_bet = True
-                            g.pick_reason = reason
-                            g.status = "scheduled"
-                            session.commit()
+                        if not g:
+                            continue
+                        g.source_link = link
+                        g.game_url = getattr(ev, "game_url", None) or g.game_url
+                        g.competition = ev.competition or g.competition
+                        g.country = getattr(ev, "country", None) or g.country
+                        g.team_home = ev.team_home or g.team_home
+                        g.team_away = ev.team_away or g.team_away
+                        g.odds_home = ev.odds_home
+                        g.odds_draw = ev.odds_draw
+                        g.odds_away = ev.odds_away
+                        g.status = "scheduled"
 
-                session.refresh(g)
+                # Decisão multi-market com fetch (se feature flag ativa)
+                picks_list = await fetch_and_decide_picks(
+                    session, g, ev,
+                    decision_source="watchlist_upgrade",
+                    use_full_markets=_is_total_goals_picks_enabled(),
+                )
+                match_pick = next((p for p in picks_list if p.market == "match_result"), None)
+                if match_pick is not None:
+                    will = bool(match_pick.will_bet)
+                    pick = match_pick.pick
+                    pprob = float(match_pick.pick_prob or 0.0)
+                    pev = float(match_pick.pick_ev or 0.0)
+                    reason = match_pick.pick_reason or ""
+                    free_pass = is_high_conf(pprob)
+
+                # Marcadores legados: razão com tag de upgrade + will_bet=True
+                if free_pass:
+                    reason = (reason or "Upgrade watchlist") + " | HIGH_TRUST"
+                else:
+                    reason = "Upgrade watchlist"
+                g.will_bet = True
+                g.pick_reason = reason
+                g.status = "scheduled"
+                session.commit()
 
                 # Salva histórico de odds quando promove
                 save_odd_history(session, g)
@@ -584,14 +586,24 @@ async def hourly_rescan_job():
                 if not ev:
                     continue
 
-                # Recalcula a decisão
-                will, pick, pprob, pev, reason = decide_bet(
-                    ev.odds_home, ev.odds_draw, ev.odds_away,
-                    game.competition, (game.team_home, game.team_away),
-                    game_id=game.id,
-                )
-
+                # Captura prob anterior ANTES de fetch_and_decide_picks (que via mirror
+                # pode atualizar game.pick_prob).
                 prev_high = (game.pick_prob or 0.0) >= HIGH_CONF_THRESHOLD
+
+                # Recalcula a decisão (multi-market) e persiste Pick row(s).
+                # mirror_match_result_to_game preenche os campos legados de pick no Game.
+                picks_list = await fetch_and_decide_picks(
+                    session, game, ev,
+                    decision_source="hourly_rescan",
+                    use_full_markets=_is_total_goals_picks_enabled(),
+                )
+                match_pick = next((p for p in picks_list if p.market == "match_result"), None)
+                will = bool(match_pick.will_bet) if match_pick else False
+                pick = match_pick.pick if match_pick else ""
+                pprob = float(match_pick.pick_prob or 0.0) if match_pick else 0.0
+                pev = float(match_pick.pick_ev or 0.0) if match_pick else 0.0
+                reason = match_pick.pick_reason if match_pick else ""
+
                 new_high = (pprob or 0.0) >= HIGH_CONF_THRESHOLD
 
                 # 1) Se virou ALTA CONFIANÇA agora (transição) e ainda não foi notificado -> dispara (usando banco de dados)
@@ -611,15 +623,18 @@ async def hourly_rescan_job():
 
                     # notifica uma única vez (usando banco de dados)
                     try:
-                        from utils.notification_tracker import mark_pick_notified
-                        
                         # Já verificamos acima que não foi notificado, então pode enviar
-                        from utils.telegram_helpers import send_pick_with_buffer
-                        send_pick_with_buffer(game)
-                        mark_pick_notified(game, session)
+                        # Multi-pick: cobre match_result + total_goals quando houver.
+                        try:
+                            from notifications.telegram import send_picks_for_game
+                            sent_count = send_picks_for_game(game, session)
+                        except Exception:
+                            sent_count = 0
+                            logger.exception("Falha em send_picks_for_game (hourly transição) id=%s", game.id)
+
                         game.pick_reason = mark_high_conf_notified(game.pick_reason or "")
                         session.commit()
-                        logger.info(f"✅ Palpite notificado (hourly rescan - transição alta confiança) para jogo {game.id} ({game.ext_id})")
+                        logger.info(f"✅ Palpite notificado (hourly rescan - transição alta confiança) para jogo {game.id} ({game.ext_id}) — sent={sent_count}")
                     except Exception:
                         logger.exception("Falha ao notificar alta confiança (hourly) id=%s", game.id)
 
@@ -647,23 +662,20 @@ async def hourly_rescan_job():
                     # Salva histórico
                     save_odd_history(session, game)
 
-                    # Não notificar upgrades "médios": só notificamos se for alta confiança e ainda não notificado (usando banco de dados)
+                    # Envio per-pick: send_picks_for_game filtra picks individualmente
+                    # (gate de high_conf agora aplica por pick, não por jogo inteiro).
                     try:
-                        from utils.notification_tracker import should_notify_pick, mark_pick_notified
-                        
-                        should_notify, reason = should_notify_pick(game, check_high_conf=True)
-                        if should_notify:
-                            from utils.telegram_helpers import send_pick_with_buffer
-                            send_pick_with_buffer(game)
-                            mark_pick_notified(game, session)
-                            game.pick_reason = mark_high_conf_notified(game.pick_reason or "")
-                            session.commit()
-                            asyncio.create_task(_schedule_all_for_game(game))
-                            logger.info(f"✅ Palpite notificado (upgrade horário) para jogo {game.id} ({game.ext_id})")
-                        else:
-                            logger.debug(f"⏭️  Palpite suprimido (upgrade horário) para jogo {game.id}: {reason}")
-                    except Exception:
-                        logger.exception("Falha ao notificar upgrade (alta confiança) id=%s", game.id)
+                        from notifications.telegram import send_picks_for_game
+                        sent_count = send_picks_for_game(game, session)
+                    except Exception as exc:
+                        logger.exception("Falha em send_picks_for_game (upgrade horário) id=%s: %s", game.id, exc)
+                        sent_count = 0
+
+                    if sent_count > 0:
+                        game.pick_reason = mark_high_conf_notified(game.pick_reason or "")
+                        session.commit()
+                        asyncio.create_task(_schedule_all_for_game(game))
+                        logger.info(f"✅ Palpite notificado (upgrade horário) para jogo {game.id} ({game.ext_id}) — sent={sent_count}")
                     else:
                         logger.info(
                             "📈 Jogo %s atualizado por EV, sem notificação (prob=%.3f; high_notified=%s)",
@@ -873,7 +885,15 @@ async def _handle_finished_game(session, game: Game, tracker: LiveGameTracker, n
         game.final_score_away = result_data.get("away_goals")
         game.final_score = result_data.get("score")
         game.result_fetched_at = datetime.now(pytz.UTC)
-        game.hit = (game.outcome == game.pick) if game.pick else None
+        game.hit = (game.outcome == game.pick) if game.pick else None  # mirror legado pra match_result
+
+        # Resolve TODOS os picks multi-mercado (match_result + total_goals quando houver)
+        try:
+            from betting.result_resolver import resolve_picks_for_game
+            resolve_picks_for_game(session, game)
+        except Exception as exc:
+            logger.warning(f"Falha ao resolver picks pro game {game.id}: {exc}")
+
         result_msg = "✅ ACERTOU" if game.hit else "❌ ERROU" if game.hit is False else "⚠️ SEM PALPITE"
         score_str = f" ({game.final_score})" if game.final_score else ""
         from utils.logger import log_with_context
@@ -1272,8 +1292,15 @@ async def watch_game_until_end_job(game_id: int):
                 game.final_score = result_data.get("score")
                 game.result_fetched_at = datetime.now(pytz.UTC)
                 game.status = "ended"
-                game.hit = (game.outcome == game.pick) if game.pick else None
-                
+                game.hit = (game.outcome == game.pick) if game.pick else None  # mirror legado pra match_result
+
+                # Resolve TODOS os picks multi-mercado (match_result + total_goals quando houver)
+                try:
+                    from betting.result_resolver import resolve_picks_for_game
+                    resolve_picks_for_game(session, game)
+                except Exception as exc:
+                    logger.warning(f"Falha ao resolver picks pro game {game.id}: {exc}")
+
                 result_msg = "✅ ACERTOU" if game.hit else "❌ ERROU" if game.hit is False else "⚠️ SEM PALPITE"
                 score_str = f" ({game.final_score})" if game.final_score else ""
                 logger.info("🏁 Resultado obtido para jogo id=%s: %s%s | %s", game_id, game.outcome, score_str, result_msg)
@@ -1506,7 +1533,15 @@ async def fetch_finished_games_results_job():
                         game.final_score = result_data.get("score")
                         game.result_fetched_at = datetime.now(pytz.UTC)
                         game.status = "ended"
-                        game.hit = (game.outcome == game.pick) if game.pick else None
+                        game.hit = (game.outcome == game.pick) if game.pick else None  # mirror legado pra match_result
+
+                        # Resolve TODOS os picks multi-mercado (match_result + total_goals quando houver)
+                        try:
+                            from betting.result_resolver import resolve_picks_for_game
+                            resolve_picks_for_game(session, game)
+                        except Exception as exc:
+                            logger.warning(f"Falha ao resolver picks pro game {game.id}: {exc}")
+
                         result_msg = "✅ ACERTOU" if game.hit else "❌ ERROU" if game.hit is False else "⚠️ SEM PALPITE"
                         score_str = f" ({game.final_score})" if game.final_score else ""
                         logger.info(f"✅ Resultado obtido para jogo {game.id}: {game.outcome}{score_str} | {result_msg}")
@@ -1631,7 +1666,18 @@ def setup_scheduler():
         misfire_grace_time=300,
     )
     logger.info("🧹 Limpeza de cache de resultados agendada a cada 1 hora")
-    
+
+    # --- Renovação de cookies BN a cada 3 horas (margem antes do TTL=4h) ---
+    scheduler.add_job(
+        refresh_bn_cookies_job,
+        'interval',
+        hours=3,
+        id='refresh_bn_cookies',
+        replace_existing=True,
+        next_run_time=datetime.now(pytz.UTC) + timedelta(seconds=10),
+    )
+    logger.info("🍪 Renovação de cookies BN agendada a cada 3h (primeira run em ~10s)")
+
     # --- Health checks do sistema (DESATIVADO) ---
     # scheduler.add_job(
     #     health_check_job,
@@ -1787,3 +1833,81 @@ def setup_scheduler():
         f" | ao vivo cada 1min"
     )
     logger.info(base_msg)
+
+
+# ============================================================
+# BN cookie refresh + smart fetch routing (API JSON / Playwright)
+# ============================================================
+
+async def refresh_bn_cookies_job():
+    """
+    Job periódico que renova cookies BetNacional via Playwright.
+    Roda a cada BN_COOKIE_TTL_HOURS - 1 (margem de segurança).
+    Também roda ao iniciar (chamado em main.py via on_startup hook).
+    """
+    try:
+        from utils.bn_cookie_manager import refresh_cookies_async, is_expired
+        forced = is_expired()
+        cookies = await refresh_cookies_async(force=forced)
+        if cookies:
+            logger.info(f"🍪 Cookies BN renovados: {len(cookies)} cookies")
+        else:
+            logger.warning("🍪 Falha ao renovar cookies BN (refresh retornou vazio)")
+    except Exception as exc:
+        logger.exception(f"refresh_bn_cookies_job falhou: {exc}")
+
+
+async def fetch_events_smart(
+    url: str,
+    backend: str = "playwright",
+    tournament_id_hint: Optional[int] = None,
+) -> list:
+    """
+    Roteamento inteligente de fetch:
+    1. Se USE_API_JSON_FETCH=true E cookies disponíveis: tenta via API
+       a) Se tournament_id_hint vier: usa esse
+       b) Senão: extrai do URL (regex /events/{sport}/{cat}/{tour})
+       c) Se retornar [], cai pro fallback
+    2. Fallback: fetch_events_from_link(url, backend) (Playwright/HTML).
+    """
+    import re
+
+    use_api = os.getenv("USE_API_JSON_FETCH", "false").lower() == "true"
+
+    if use_api:
+        try:
+            from utils.bn_cookie_manager import get_cookies
+            cookies = get_cookies()
+        except Exception:
+            cookies = {}
+
+        if cookies:
+            sport_id, category_id, tournament_id = 1, 0, tournament_id_hint or 0
+            m = re.search(r'/events/(\d+)/(\d+)/(\d+)', url)
+            if m and tournament_id_hint is None:
+                sport_id = int(m.group(1))
+                category_id = int(m.group(2))
+                tournament_id = int(m.group(3))
+
+            try:
+                from scraping.fetchers import fetch_events_via_api
+                events = await fetch_events_via_api(
+                    sport_id=sport_id,
+                    category_id=category_id,
+                    tournament_id=tournament_id,
+                )
+                if events:
+                    logger.info(
+                        f"✅ API fetch OK ({len(events)} eventos) — "
+                        f"sport={sport_id} cat={category_id} tour={tournament_id}"
+                    )
+                    return events
+                logger.warning("⚠️ API fetch retornou [] — caindo pro fallback HTML")
+            except ImportError:
+                logger.warning("fetch_events_via_api ainda não disponível — fallback HTML")
+            except Exception as exc:
+                logger.exception(f"API fetch erro inesperado, fallback: {exc}")
+        else:
+            logger.warning("USE_API_JSON_FETCH=true mas cookies indisponíveis — fallback")
+
+    return await fetch_events_from_link(url, backend)

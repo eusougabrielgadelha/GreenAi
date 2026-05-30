@@ -2,10 +2,65 @@
 import html
 import random
 from datetime import datetime
+from types import SimpleNamespace
 from typing import Any, Dict, List
 from models.database import Game, SessionLocal, CombinedBet
 from config.settings import ZONE, HIGH_CONF_THRESHOLD
 from utils.stats import global_accuracy, get_weekly_stats, to_aware_utc, get_lifetime_accuracy, get_daily_summary, get_accuracy_by_confidence
+
+
+def _get_match_result_pick_or_proxy(g):
+    """Retorna o Pick de market='match_result' do game, OU um SimpleNamespace
+    com os campos legados de Game (pra compatibilidade com games antigos
+    que ainda não têm row em picks)."""
+    if hasattr(g, "picks") and g.picks:
+        for p in g.picks:
+            if getattr(p, "market", None) == "match_result":
+                return p
+    odd_map = {"home": g.odds_home, "draw": g.odds_draw, "away": g.odds_away}
+    return SimpleNamespace(
+        market="match_result",
+        line=None,
+        pick=g.pick or "",
+        pick_prob=g.pick_prob or 0.0,
+        pick_ev=g.pick_ev or 0.0,
+        pick_odd=odd_map.get(g.pick) or 0.0,
+        pick_reason=g.pick_reason or "",
+        will_bet=bool(getattr(g, "will_bet", False)),
+    )
+
+
+def _get_active_picks_or_proxy(g):
+    """Retorna lista de picks ativos (will_bet=True) do game. Se vazio,
+    retorna proxy de match_result baseado em campos legados de Game."""
+    picks = []
+    if hasattr(g, "picks") and g.picks:
+        picks = [p for p in g.picks if getattr(p, "will_bet", False)]
+    if picks:
+        order = {"match_result": 0, "total_goals": 1}
+        picks.sort(key=lambda p: order.get(getattr(p, "market", ""), 99))
+        return picks
+    if g.pick:
+        return [_get_match_result_pick_or_proxy(g)]
+    return []
+
+
+def _format_total_goals_side(pick) -> str:
+    """Renderiza 'Mais de X.X gols' ou 'Menos de X.X gols' a partir do Pick."""
+    side_key = (pick.pick or "").lower()
+    line = pick.line
+    line_str = f"{float(line):.1f}" if line is not None else "—"
+    if side_key == "over":
+        return f"Mais de {line_str} gols"
+    if side_key == "under":
+        return f"Menos de {line_str} gols"
+    return pick.pick or "—"
+
+
+def _confidence_label(prob: float) -> str:
+    """ALTA / MÉDIA / PADRÃO baseado em pick_prob (0..1)."""
+    p = float(prob or 0.0)
+    return "ALTA" if p > 0.6 else "MÉDIA" if p > 0.4 else "PADRÃO"
 
 
 def h(b: str) -> str:
@@ -133,114 +188,260 @@ def fmt_result(g: Game) -> str:
     return msg
 
 
-def fmt_pick_now(g: Game) -> str:
-    """Formatação elegante para novo pick"""
+def _render_pick_header(g) -> str:
+    """Header padrão de um palpite (jogo + odds 1x2 + horário).
+    Visualmente idêntico ao header histórico do fmt_pick_now."""
     hhmm = g.start_time.astimezone(ZONE).strftime("%H:%M")
-    side = {"home": g.team_home, "draw": "Empate", "away": g.team_away}.get(g.pick, "—")
-    
-    # Calcula nível de confiança
-    confidence_level = "ALTA" if g.pick_prob > 0.6 else "MÉDIA" if g.pick_prob > 0.4 else "PADRÃO"
-    
-    msg = f"🎯 <b>NOVA OPORTUNIDADE</b>\n"
-    msg += "━━━━━━━━━━━━━━━━━━━━\n\n"
-    
-    msg += f"⚽ <b>JOGO</b>\n"
-    msg += f"<b>{g.team_home}</b> vs <b>{g.team_away}</b>\n"
-    msg += f"🕐 Início: {hhmm}h\n\n"
-    
-    # Odds dos dois times
     odds_home = float(g.odds_home or 0.0)
     odds_away = float(g.odds_away or 0.0)
     odds_draw = float(g.odds_draw or 0.0)
+
+    msg = f"🎯 <b>NOVA OPORTUNIDADE</b>\n"
+    msg += "━━━━━━━━━━━━━━━━━━━━\n\n"
+    msg += f"⚽ <b>JOGO</b>\n"
+    msg += f"<b>{g.team_home}</b> vs <b>{g.team_away}</b>\n"
+    msg += f"🕐 Início: {hhmm}h\n\n"
     msg += f"💰 <b>ODDS</b>\n"
     msg += f"├ {g.team_home}: <b>{odds_home:.2f}</b>\n"
     msg += f"├ Empate: <b>{odds_draw:.2f}</b>\n"
     msg += f"└ {g.team_away}: <b>{odds_away:.2f}</b>\n\n"
-    
-    msg += f"💡 <b>ANÁLISE</b>\n"
-    msg += f"├ Aposta: <b>{side}</b>\n"
-    
-    # Calcula a odd correta baseada no pick
-    pick_odd = 0.0
-    if g.pick == "home":
-        pick_odd = g.odds_home
-    elif g.pick == "draw":
-        pick_odd = g.odds_draw
-    elif g.pick == "away":
-        pick_odd = g.odds_away
-        
-    msg += f"├ Odd: <b>{pick_odd:.2f}</b>\n"
-    msg += f"├ Probabilidade: <b>{g.pick_prob*100:.0f}%</b>\n"
-    msg += f"├ Valor esperado: <b>{g.pick_ev*100:+.1f}%</b>\n"
-    msg += f"└ Confiança: <b>{confidence_level}</b>\n"
-    
-    # Adiciona razão se não for genérica
-    if g.pick_reason and g.pick_reason not in ["EV positivo", "Favorito claro"]:
-        msg += f"\n💭 <i>{g.pick_reason}</i>\n"
-    
-    msg += "\n━━━━━━━━━━━━━━━━━━━━"
-    
     return msg
 
 
+def _render_pick_block(g, pick) -> str:
+    """Renderiza o bloco de análise específico do mercado do pick."""
+    market = getattr(pick, "market", "match_result") or "match_result"
+    prob = float(getattr(pick, "pick_prob", 0) or 0.0)
+    ev = float(getattr(pick, "pick_ev", 0) or 0.0)
+    pick_odd = float(getattr(pick, "pick_odd", 0) or 0.0)
+    pick_reason = getattr(pick, "pick_reason", "") or ""
+    confidence_level = _confidence_label(prob)
+
+    if market == "total_goals":
+        side = _format_total_goals_side(pick)
+    else:
+        side = {"home": g.team_home, "draw": "Empate", "away": g.team_away}.get(
+            getattr(pick, "pick", None), "—"
+        )
+
+    msg = f"💡 <b>ANÁLISE</b>\n"
+    msg += f"├ Aposta: <b>{side}</b>\n"
+    msg += f"├ Odd: <b>{pick_odd:.2f}</b>\n"
+    msg += f"├ Probabilidade: <b>{prob*100:.0f}%</b>\n"
+    msg += f"├ Valor esperado: <b>{ev*100:+.1f}%</b>\n"
+    msg += f"└ Confiança: <b>{confidence_level}</b>\n"
+
+    if pick_reason and pick_reason not in ["EV positivo", "Favorito claro"]:
+        msg += f"\n💭 <i>{pick_reason}</i>\n"
+
+    return msg
+
+
+def fmt_pick_now_v2(game, pick) -> str:
+    """Renderiza palpite pra envio ao Telegram, agnóstico de mercado.
+
+    Header: jogo, odds 1x2, horário (igual ao fmt_pick_now atual).
+    Bloco específico: depende de pick.market.
+      - 'match_result': bloco com lado (Casa/Empate/Fora), odd, prob, EV, motivo.
+      - 'total_goals': bloco com linha (Mais/Menos de X.X gols), odd, prob, EV, motivo.
+
+    `pick` é uma instância de Pick (ORM) ou SimpleNamespace com os mesmos campos
+    (market, line, pick, pick_prob, pick_ev, pick_odd, pick_reason).
+    """
+    msg = _render_pick_header(game)
+    msg += _render_pick_block(game, pick)
+    msg += "\n━━━━━━━━━━━━━━━━━━━━"
+    return msg
+
+
+def fmt_pick_now(g: Game) -> str:
+    """[DEPRECATED — preferir fmt_pick_now_v2(game, pick)]
+    Backward-compat: pega o Pick de match_result do game (ou cria um proxy a partir
+    dos campos legados de Game.pick/pick_prob/pick_ev) e chama fmt_pick_now_v2.
+    """
+    pick = _get_match_result_pick_or_proxy(g)
+    return fmt_pick_now_v2(g, pick)
+
+
+def _picks_for_results(g):
+    """Retorna lista de picks pra exibir em resultados.
+    Prefere `g.picks` (multi-mercado). Fallback: proxy de match_result via Game."""
+    if hasattr(g, "picks") and g.picks:
+        picks = list(g.picks)
+        order = {"match_result": 0, "total_goals": 1}
+        picks.sort(key=lambda p: order.get(getattr(p, "market", ""), 99))
+        return picks
+    if g.pick:
+        return [_get_match_result_pick_or_proxy(g)]
+    return []
+
+
+def _pick_label_for_results(g, pick) -> str:
+    """Texto curto identificando o pick (ex: 'Resultado Final', 'Mais de 2.5')."""
+    market = getattr(pick, "market", "match_result") or "match_result"
+    if market == "total_goals":
+        return _format_total_goals_side(pick)
+    return "Resultado Final"
+
+
+def _pick_outcome_str(g, pick) -> str:
+    """Resultado real legível pro pick."""
+    market = getattr(pick, "market", "match_result") or "match_result"
+    outcome = getattr(pick, "outcome", None)
+    if market == "total_goals":
+        if outcome == "over":
+            line = pick.line
+            return f"Mais de {float(line):.1f} gols" if line is not None else "Acima"
+        if outcome == "under":
+            line = pick.line
+            return f"Menos de {float(line):.1f} gols" if line is not None else "Abaixo"
+        # Fallback: derivar do placar final
+        if g.final_score_home is not None and g.final_score_away is not None and pick.line is not None:
+            total = (g.final_score_home or 0) + (g.final_score_away or 0)
+            return f"{total} gols"
+        return "—"
+    # match_result
+    pick_map = {"home": g.team_home, "draw": "Empate", "away": g.team_away}
+    return pick_map.get(outcome or g.outcome, (outcome or g.outcome or "—"))
+
+
 def fmt_results_batch(games: List[Game], date_local: datetime = None) -> str:
-    """Mensagem única (HTML) listando resultados de vários jogos (pick e resultado real)."""
+    """Mensagem única (HTML) listando resultados de vários jogos.
+
+    Itera `game.picks` (nível Pick). Fallback retrocompat: usa Game.hit pra games
+    sem picks na tabela. Mostra cada pick com seu próprio status.
+    """
     if date_local is None:
         date_local = datetime.now(ZONE)
     dstr = date_local.strftime("%d/%m/%Y")
     msg = f"📊 <b>RESULTADOS DAS APOSTAS</b>\n"
     msg += f"<i>{dstr}</i>\n"
     msg += "━━━━━━━━━━━━━━━━━━━━\n\n"
-    total = len(games)
-    hits = sum(1 for g in games if getattr(g, 'hit', None) is True)
-    misses = sum(1 for g in games if getattr(g, 'hit', None) is False)
+
+    # Conta hits/misses a nível Pick (com fallback a Game.hit pra retrocompat)
+    total = 0
+    hits = 0
+    misses = 0
+    for g in games:
+        picks = _picks_for_results(g)
+        if picks:
+            for p in picks:
+                hit = getattr(p, "hit", None)
+                # Para proxy/legado, o hit do proxy não tem campo — usar g.hit
+                if hit is None and getattr(p, "market", "") == "match_result":
+                    hit = g.hit
+                if hit is True:
+                    hits += 1
+                    total += 1
+                elif hit is False:
+                    misses += 1
+                    total += 1
+        else:
+            if g.hit is True:
+                hits += 1
+                total += 1
+            elif g.hit is False:
+                misses += 1
+                total += 1
+
     acc = (hits / total * 100) if total else 0
     msg += f"📈 <b>RESUMO</b>\n"
     msg += f"├ Total: <b>{total}</b>\n"
     msg += f"├ ✅ Acertos: <b>{hits}</b>\n"
     msg += f"├ ❌ Erros: <b>{misses}</b>\n"
     msg += f"└ Assertividade: <b>{acc:.0f}%</b>\n\n"
+
     # Ordena por horário
-    games_sorted = sorted(games, key=lambda g: g.start_time or datetime(1970,1,1))
+    games_sorted = sorted(games, key=lambda g: g.start_time or datetime(1970, 1, 1))
     for idx, g in enumerate(games_sorted, 1):
         hhmm = (g.start_time.astimezone(ZONE).strftime("%H:%M") if g.start_time else "--:--")
-        pick_map = {"home": g.team_home, "draw": "Empate", "away": g.team_away}
-        pick_str = pick_map.get(g.pick, g.pick or "—")
-        outcome_str = pick_map.get(g.outcome, g.outcome or "—")
-        odd = 0.0
-        if g.pick == "home":
-            odd = float(g.odds_home or 0.0)
-        elif g.pick == "draw":
-            odd = float(g.odds_draw or 0.0)
-        elif g.pick == "away":
-            odd = float(g.odds_away or 0.0)
-        status_emoji = "✅" if g.hit else ("❌" if g.hit is False else "ℹ️")
-        status_text = "ACERTOU" if g.hit else ("ERROU" if g.hit is False else "SEM VERIFICAÇÃO")
-        msg += f"{status_emoji} <b>{idx}.</b> <b>{esc(g.team_home)}</b> vs <b>{esc(g.team_away)}</b>\n"
-        msg += f"   🕐 {hhmm}h | Pick: <b>{esc(pick_str)}</b> @ {odd:.2f}\n"
-        msg += f"   📊 Resultado real: <b>{esc(outcome_str)}</b> | {status_text}\n\n"
+        picks = _picks_for_results(g)
+
+        # Linhas por pick (label + emoji + resultado real)
+        pick_lines = []
+        if picks:
+            for p in picks:
+                hit = getattr(p, "hit", None)
+                if hit is None and getattr(p, "market", "") == "match_result":
+                    hit = g.hit
+                pick_odd = float(getattr(p, "pick_odd", 0) or 0.0)
+                label = _pick_label_for_results(g, p)
+                emoji = "✅" if hit is True else ("❌" if hit is False else "ℹ️")
+                pick_lines.append(f"{label} @ {pick_odd:.2f} {emoji}")
+        else:
+            # Fallback total — só Game.hit
+            pick_map = {"home": g.team_home, "draw": "Empate", "away": g.team_away}
+            pick_str = pick_map.get(g.pick, g.pick or "—")
+            odd = 0.0
+            if g.pick == "home":
+                odd = float(g.odds_home or 0.0)
+            elif g.pick == "draw":
+                odd = float(g.odds_draw or 0.0)
+            elif g.pick == "away":
+                odd = float(g.odds_away or 0.0)
+            emoji = "✅" if g.hit is True else ("❌" if g.hit is False else "ℹ️")
+            pick_lines.append(f"{esc(pick_str)} @ {odd:.2f} {emoji}")
+
+        # Emoji macro do jogo: ✅ se todos acertaram, ❌ se algum errou, ℹ️ se nada verificado
+        statuses = []
+        if picks:
+            for p in picks:
+                hit = getattr(p, "hit", None)
+                if hit is None and getattr(p, "market", "") == "match_result":
+                    hit = g.hit
+                statuses.append(hit)
+        else:
+            statuses.append(g.hit)
+
+        if any(s is False for s in statuses):
+            macro_emoji = "❌"
+        elif any(s is True for s in statuses) and all(s is True for s in statuses if s is not None):
+            macro_emoji = "✅"
+        elif all(s is None for s in statuses):
+            macro_emoji = "ℹ️"
+        else:
+            macro_emoji = "⚠️"
+
+        msg += f"{macro_emoji} <b>{idx}.</b> <b>{esc(g.team_home)}</b> vs <b>{esc(g.team_away)}</b>\n"
+        msg += f"   🕐 {hhmm}h\n"
+        msg += "   " + " | ".join(pick_lines) + "\n\n"
+
     return msg
 
 
+def _render_reminder_pick_line(g, pick) -> str:
+    """Linha de pick dentro do lembrete (1 bloco por pick)."""
+    market = getattr(pick, "market", "match_result") or "match_result"
+    prob = float(getattr(pick, "pick_prob", 0) or 0.0)
+    ev = float(getattr(pick, "pick_ev", 0) or 0.0)
+    pick_odd = float(getattr(pick, "pick_odd", 0) or 0.0)
+
+    if market == "total_goals":
+        side = _format_total_goals_side(pick)
+    else:
+        side = {"home": g.team_home, "draw": "Empate", "away": g.team_away}.get(
+            getattr(pick, "pick", None), "—"
+        )
+
+    return (
+        f"🎯 Pick: <b>{esc(side)}</b> @ {pick_odd:.2f}\n"
+        f"📈 Prob.: <b>{prob*100:.0f}%</b> | EV: <b>{ev*100:+.1f}%</b>"
+    )
+
+
 def fmt_reminder(g: Game) -> str:
-    """Lembrete T-15 min antes do início do jogo."""
+    """Lembrete T-15 min antes do início do jogo.
+
+    Lista TODOS os picks ativos (will_bet=True) do game. Se 0 picks ativos,
+    retorna lembrete simples sem palpite. Se 2 picks: 2 blocos separados.
+    Fallback: se game.picks vazio, usa proxy de Game (igual fmt_pick_now).
+    """
     hhmm = g.start_time.astimezone(ZONE).strftime("%H:%M")
-    side = {"home": g.team_home, "draw": "Empate", "away": g.team_away}.get(g.pick, "—")
-
-    # Odd correta do lado escolhido
-    pick_odd = 0.0
-    if g.pick == "home":
-        pick_odd = g.odds_home or 0.0
-    elif g.pick == "draw":
-        pick_odd = g.odds_draw or 0.0
-    elif g.pick == "away":
-        pick_odd = g.odds_away or 0.0
-
     odds_home = float(g.odds_home or 0.0)
     odds_away = float(g.odds_away or 0.0)
     odds_draw = float(g.odds_draw or 0.0)
-    
-    return (
+
+    msg = (
         "🔔 <b>Lembrete</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
         f"⚽ <b>{esc(g.team_home)}</b> vs <b>{esc(g.team_away)}</b>\n"
@@ -249,9 +450,16 @@ def fmt_reminder(g: Game) -> str:
         f"├ {esc(g.team_home)}: <b>{odds_home:.2f}</b>\n"
         f"├ Empate: <b>{odds_draw:.2f}</b>\n"
         f"└ {esc(g.team_away)}: <b>{odds_away:.2f}</b>\n\n"
-        f"🎯 Pick: <b>{esc(side)}</b> @ {pick_odd:.2f}\n"
-        f"📈 Prob.: <b>{(g.pick_prob or 0)*100:.0f}%</b> | EV: <b>{(g.pick_ev or 0)*100:+.1f}%</b>"
     )
+
+    active = _get_active_picks_or_proxy(g)
+    if not active:
+        msg += "ℹ️ <i>Sem palpite ativo para este jogo.</i>"
+        return msg
+
+    blocks = [_render_reminder_pick_line(g, p) for p in active]
+    msg += ("\n\n").join(blocks) if len(blocks) > 1 else blocks[0]
+    return msg
 
 
 def fmt_watch_add(ev, ev_date_local: datetime, best_ev: float, pprob: float) -> str:
@@ -280,16 +488,40 @@ def fmt_watch_add(ev, ev_date_local: datetime, best_ev: float, pprob: float) -> 
     return msg
 
 
+def _render_upgrade_pick_block(g, pick) -> str:
+    """Bloco interno do upgrade para 1 pick (suporta total_goals)."""
+    market = getattr(pick, "market", "match_result") or "match_result"
+    prob = float(getattr(pick, "pick_prob", 0) or 0.0)
+    ev = float(getattr(pick, "pick_ev", 0) or 0.0)
+    pick_odd = float(getattr(pick, "pick_odd", 0) or 0.0)
+
+    if market == "total_goals":
+        side = _format_total_goals_side(pick)
+    else:
+        side = {"home": g.team_home, "draw": "Empate", "away": g.team_away}.get(
+            getattr(pick, "pick", None), "—"
+        )
+
+    block = f"✨ <b>ODDS MELHORARAM!</b>\n"
+    block += f"├ Nova aposta: <b>{side}</b> @ {pick_odd:.2f}\n"
+    block += f"├ Probabilidade: <b>{prob*100:.0f}%</b>\n"
+    block += f"└ Valor esperado: <b>{ev*100:+.1f}%</b>\n"
+    return block
+
+
 def fmt_watch_upgrade(g: Game) -> str:
-    """Formatação elegante para upgrade da watchlist"""
+    """Formatação elegante para upgrade da watchlist.
+
+    Suporta múltiplos picks (match_result + total_goals). Fallback retrocompat
+    se game.picks vazio: usa proxy de Game.
+    """
     hhmm = g.start_time.astimezone(ZONE).strftime("%H:%M")
-    side = {"home": g.team_home, "draw": "Empate", "away": g.team_away}.get(g.pick, "—")
-    
+
     msg = f"⬆️ <b>UPGRADE - WATCHLIST → PICK</b>\n"
     msg += "━━━━━━━━━━━━━━━━━━━━\n\n"
     msg += f"⚽ <b>{g.team_home}</b> vs <b>{g.team_away}</b>\n"
     msg += f"🕐 Início: {hhmm}h\n\n"
-    
+
     # Odds dos dois times
     odds_home = float(g.odds_home or 0.0)
     odds_away = float(g.odds_away or 0.0)
@@ -298,22 +530,17 @@ def fmt_watch_upgrade(g: Game) -> str:
     msg += f"├ {g.team_home}: <b>{odds_home:.2f}</b>\n"
     msg += f"├ Empate: <b>{odds_draw:.2f}</b>\n"
     msg += f"└ {g.team_away}: <b>{odds_away:.2f}</b>\n\n"
-    
-    # Calcula odd do pick
-    pick_odd = 0.0
-    if g.pick == "home":
-        pick_odd = odds_home
-    elif g.pick == "draw":
-        pick_odd = odds_draw
-    elif g.pick == "away":
-        pick_odd = odds_away
-    
-    msg += f"✨ <b>ODDS MELHORARAM!</b>\n"
-    msg += f"├ Nova aposta: <b>{side}</b> @ {pick_odd:.2f}\n"
-    msg += f"├ Probabilidade: <b>{g.pick_prob*100:.0f}%</b>\n"
-    msg += f"└ Valor esperado: <b>{g.pick_ev*100:+.1f}%</b>\n"
+
+    active = _get_active_picks_or_proxy(g)
+    if not active:
+        # Fallback completo legado
+        pick = _get_match_result_pick_or_proxy(g)
+        msg += _render_upgrade_pick_block(g, pick)
+    else:
+        blocks = [_render_upgrade_pick_block(g, p) for p in active]
+        msg += "\n".join(blocks)
+
     msg += f"\n💚 <i>Agora atende aos critérios de aposta!</i>"
-    
     return msg
 
 
@@ -773,47 +1000,118 @@ def format_night_scan_summary(date: datetime, analyzed: int, games: List[Dict[st
     return msg
 
 
+def _count_picks_by_market(games):
+    """Conta hits/misses por mercado em uma lista de games.
+    Fallback retrocompat: games sem `picks` populados caem em 'match_result' via Game.hit.
+    Retorna dict: {'match_result': {'hits': X, 'total': Y}, 'total_goals': {...}}."""
+    counts = {"match_result": {"hits": 0, "total": 0}, "total_goals": {"hits": 0, "total": 0}}
+    for g in games:
+        picks_attr = getattr(g, "picks", None)
+        if picks_attr:
+            for p in picks_attr:
+                market = getattr(p, "market", "match_result") or "match_result"
+                if market not in counts:
+                    counts[market] = {"hits": 0, "total": 0}
+                hit = getattr(p, "hit", None)
+                if hit is None:
+                    continue
+                counts[market]["total"] += 1
+                if hit is True:
+                    counts[market]["hits"] += 1
+        else:
+            # Fallback Game.hit em match_result
+            if g.hit is None:
+                continue
+            counts["match_result"]["total"] += 1
+            if g.hit is True:
+                counts["match_result"]["hits"] += 1
+    return counts
+
+
 def fmt_daily_summary(session, date_local: datetime = None) -> str:
     """
     Formata resumo diário completo com todos os jogos finalizados do dia.
-    Inclui assertividade do dia e comparação com lifetime.
+    Inclui assertividade do dia (separada por mercado quando há picks de gols)
+    e comparação com lifetime.
     """
     if date_local is None:
         date_local = datetime.now(ZONE)
-    
+
     summary = get_daily_summary(session, date_local)
     lifetime = get_lifetime_accuracy(session)
-    
+
     dstr = date_local.strftime("%d/%m/%Y")
     day_name = ["Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado", "Domingo"][date_local.weekday()]
-    
+
     msg = f"📊 <b>RESUMO DO DIA</b>\n"
     msg += f"<i>{day_name}, {dstr}</i>\n"
     msg += "━━━━━━━━━━━━━━━━━━━━\n\n"
-    
+
     # Estatísticas do dia
     msg += f"📈 <b>ESTATÍSTICAS DO DIA</b>\n"
     msg += f"├ Total de jogos: <b>{summary['total_games']}</b>\n"
     msg += f"├ Verificados: <b>{summary['verified_games']}</b>\n"
-    
+
     if summary['unverified_games'] > 0:
         msg += f"├ Não verificados: <b>{summary['unverified_games']}</b>\n"
-    
+
     msg += f"├ ✅ Acertos: <b>{summary['hits']}</b>\n"
     msg += f"├ ❌ Erros: <b>{summary['misses']}</b>\n"
     msg += f"└ Assertividade: <b>{summary['accuracy']:.1f}%</b>\n\n"
-    
+
+    # Separação por mercado (só mostra total_goals se houver pick desse mercado no dia)
+    market_counts = _count_picks_by_market(summary['games'])
+    has_total_goals = market_counts.get("total_goals", {}).get("total", 0) > 0
+    if has_total_goals:
+        mr = market_counts["match_result"]
+        tg = market_counts["total_goals"]
+        msg += f"🎯 <b>POR MERCADO</b>\n"
+        msg += f"├ Resultado Final: <b>{mr['hits']}/{mr['total']}</b>\n"
+        msg += f"└ Mais/Menos: <b>{tg['hits']}/{tg['total']}</b>\n\n"
+
     # Lista de jogos do dia
     if summary['games']:
         msg += f"⚽ <b>JOGOS DO DIA</b>\n\n"
         for g in summary['games']:
-            emoji = "✅" if g.hit else "❌"
-            outcome_map = {"home": g.team_home, "draw": "Empate", "away": g.team_away}
-            pick_map = {"home": g.team_home, "draw": "Empate", "away": g.team_away}
-            
             hhmm = g.start_time.astimezone(ZONE).strftime("%H:%M")
-            msg += f"{emoji} <b>{g.team_home}</b> vs <b>{g.team_away}</b>\n"
-            msg += f"   🕐 {hhmm}h | Palpite: {pick_map.get(g.pick, g.pick)} | Resultado: {outcome_map.get(g.outcome, g.outcome or '—')}\n\n"
+            picks = _picks_for_results(g)
+
+            # Emoji macro do jogo
+            statuses = []
+            if picks:
+                for p in picks:
+                    hit = getattr(p, "hit", None)
+                    if hit is None and getattr(p, "market", "") == "match_result":
+                        hit = g.hit
+                    statuses.append(hit)
+            else:
+                statuses.append(g.hit)
+            if any(s is False for s in statuses):
+                macro_emoji = "❌"
+            elif statuses and all(s is True for s in statuses if s is not None):
+                macro_emoji = "✅"
+            else:
+                macro_emoji = "ℹ️"
+
+            msg += f"{macro_emoji} <b>{g.team_home}</b> vs <b>{g.team_away}</b>\n"
+            msg += f"   🕐 {hhmm}h"
+
+            if picks:
+                pick_lines = []
+                for p in picks:
+                    hit = getattr(p, "hit", None)
+                    if hit is None and getattr(p, "market", "") == "match_result":
+                        hit = g.hit
+                    label = _pick_label_for_results(g, p)
+                    result_str = _pick_outcome_str(g, p)
+                    pemoji = "✅" if hit is True else ("❌" if hit is False else "ℹ️")
+                    pick_lines.append(f"{label} → {result_str} {pemoji}")
+                msg += " | " + " | ".join(pick_lines) + "\n\n"
+            else:
+                # Fallback legado
+                pick_map = {"home": g.team_home, "draw": "Empate", "away": g.team_away}
+                outcome_map = pick_map
+                msg += f" | Palpite: {pick_map.get(g.pick, g.pick)} | Resultado: {outcome_map.get(g.outcome, g.outcome or '—')}\n\n"
     
     # Comparação com lifetime
     if lifetime['total'] > 0:

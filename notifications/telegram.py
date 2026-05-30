@@ -109,3 +109,80 @@ def h(b: str) -> str:
     """Helper para texto em negrito HTML."""
     return f"<b>{b}</b>"
 
+
+def send_pick_message(game, pick) -> None:
+    """
+    Envia notificação de UM pick específico ao Telegram, via buffer.
+
+    Renderiza usando fmt_pick_now_v2(game, pick) e envia via buffer existente
+    (mesmo mecanismo de send_pick_with_buffer — message_type='pick_now').
+
+    Se pick.notified_at já está setado, NÃO reenvia (idempotência).
+    Não comita session — só envia mensagem.
+    """
+    # Idempotência: não reenvia se já notificado
+    if getattr(pick, "notified_at", None) is not None:
+        return
+
+    # Import lazy pra evitar circular (e tolerar formatters em produção paralela)
+    from utils.formatters import fmt_pick_now_v2
+    from utils.telegram_message_buffer import add_to_buffer
+
+    text = fmt_pick_now_v2(game, pick)
+
+    metadata = {
+        "team_home": getattr(game, "team_home", None),
+        "team_away": getattr(game, "team_away", None),
+        "market": getattr(pick, "market", None),
+        "line": getattr(pick, "line", None),
+        "pick_id": getattr(pick, "id", None),
+    }
+
+    buffered = add_to_buffer(
+        message_type="pick_now",
+        content=text,
+        game_id=getattr(game, "id", None),
+        ext_id=getattr(game, "ext_id", None),
+        metadata=metadata,
+    )
+
+    if not buffered:
+        # Buffer não aceitou — envia imediatamente
+        tg_send_message(
+            text,
+            message_type="pick_now",
+            game_id=getattr(game, "id", None),
+            ext_id=getattr(game, "ext_id", None),
+        )
+
+
+def send_picks_for_game(game, session) -> int:
+    """
+    Envia mensagem(s) Telegram pra cada pick will_bet=True do game que ainda
+    não foi notificado.
+
+    Ordem garantida: match_result primeiro (se houver), total_goals depois.
+
+    Retorna count de mensagens enfileiradas.
+
+    Não comita — só flush via mark_pick_notified.
+    """
+    from utils.notification_tracker import should_notify_pick, mark_pick_notified
+
+    count = 0
+    if not hasattr(game, "picks") or not game.picks:
+        return 0
+
+    # Ordenação: match_result primeiro, depois total_goals (ou demais)
+    ordered = sorted(game.picks, key=lambda p: 0 if p.market == "match_result" else 1)
+
+    for pick in ordered:
+        ok, _reason = should_notify_pick(pick, check_high_conf=True)
+        if not ok:
+            continue
+        send_pick_message(game, pick)
+        mark_pick_notified(pick, session)
+        count += 1
+
+    return count
+

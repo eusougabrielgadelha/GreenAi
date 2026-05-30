@@ -16,11 +16,11 @@ from utils.stats import to_aware_utc, save_odd_history
 from models.database import Game, SessionLocal
 from scraping.fetchers import fetch_events_from_link
 from scraping.betnacional import parse_local_datetime
-from betting.decision import decide_bet
+from betting.decision import decide_bet, fetch_and_decide_picks, _is_total_goals_picks_enabled
 from notifications.telegram import tg_send_message
 from utils.formatters import fmt_pick_now, fmt_dawn_games_summary, fmt_today_games_summary
 from watchlist.manager import wl_add
-from scheduler.jobs import scheduler
+from scheduler.jobs import scheduler, fetch_events_smart
 
 
 async def scan_games_for_date(
@@ -51,7 +51,7 @@ async def scan_games_for_date(
         for url in get_all_betting_links():
             evs: List[Any] = []
             try:
-                evs = await fetch_events_from_link(url, backend_cfg)
+                evs = await fetch_events_smart(url, backend_cfg)
             except Exception as e:
                 logger.warning("Falha ao buscar %s: %s", url, e)
                 continue
@@ -70,29 +70,12 @@ async def scan_games_for_date(
                     if ev_date_local != analysis_date_local:
                         continue
                     
-                    will, pick, pprob, pev, reason = decide_bet(
-                        ev.odds_home, ev.odds_draw, ev.odds_away,
-                        ev.competition, (ev.team_home, ev.team_away)
-                    )
-                    
-                    free_pass = is_high_conf(pprob)
-                    
-                    # Se flag ONLY_HIGH_CONF_GAMES estiver ativa, apenas seleciona alta confiança
-                    if ONLY_HIGH_CONF_GAMES:
-                        should_save = free_pass  # Apenas alta confiança
-                        if free_pass and not will:
-                            reason = (reason or "Apenas alta confiança") + " | HIGH_CONF_ONLY"
-                    else:
-                        # Comportamento normal: seleciona se will=True ou alta confiança
-                        should_save = will or free_pass
-                    
-                    # SALVAR TODOS OS JOGOS NO BANCO (mesmo os não selecionados)
-                    # Isso garante que o sistema tenha histórico completo e possa recuperar após reiniciar
-                    
-                    # Upsert do jogo (salva sempre, mas will_bet só é True se selecionado)
+                    # Upsert do Game primeiro (sem campos de pick), depois roda decide_picks
+                    # com fetch detalhado se ENABLE_TOTAL_GOALS_PICKS=true. Os campos legados
+                    # de pick (g.pick, pick_prob, pick_ev, pick_reason, will_bet) serão
+                    # preenchidos via mirror_match_result_to_game dentro de fetch_and_decide_picks.
                     g = session.query(Game).filter_by(ext_id=ev.ext_id, start_time=start_utc).one_or_none()
                     if g:
-                        # Atualiza jogo existente
                         g.source_link = url
                         g.game_url = getattr(ev, "game_url", None) or g.game_url
                         g.competition = ev.competition or g.competition
@@ -101,20 +84,9 @@ async def scan_games_for_date(
                         g.odds_home = ev.odds_home
                         g.odds_draw = ev.odds_draw
                         g.odds_away = ev.odds_away
-                        g.pick = pick
-                        g.pick_prob = pprob
-                        g.pick_ev = pev
-                        g.pick_reason = reason
-                        # Atualiza will_bet se agora foi selecionado
-                        if should_save:
-                            g.will_bet = True
-                        # Se já estava marcado como will_bet=True, mantém
-                        # Preserva status se já for "live" ou "ended"
                         if g.status not in ("live", "ended"):
                             g.status = "live" if getattr(ev, "is_live", False) else "scheduled"
-                        session.commit()
                     else:
-                        # Cria novo jogo (sempre salva, mesmo se não selecionado)
                         g = Game(
                             ext_id=ev.ext_id,
                             source_link=url,
@@ -127,38 +99,58 @@ async def scan_games_for_date(
                             odds_home=ev.odds_home,
                             odds_draw=ev.odds_draw,
                             odds_away=ev.odds_away,
-                            pick=pick,
-                            pick_prob=pprob,
-                            pick_ev=pev,
-                            will_bet=should_save,  # True se selecionado, False caso contrário
-                            pick_reason=reason,
                             status="live" if getattr(ev, "is_live", False) else "scheduled",
                         )
                         session.add(g)
                         try:
-                            session.commit()
+                            session.flush()
                         except IntegrityError:
                             session.rollback()
-                            # Se falhou por constraint único, tenta atualizar
                             g = session.query(Game).filter_by(ext_id=ev.ext_id, start_time=start_utc).one_or_none()
-                            if g:
-                                g.source_link = url
-                                g.game_url = getattr(ev, "game_url", None) or g.game_url
-                                g.competition = ev.competition or g.competition
-                                g.country = getattr(ev, "country", None) or g.country
-                                g.team_home = ev.team_home or g.team_home
-                                g.team_away = ev.team_away or g.team_away
-                                g.odds_home = ev.odds_home
-                                g.odds_draw = ev.odds_draw
-                                g.odds_away = ev.odds_away
-                                g.pick = pick
-                                g.pick_prob = pprob
-                                g.pick_ev = pev
-                                g.pick_reason = reason
-                                if should_save:
-                                    g.will_bet = True
-                                session.commit()
-                            continue
+                            if not g:
+                                continue
+                            g.source_link = url
+                            g.game_url = getattr(ev, "game_url", None) or g.game_url
+                            g.competition = ev.competition or g.competition
+                            g.country = getattr(ev, "country", None) or g.country
+                            g.team_home = ev.team_home or g.team_home
+                            g.team_away = ev.team_away or g.team_away
+                            g.odds_home = ev.odds_home
+                            g.odds_draw = ev.odds_draw
+                            g.odds_away = ev.odds_away
+
+                    # Decisão multi-market (1x2 sempre + total_goals atrás de feature flag)
+                    picks_list = await fetch_and_decide_picks(
+                        session, g, ev,
+                        decision_source="scanner",
+                        use_full_markets=_is_total_goals_picks_enabled(),
+                    )
+                    match_pick = next((p for p in picks_list if p.market == "match_result"), None)
+                    will = bool(match_pick.will_bet) if match_pick else False
+                    pick = match_pick.pick if match_pick else ""
+                    pprob = float(match_pick.pick_prob or 0.0) if match_pick else 0.0
+                    pev = float(match_pick.pick_ev or 0.0) if match_pick else 0.0
+                    reason = match_pick.pick_reason if match_pick else ""
+
+                    free_pass = is_high_conf(pprob)
+
+                    # Se flag ONLY_HIGH_CONF_GAMES estiver ativa, apenas seleciona alta confiança
+                    if ONLY_HIGH_CONF_GAMES:
+                        should_save = free_pass  # Apenas alta confiança
+                        if free_pass and not will:
+                            reason = (reason or "Apenas alta confiança") + " | HIGH_CONF_ONLY"
+                    else:
+                        # Comportamento normal: seleciona se will=True ou alta confiança
+                        should_save = will or free_pass
+
+                    # Atualiza will_bet legado se foi selecionado (mantém True se já era True)
+                    if should_save:
+                        g.will_bet = True
+                    elif g.will_bet is None:
+                        g.will_bet = False
+                    if reason:
+                        g.pick_reason = reason
+                    session.commit()
                     
                     # Se não foi selecionado, adiciona à watchlist se próximo do threshold
                     if not should_save:
@@ -210,28 +202,23 @@ async def scan_games_for_date(
                         g.team_home, g.team_away, g.pick, g.pick_prob * 100, g.pick_ev * 100
                     )
                     
-                    # Envio imediato do sinal (APENAS alta confiança) - usando banco de dados para rastrear
+                    # Envio per-pick: send_picks_for_game filtra picks individualmente
+                    # (gate de high_conf agora aplica por pick, não por jogo inteiro).
                     try:
-                        from utils.notification_tracker import should_notify_pick, mark_pick_notified
-                        
-                        should_notify, reason = should_notify_pick(g, check_high_conf=True)
-                        
-                        if should_notify:
-                            from utils.telegram_helpers import send_pick_with_buffer
-                            send_pick_with_buffer(g)
-                            # Marca como notificado no banco de dados (persiste após reiniciar)
-                            mark_pick_notified(g, session)
-                            # Mantém compatibilidade com sistema antigo (pick_reason)
-                            g.pick_reason = mark_high_conf_notified(g.pick_reason or "")
-                            session.commit()
-                            logger.info(f"✅ Palpite notificado para jogo {g.id} ({g.ext_id}) - {g.team_home} vs {g.team_away}")
-                        else:
-                            # Registra que o sinal foi suprimido
-                            from utils.analytics_logger import log_signal_suppression
-                            log_signal_suppression(g.ext_id, reason, g.pick_prob or 0.0, g.pick_ev or 0.0, game_id=g.id)
-                            logger.debug(f"⏭️  Palpite suprimido para jogo {g.id}: {reason}")
-                    except Exception:
-                        logger.exception("Falha ao enviar sinal imediato do jogo id=%s", g.id)
+                        from notifications.telegram import send_picks_for_game
+                        sent_count = send_picks_for_game(g, session)
+                    except Exception as exc:
+                        logger.exception("Falha em send_picks_for_game (scanner imediato) id=%s: %s", g.id, exc)
+                        sent_count = 0
+
+                    if sent_count > 0:
+                        g.pick_reason = mark_high_conf_notified(g.pick_reason or "")
+                        session.commit()
+                        logger.info(f"✅ Palpite notificado para jogo {g.id} ({g.ext_id}) - {g.team_home} vs {g.team_away} — sent={sent_count}")
+                    else:
+                        from utils.analytics_logger import log_signal_suppression
+                        log_signal_suppression(g.ext_id, "Nenhum pick passou o gate per-pick", g.pick_prob or 0.0, g.pick_ev or 0.0, game_id=g.id)
+                        logger.debug(f"⏭️  Nenhum pick passou o gate (scanner imediato) para jogo {g.id}")
                     
                     # Agenda lembretes e watchers
                     from scheduler.jobs import _schedule_all_for_game

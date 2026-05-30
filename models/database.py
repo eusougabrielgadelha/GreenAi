@@ -107,14 +107,61 @@ class OddHistory(Base):
     odds_home = Column(Float)
     odds_draw = Column(Float)
     odds_away = Column(Float)
+    # Multi-market support (additive — campos 1x2 acima mantidos pra compat)
+    market = Column(String, nullable=True, index=True)   # 'match_result'|'total_goals'|'btts'|...
+    option = Column(String, nullable=True)               # 'home'|'draw'|'away'|'Mais de 2.5'|'Menos de 2.5'|'Sim'|'Não'
+    line = Column(Float, nullable=True)                  # 0.5/1.5/2.5/3.5 quando aplicável
+    odd_value = Column(Float, nullable=True)             # odd snapshot
     created_at = Column(DateTime, server_default=func.now())
-    
+
     # Relacionamentos
     game = relationship("Game", back_populates="odd_history")
-    
+
     __table_args__ = (
         Index('idx_odd_history_ext_id', 'ext_id'),
         Index('idx_odd_history_timestamp', 'timestamp'),
+        Index('idx_odd_history_market_option', 'game_id', 'market', 'option', 'line'),
+    )
+
+
+class Pick(Base):
+    __tablename__ = "picks"
+
+    id = Column(Integer, primary_key=True)
+    game_id = Column(Integer, ForeignKey('games.id', ondelete='CASCADE'),
+                    nullable=False, index=True)
+
+    market = Column(String, nullable=False)  # 'match_result' | 'total_goals'
+    line = Column(Float, nullable=True)      # null pra match_result; 0.5/1.5/2.5/3.5 pra total_goals
+
+    pick = Column(String, nullable=False)    # 'home'|'draw'|'away' | 'over'|'under'
+    pick_prob = Column(Float)
+    pick_ev = Column(Float)
+    pick_odd = Column(Float)                 # snapshot da odd no momento da decisão
+    pick_reason = Column(Text)
+
+    will_bet = Column(Boolean, default=False, index=True)
+    notified_at = Column(DateTime, nullable=True, index=True)
+
+    outcome = Column(String, nullable=True)  # 'home'|'draw'|'away'|'over'|'under'|'void'
+    hit = Column(Boolean, nullable=True)
+    result_verified_at = Column(DateTime, nullable=True)
+
+    decision_source = Column(String, nullable=True)   # 'scanner'|'night_scan'|'hourly_rescan'|'watchlist_upgrade'|'backfill'
+    decision_metadata = Column(JSON, nullable=True)
+
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, onupdate=func.now())
+
+    game = relationship("Game", backref="picks")
+
+    __table_args__ = (
+        Index('idx_pick_game', 'game_id'),
+        Index('idx_pick_market', 'market'),
+        Index('idx_pick_will_bet', 'will_bet'),
+        Index('idx_pick_notified', 'notified_at'),
+        Index('idx_pick_hit', 'hit'),
+        UniqueConstraint('game_id', 'market', 'line', name='uq_pick_game_market_line'),
     )
 
 
@@ -223,6 +270,60 @@ def _safe_migrate_metadata_column():
             pass  # Ignora erro se não conseguir migrar
 
 
+def _backfill_picks_from_games():
+    """One-shot backfill. Cada Game com pick 1x2 vira 1 Pick(market='match_result').
+    Idempotente via Stat key 'picks_backfill_v1_done'."""
+    from sqlalchemy.exc import IntegrityError
+    with SessionLocal() as s:
+        flag = s.query(Stat).filter_by(key="picks_backfill_v1_done").one_or_none()
+        if flag and flag.value is True:
+            return
+
+        games = s.query(Game).filter(Game.pick.isnot(None), Game.pick != "").all()
+        created = 0
+        for g in games:
+            exists = s.query(Pick).filter_by(game_id=g.id, market="match_result", line=None).first()
+            if exists:
+                continue
+            odd_map = {"home": g.odds_home, "draw": g.odds_draw, "away": g.odds_away}
+            p = Pick(
+                game_id=g.id,
+                market="match_result",
+                line=None,
+                pick=g.pick,
+                pick_prob=g.pick_prob,
+                pick_ev=g.pick_ev,
+                pick_odd=odd_map.get(g.pick),
+                pick_reason=g.pick_reason,
+                will_bet=bool(g.will_bet),
+                notified_at=g.pick_notified_at,
+                outcome=g.outcome,
+                hit=g.hit,
+                result_verified_at=g.result_fetched_at,
+                decision_source="backfill",
+            )
+            s.add(p)
+            try:
+                s.flush()
+                created += 1
+            except IntegrityError:
+                s.rollback()
+                continue
+
+        # Marca backfill como concluído
+        flag = s.query(Stat).filter_by(key="picks_backfill_v1_done").one_or_none()
+        if flag:
+            flag.value = True
+        else:
+            s.add(Stat(key="picks_backfill_v1_done", value=True))
+        s.commit()
+        try:
+            from utils.logger import logger
+            logger.info(f"Backfill picks v1: {created} pick(s) criado(s) a partir de Game.")
+        except Exception:
+            pass
+
+
 def init_database():
     """Inicializa o banco de dados criando todas as tabelas e migrações."""
     Base.metadata.create_all(engine)
@@ -247,6 +348,28 @@ def init_database():
     _safe_add_column("games", "country TEXT")
     # Migração: renomear coluna 'metadata' para 'event_metadata' em analytics_events
     _safe_migrate_metadata_column()
+
+    # Migração: tabela picks (multi-market 1:N com Game)
+    Base.metadata.create_all(engine, tables=[Pick.__table__], checkfirst=True)
+
+    # Migração: colunas multi-market em odd_history (additive, mantém 1x2)
+    _safe_add_column("odd_history", "market TEXT")
+    _safe_add_column("odd_history", "option TEXT")
+    _safe_add_column("odd_history", "line REAL")
+    _safe_add_column("odd_history", "odd_value REAL")
+
+    # Índice novo em odd_history pra busca multi-market
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_odd_history_market_option ON odd_history(game_id, market, option, line)"))
+    except Exception:
+        pass
+
+    # Backfill one-shot: Game.pick → Pick(market='match_result')
+    try:
+        _backfill_picks_from_games()
+    except Exception:
+        pass
 
 
 # Inicializa o banco ao importar o módulo

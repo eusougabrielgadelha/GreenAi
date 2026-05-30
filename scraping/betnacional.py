@@ -1710,3 +1710,171 @@ def scrape_live_game_data(html: str, ext_id: str, source_url: str = None) -> Dic
 
     return data
 
+
+# ============================================================
+# API JSON parsers (events-by-seasons + scores)
+# Cookies-aware path: usado por fetch_events_via_api em fetchers.py
+# ============================================================
+
+# Identificadores aceitos pro mercado 1x2 ("Resultado da partida")
+_MATCH_RESULT_MARKET_NAMES = {
+    "Resultado da partida",
+    "Resultado Final",
+    "1x2",
+}
+_MATCH_RESULT_MARKET_IDS = {1, 999133}
+_DRAW_OUTCOME_NAMES = {"Empate", "Draw", "X"}
+
+
+def parse_events_from_api_json(api_response: dict, source_link: str = "") -> list:
+    """
+    Converte resposta da API events-by-seasons em lista de EventDigest.
+
+    Agrupa `api_response['odds']` por event_id e extrai o mercado 1x2 identificando
+    cada outcome por `outcome_name` (mais robusto que outcome_id/outcome_code, que
+    variam entre respostas).
+
+    - outcome_name == home          -> odds_home
+    - outcome_name in {Empate,Draw,X} -> odds_draw
+    - outcome_name == away          -> odds_away
+
+    Se faltar alguma odd 1x2 (mercado suspenso ou incompleto), o evento é pulado.
+    `date_start` é preservado como string (timezone Brasília implícita) para
+    conversão downstream — não localiza aqui.
+
+    Returns:
+        list[SimpleNamespace] compatível com o contrato de EventDigest do sistema.
+    """
+    if not isinstance(api_response, dict):
+        return []
+
+    odds_list = api_response.get("odds") or []
+    if not odds_list:
+        return []
+
+    # Agrupamento: event_id -> dict(meta + odds)
+    events_dict: Dict[int, Dict[str, Any]] = {}
+
+    for o in odds_list:
+        if not isinstance(o, dict):
+            continue
+
+        event_id = o.get("event_id")
+        if not event_id:
+            continue
+
+        # Filtra mercado 1x2 (Resultado da partida)
+        market_name = o.get("market_name") or ""
+        market_id = o.get("market_id")
+        is_1x2 = (
+            market_name in _MATCH_RESULT_MARKET_NAMES
+            or market_id in _MATCH_RESULT_MARKET_IDS
+        )
+        if not is_1x2:
+            continue
+
+        # Ignora mercados suspensos
+        market_status_id = o.get("market_status_id", 1)
+        try:
+            if int(market_status_id) < 0:
+                continue
+        except (TypeError, ValueError):
+            pass
+
+        bucket = events_dict.setdefault(event_id, {
+            "event_id": event_id,
+            "home": o.get("home", "") or "",
+            "away": o.get("away", "") or "",
+            "tournament_name": o.get("tournament_name", "") or "",
+            "category_name": o.get("category_name", "") or "",
+            "date_start": o.get("date_start", "") or "",
+            "is_live": bool(o.get("is_live", 0)),
+            "odds_home": None,
+            "odds_draw": None,
+            "odds_away": None,
+        })
+
+        outcome_name = (o.get("outcome_name") or "").strip()
+        odd_value = o.get("odd")
+        if odd_value is None or not outcome_name:
+            continue
+
+        try:
+            odd_float = float(odd_value)
+        except (ValueError, TypeError):
+            continue
+
+        home_name = bucket["home"]
+        away_name = bucket["away"]
+
+        if outcome_name == home_name:
+            bucket["odds_home"] = odd_float
+        elif outcome_name == away_name:
+            bucket["odds_away"] = odd_float
+        elif outcome_name in _DRAW_OUTCOME_NAMES:
+            bucket["odds_draw"] = odd_float
+        else:
+            # Fallback por outcome_code (1/X/2) caso o nome não bata
+            code = (o.get("outcome_code") or "").strip().upper()
+            if code in ("1", "HOME"):
+                bucket.setdefault("odds_home", odd_float)
+                if bucket["odds_home"] is None:
+                    bucket["odds_home"] = odd_float
+            elif code in ("X", "DRAW"):
+                if bucket["odds_draw"] is None:
+                    bucket["odds_draw"] = odd_float
+            elif code in ("2", "AWAY"):
+                if bucket["odds_away"] is None:
+                    bucket["odds_away"] = odd_float
+
+    events: List[Any] = []
+    for event_id, data in events_dict.items():
+        odds_home = data["odds_home"]
+        odds_draw = data["odds_draw"]
+        odds_away = data["odds_away"]
+
+        # Pula evento com mercado 1x2 incompleto
+        if odds_home is None or odds_draw is None or odds_away is None:
+            logger.debug(
+                f"Evento {event_id} ignorado: 1x2 incompleto "
+                f"(home={odds_home}, draw={odds_draw}, away={odds_away})"
+            )
+            continue
+
+        # URL do jogo: usa convenção existente do sistema
+        game_url = f"https://betnacional.bet.br/event/{event_id}/1/1"
+
+        events.append(NS(
+            ext_id=str(event_id),
+            source_link=source_link,
+            game_url=game_url,
+            competition=data["tournament_name"],
+            country=data["category_name"],
+            team_home=data["home"],
+            team_away=data["away"],
+            start_local_str=data["date_start"],
+            odds_home=odds_home,
+            odds_draw=odds_draw,
+            odds_away=odds_away,
+            is_live=data["is_live"],
+        ))
+
+    return events
+
+
+def parse_live_scores_from_api(api_response: dict) -> dict:
+    """
+    Extrai dict {event_id: score_dict} dos scores ao vivo da resposta da API.
+
+    score_dict preserva os campos originais (home_score, away_score, match_time,
+    period, etc.) — a chamada decide quais usar.
+    """
+    if not isinstance(api_response, dict):
+        return {}
+    scores = api_response.get("scores") or []
+    return {
+        s["event_id"]: s
+        for s in scores
+        if isinstance(s, dict) and "event_id" in s
+    }
+

@@ -5,8 +5,13 @@ Garante que jogos já notificados não sejam notificados novamente, mesmo após 
 from datetime import datetime
 from typing import Optional
 import pytz
-from models.database import Game, SessionLocal
+from models.database import Game, Pick, SessionLocal
 from utils.logger import logger
+
+
+def _is_pick(obj) -> bool:
+    """Detecta se o objeto é um Pick (multi-market) vs Game (legacy)."""
+    return isinstance(obj, Pick) or (hasattr(obj, "market") and hasattr(obj, "notified_at"))
 
 
 def was_pick_notified(game: Game) -> bool:
@@ -22,31 +27,65 @@ def was_pick_notified(game: Game) -> bool:
     return game.pick_notified_at is not None
 
 
-def mark_pick_notified(game: Game, session=None) -> bool:
+def mark_pick_notified(obj, session=None):
     """
-    Marca um jogo como tendo seu palpite notificado.
-    
+    Marca um pick/jogo como tendo sido notificado.
+
+    Polimórfico:
+      - Se `obj` é um Pick: seta `pick.notified_at = now(UTC)`. Se
+        `pick.market == 'match_result'`, espelha em `game.pick_notified_at`
+        pra retrocompat. Faz `session.flush()` (caller controla commit).
+        Não retorna nada — segue contrato do PR.
+      - Se `obj` é um Game (legacy): seta `game.pick_notified_at` e comita
+        (preserva comportamento original dos callers existentes).
+
     Args:
-        game: Instância do Game
-        session: Sessão do banco (opcional, cria nova se None)
-        
-    Returns:
-        True se marcado com sucesso, False caso contrário
+        obj: Instância de Pick (novo) ou Game (legacy)
+        session: Sessão do banco (opcional pro path Game, requerido pro Pick)
     """
+    now_utc = datetime.now(pytz.UTC)
+
+    # ---------- Path NOVO: Pick ----------
+    if _is_pick(obj):
+        pick = obj
+        try:
+            if pick.notified_at is not None:
+                # Idempotência: já notificado, não faz nada
+                return
+            pick.notified_at = now_utc
+
+            # Espelha em Game.pick_notified_at quando for match_result (retrocompat)
+            if pick.market == "match_result":
+                game = getattr(pick, "game", None)
+                if game is not None and game.pick_notified_at is None:
+                    game.pick_notified_at = now_utc
+
+            if session is not None:
+                session.flush()
+            logger.debug(
+                f"Pick {pick.id} (game_id={pick.game_id}, market={pick.market}) marcado como notificado em {now_utc}"
+            )
+            return
+        except Exception as e:
+            logger.exception(f"Erro ao marcar pick {getattr(pick, 'id', '?')} como notificado: {e}")
+            return
+
+    # ---------- Path LEGACY: Game ----------
+    game = obj
     try:
         if game.pick_notified_at is not None:
             # Já foi notificado, não precisa fazer nada
             return True
-        
-        game.pick_notified_at = datetime.now(pytz.UTC)
-        
+
+        game.pick_notified_at = now_utc
+
         if session:
             session.commit()
         else:
             with SessionLocal() as sess:
                 sess.add(game)
                 sess.commit()
-        
+
         logger.debug(f"Jogo {game.id} ({game.ext_id}) marcado como notificado em {game.pick_notified_at}")
         return True
     except Exception as e:
@@ -90,35 +129,57 @@ def get_notified_games_for_date(date: datetime, session=None) -> list:
         return []
 
 
-def should_notify_pick(game: Game, check_high_conf: bool = True) -> tuple[bool, str]:
+def should_notify_pick(obj, check_high_conf: bool = True) -> tuple[bool, str]:
     """
-    Verifica se um jogo deve ter seu palpite notificado.
-    
+    Decide se um pick/jogo deve ser notificado.
+
+    Polimórfico:
+      - Pick (novo): checa `will_bet=True`, `notified_at is None`, `outcome is None`.
+        Não checa cooldown/horário — quem chama decide.
+      - Game (legacy): mantém comportamento original (will_bet, pick, threshold).
+
     Args:
-        game: Instância do Game
-        check_high_conf: Se True, verifica também se atende threshold de alta confiança
-        
+        obj: Pick ou Game
+        check_high_conf: Aplica somente ao path Game (legacy)
+
     Returns:
         Tuple (should_notify: bool, reason: str)
     """
+    # ---------- Path NOVO: Pick ----------
+    if _is_pick(obj):
+        pick = obj
+        if not pick.will_bet:
+            return False, "Pick não tem will_bet=True"
+        if pick.notified_at is not None:
+            return False, "Pick já foi notificado anteriormente"
+        if pick.outcome is not None:
+            return False, "Pick já tem outcome (jogo terminou)"
+        if check_high_conf:
+            from config.settings import HIGH_CONF_THRESHOLD
+            if pick.pick_prob is None or pick.pick_prob < HIGH_CONF_THRESHOLD:
+                return False, f"Probabilidade {pick.pick_prob} abaixo do threshold {HIGH_CONF_THRESHOLD}"
+        return True, ""
+
+    # ---------- Path LEGACY: Game ----------
+    game = obj
     # 1. Verificar se já foi notificado
     if was_pick_notified(game):
         return False, "Já foi notificado anteriormente"
-    
+
     # 2. Verificar se tem palpite
     if not game.pick:
         return False, "Jogo não tem palpite definido"
-    
+
     # 3. Verificar se foi selecionado para aposta
     if not game.will_bet:
         return False, "Jogo não foi selecionado para aposta (will_bet=False)"
-    
+
     # 4. Verificar alta confiança se solicitado
     if check_high_conf:
         from config.settings import HIGH_CONF_THRESHOLD
         if (game.pick_prob or 0.0) < HIGH_CONF_THRESHOLD:
             return False, f"Probabilidade abaixo do threshold ({game.pick_prob or 0.0:.3f} < {HIGH_CONF_THRESHOLD})"
-    
+
     return True, "OK para notificar"
 
 

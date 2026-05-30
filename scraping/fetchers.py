@@ -344,6 +344,128 @@ async def fetch_game_result(ext_id: str, source_link: str) -> Optional[dict]:
             level="error",
             reraise=False
         )
-    
+
     return None
 
+
+async def fetch_game_full_markets(ext_id: str, game_url: Optional[str] = None) -> dict:
+    """
+    Busca markets completos de um jogo (todos os mercados disponíveis).
+
+    Tenta primeiro XHR (fetch_event_odds_from_api_async → parse_event_odds_from_api).
+    Cai pra HTML scraping (scrape_live_game_data) se XHR falhar ou vier sem markets.
+
+    Args:
+        ext_id: ID do jogo no BetNacional (string, pode conter dígitos)
+        game_url: URL completa do jogo (usada no fallback HTML)
+
+    Returns:
+        dict {"stats": {...}, "markets": {...}}.
+        Se ambos os caminhos falharem, retorna {"stats": {}, "markets": {}}.
+    """
+    from scraping.betnacional import (
+        fetch_event_odds_from_api_async,
+        parse_event_odds_from_api,
+        scrape_live_game_data,
+    )
+
+    # XHR primary path (rate limiter + retry handled inside fetch_event_odds_from_api_async)
+    try:
+        ext_id_int = int(ext_id)
+        json_data = await fetch_event_odds_from_api_async(ext_id_int)
+        if json_data:
+            data = parse_event_odds_from_api(json_data)
+            markets = data.get("markets", {}) if isinstance(data, dict) else {}
+            if markets and (markets.get("match_result") or markets.get("total_goals")):
+                return data
+            logger.debug(
+                f"XHR retornou sem mercados relevantes pra ext_id={ext_id}; tentando fallback HTML"
+            )
+    except (TypeError, ValueError) as e:
+        logger.debug(f"ext_id={ext_id} não conversível pra int: {e}")
+    except Exception as e:
+        logger.debug(f"XHR fetch falhou pra ext_id={ext_id}: {e}")
+
+    # HTML scraping fallback
+    if not game_url:
+        logger.debug(f"Sem game_url pra fallback HTML em ext_id={ext_id}")
+        return {"stats": {}, "markets": {}}
+
+    try:
+        html = await _fetch_requests_async(game_url, has_fallback=False)
+        if html:
+            data = scrape_live_game_data(html, ext_id, source_url=game_url)
+            return {
+                "stats": data.get("stats", {}) if isinstance(data, dict) else {},
+                "markets": data.get("markets", {}) if isinstance(data, dict) else {},
+            }
+    except Exception as e:
+        logger.debug(f"HTML fetch falhou pra ext_id={ext_id}: {e}")
+
+    return {"stats": {}, "markets": {}}
+
+
+async def fetch_events_via_api(
+    sport_id: int = 1,
+    category_id: int = 0,
+    tournament_id: int = 0,
+    market_id: int = 1,
+) -> list:
+    """
+    Busca eventos via API JSON da BetNacional (rápido, sem Playwright).
+
+    Usa cookies de utils.bn_cookie_manager + headers padrão. Cai pra [] se cookies
+    estiverem vazios ou a API responder 403 — o caller decide o fallback.
+
+    Args:
+        sport_id: ID do esporte (1 = futebol)
+        category_id: ID da categoria (0 = todas)
+        tournament_id: ID do torneio (0 = todos)
+        market_id: ID do mercado (1 = 1x2)
+
+    Returns:
+        list[EventDigest] agrupado por event_id, com 1x2 já extraído.
+    """
+    # Import lazy: o módulo bn_cookie_manager pode ainda não existir em algumas
+    # instalações, então adiamos a importação pra dentro da função.
+    try:
+        from utils.bn_cookie_manager import get_cookies, get_headers
+    except ImportError as exc:
+        logger.warning(f"API fetch: bn_cookie_manager indisponível ({exc}) — retornando []")
+        return []
+
+    from scraping.betnacional import parse_events_from_api_json
+
+    cookies = get_cookies()
+    if not cookies:
+        logger.warning("API fetch: sem cookies disponíveis — retornando []")
+        return []
+
+    headers = get_headers()
+    url = (
+        f"https://prod-global-bff-events.bet6.com.br/api/odds/{sport_id}/events-by-seasons"
+        f"?sport_id={sport_id}&category_id={category_id}&tournament_id={tournament_id}"
+        f"&markets={market_id}&filter_time_event="
+    )
+
+    try:
+        # requests é sync — roda em thread pra não bloquear o loop
+        resp = await asyncio.to_thread(
+            requests.get, url, headers=headers, cookies=cookies, timeout=20
+        )
+        if resp.status_code == 403:
+            logger.warning("API fetch: 403 Cloudflare — cookies podem ter expirado")
+            return []
+        if resp.status_code != 200:
+            logger.warning(f"API fetch: HTTP {resp.status_code}")
+            return []
+        data = resp.json()
+        events = parse_events_from_api_json(data, source_link=url)
+        logger.info(
+            f"API fetch: {len(events)} eventos extraídos "
+            f"(sport={sport_id}, cat={category_id}, tour={tournament_id})"
+        )
+        return events
+    except Exception as exc:
+        logger.exception(f"API fetch falhou: {exc}")
+        return []
