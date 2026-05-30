@@ -534,3 +534,326 @@ def extract_result_from_event(event: dict) -> Optional[dict]:
         "away_goals": a,
         "score": f"{h}-{a}",
     }
+
+
+# ─── Handicap Asiático — fetch por evento (HTML SSR) ──────────────────────────
+#
+# Background: o overview/latest traz somente ~6 markets DESTAQUE por evento;
+# Handicap Asiático fica fora. A página individual /odds/<slug>/<id>/?bt=11
+# embute o evento completo em <script>window["initial_state"]={...}</script>
+# com markets ricos: AHRF (HA Resultado Final), AHRH (HA 1° Tempo),
+# ASOU (Asiático Mais/Menos gols), AOH1 (idem 1° Tempo).
+# Endpoints XHR específicos do evento (/danae-webapi/api/live/events/<id>/latest,
+# /api/event/markets-offers/<id>) retornam 403 Splash ou {} — parseamos o SSR.
+
+# Tipos de market do Betano para Handicap Asiático
+_BETANO_AH_TYPES = {"AHRF", "AHRH", "ASOU", "AOH1"}
+
+# Tipo principal solicitado (Resultado Final 90min) — preferido se disponível
+_BETANO_AH_PRIMARY_TYPE = "AHRF"
+
+# Regex pra extrair o JSON do bloco <script>window["initial_state"]=
+_INITIAL_STATE_MARKERS = (
+    'window["initial_state"]=',
+    "window['initial_state']=",
+)
+
+
+def _extract_initial_state(html: str) -> Optional[dict]:
+    """Extrai o objeto window["initial_state"] do HTML SSR.
+
+    Usa parsing balanceado de chaves (regex não dá conta de JSON com strings
+    contendo `}` escapadas). Tolera ambas as variantes de aspas.
+    """
+    import json as _json
+
+    start = -1
+    marker_len = 0
+    for marker in _INITIAL_STATE_MARKERS:
+        idx = html.find(marker)
+        if idx >= 0:
+            start = idx
+            marker_len = len(marker)
+            break
+    if start < 0:
+        return None
+
+    json_start = start + marker_len
+    if json_start >= len(html) or html[json_start] != "{":
+        return None
+
+    depth = 0
+    in_string = False
+    escape = False
+    end = -1
+    for i in range(json_start, len(html)):
+        c = html[i]
+        if escape:
+            escape = False
+            continue
+        if c == "\\":
+            escape = True
+            continue
+        if c == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                end = i + 1
+                break
+    if end < 0:
+        return None
+
+    try:
+        return _json.loads(html[json_start:end])
+    except Exception as exc:
+        logger.debug(f"_extract_initial_state JSON parse falhou: {exc}")
+        return None
+
+
+def _format_ah_line(handicap: float) -> str:
+    """Formata handicap numérico no estilo da Betano (+0.5, -1.25, 0.0)."""
+    # Trata -0.0 → 0.0
+    if handicap == 0:
+        return "0.0"
+    sign = "+" if handicap > 0 else "-"
+    val = abs(handicap)
+    # Mantém 2 decimais se quarter-line, senão 1
+    if abs(val - round(val * 2) / 2) > 1e-6:
+        return f"{sign}{val:.2f}"
+    return f"{sign}{val:.1f}"
+
+
+def _parse_ah_market(market: dict, home: str, away: str) -> Dict[str, float]:
+    """Transforma 1 market AHRF/AHRH em dict {label: price}.
+
+    Mapeia via `columnIndex` (0=Casa, 1=Fora) — mais robusto que comparar
+    `name` com o nome do time. Cada selection vira:
+        "Casa <handicap_formatado>" | "Fora <handicap_formatado>" -> price
+
+    Selections com price < 1.01 são descartadas.
+    """
+    options: Dict[str, float] = {}
+    for s in market.get("selections", []) or []:
+        if not isinstance(s, dict):
+            continue
+        price = s.get("price")
+        if not _is_valid_price(price):
+            continue
+        col = s.get("columnIndex")
+        h = s.get("handicap")
+        if not isinstance(h, (int, float)) or isinstance(h, bool):
+            continue
+        if col == 0:
+            side = "Casa"
+        elif col == 1:
+            side = "Fora"
+        else:
+            # Fallback: usa nome do time se columnIndex ausente
+            name = (s.get("name") or "").strip()
+            if home and name.startswith(home):
+                side = "Casa"
+            elif away and name.startswith(away):
+                side = "Fora"
+            else:
+                continue
+        line = _format_ah_line(float(h))
+        key = f"{side} {line}"
+        # Em caso de duplicata, preserva primeira ocorrência
+        if key not in options:
+            options[key] = float(price)
+    return options
+
+
+def _parse_ah_ou_market(market: dict) -> Dict[str, float]:
+    """Transforma 1 market ASOU/AOH1 (Mais/Menos asiático) em dict {label: price}.
+
+    Diferente do HCTG, aceita linhas quarter (.25/.75). Selections vêm como
+    "Mais de 2.25" / "Menos de 2.25" — preserva o formato.
+    """
+    options: Dict[str, float] = {}
+    for s in market.get("selections", []) or []:
+        if not isinstance(s, dict):
+            continue
+        price = s.get("price")
+        if not _is_valid_price(price):
+            continue
+        name = (s.get("name") or "").strip()
+        if not name:
+            continue
+        # Normaliza vírgula → ponto
+        normalized = re.sub(r"(\d),(\d)", r"\1.\2", name)
+        if normalized not in options:
+            options[normalized] = float(price)
+    return options
+
+
+def _parse_handicap_from_html(
+    html: str, home_hint: str = "", away_hint: str = ""
+) -> Optional[dict]:
+    """Parser HTML SSR → dict de mercado de Handicap Asiático.
+
+    Estratégia: extrai window["initial_state"], navega até data.event.markets,
+    seleciona o market AHRF (preferencial). Se AHRF ausente, usa ASOU como
+    fallback (handicap em totais asiáticos).
+    """
+    state = _extract_initial_state(html)
+    if not state:
+        logger.debug("_parse_handicap_from_html: initial_state ausente")
+        return None
+
+    event = (state.get("data") or {}).get("event") or {}
+    if not isinstance(event, dict):
+        return None
+
+    markets = event.get("markets") or []
+    if not isinstance(markets, list):
+        return None
+
+    # Inferir nomes de times se não vieram (campos do próprio event)
+    home = home_hint or event.get("homeTeam") or ""
+    away = away_hint or event.get("awayTeam") or ""
+    if not (home and away):
+        # Tenta extrair de shortName tipo "PSG vs Arsenal"
+        short = event.get("shortName") or ""
+        m = re.match(r"^(.+?)\s+(?:vs|x|-)\s+(.+)$", short, re.IGNORECASE)
+        if m:
+            home = home or m.group(1).strip()
+            away = away or m.group(2).strip()
+
+    # 1) AHRF (preferencial: Handicap Asiático Resultado Final)
+    ahrf = next(
+        (m for m in markets if isinstance(m, dict) and m.get("type") == _BETANO_AH_PRIMARY_TYPE),
+        None,
+    )
+    if ahrf:
+        opts = _parse_ah_market(ahrf, home, away)
+        if opts:
+            return {
+                "display_name": ahrf.get("name") or "Handicap Asiático",
+                "options": opts,
+                "market_type": "handicap_asian",
+                "market_id": ahrf.get("id"),
+                "betano_type": "AHRF",
+            }
+
+    # 2) Fallback: ASOU (Asiático Mais/Menos Total de Gols)
+    asou = next(
+        (m for m in markets if isinstance(m, dict) and m.get("type") == "ASOU"),
+        None,
+    )
+    if asou:
+        opts = _parse_ah_ou_market(asou)
+        if opts:
+            return {
+                "display_name": asou.get("name") or "Asiático (Mais/Menos) Total de Gols",
+                "options": opts,
+                "market_type": "handicap_asian",
+                "market_id": asou.get("id"),
+                "betano_type": "ASOU",
+            }
+
+    return None
+
+
+async def _fetch_event_via_playwright(
+    game_url: str, timeout_ms: int = 45000, settle_ms: int = 6000
+) -> Optional[str]:
+    """Carrega game_url via Playwright e retorna o HTML pós-render.
+
+    Retorna None em qualquer erro (timeout, bloqueio, browser).
+    """
+    try:
+        from playwright.async_api import async_playwright
+    except ImportError as exc:
+        logger.warning(f"Playwright não disponível: {exc}")
+        return None
+
+    html: Optional[str] = None
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            ctx = await browser.new_context(user_agent=UA, locale="pt-BR")
+            page = await ctx.new_page()
+            try:
+                await page.goto(game_url, wait_until="networkidle", timeout=timeout_ms)
+            except Exception as exc:
+                logger.debug(f"goto {game_url} timeout/erro tolerado: {exc}")
+            await page.wait_for_timeout(settle_ms)
+            try:
+                html = await page.content()
+            except Exception as exc:
+                logger.debug(f"page.content() falhou: {exc}")
+            await browser.close()
+    except Exception as exc:
+        logger.warning(f"_fetch_event_via_playwright falhou: {exc}")
+        return None
+
+    return html
+
+
+def _normalize_event_url(game_url: str) -> str:
+    """Converte URL /live/... em /odds/.../?bt=11.
+
+    overview/latest devolve URLs no formato /live/<slug>/<id>/ para eventos
+    pré-jogo. Essa rota é SPA-driven e o SSR retorna initial_state.markets=[].
+    A rota /odds/<slug>/<id>/?bt=11 entrega SSR completo com markets ricos.
+    """
+    if not game_url:
+        return game_url
+    # Substitui só o primeiro segmento /live/
+    fixed = re.sub(r"(://[^/]+)/live/", r"\1/odds/", game_url, count=1)
+    # Garante ?bt=11
+    if "bt=" not in fixed:
+        sep = "&" if "?" in fixed else "?"
+        fixed = f"{fixed}{sep}bt=11"
+    return fixed
+
+
+async def fetch_event_handicap_asian(
+    ext_id: str, game_url: str
+) -> Optional[dict]:
+    """Busca mercado de Handicap Asiático de UM evento.
+
+    Estratégia: Playwright → HTML SSR → extrai window["initial_state"] →
+    pesca market AHRF (preferencial) ou ASOU (fallback).
+
+    Retorna dict no formato compatível com markets_dict:
+        {
+            "display_name": str,
+            "options": {"Casa -1.5": 2.10, "Fora +1.5": 1.75, ...},
+            "market_type": "handicap_asian",
+            "market_id": int,
+            "betano_type": "AHRF" | "ASOU",
+        }
+    ou None se não conseguir extrair.
+    """
+    if not game_url:
+        logger.warning(f"fetch_event_handicap_asian: game_url vazio (ext_id={ext_id})")
+        return None
+
+    target_url = _normalize_event_url(game_url)
+    html = await _fetch_event_via_playwright(target_url)
+    if not html:
+        logger.warning(f"fetch_event_handicap_asian: HTML vazio (ext_id={ext_id})")
+        return None
+
+    result = _parse_handicap_from_html(html)
+    if not result:
+        logger.warning(
+            f"fetch_event_handicap_asian: sem handicap asiático (ext_id={ext_id}, "
+            f"html_len={len(html)})"
+        )
+        return None
+
+    logger.debug(
+        f"fetch_event_handicap_asian: ext_id={ext_id} "
+        f"betano_type={result.get('betano_type')} "
+        f"options={len(result['options'])}"
+    )
+    return result

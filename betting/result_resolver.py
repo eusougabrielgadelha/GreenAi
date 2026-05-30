@@ -1,8 +1,85 @@
 """Resolve outcome and hit for all picks of a finished game."""
+import math
 from datetime import datetime
 from typing import List, Optional
 import pytz
 from models.database import Game, Pick
+
+
+def resolve_handicap_asian(pick, home_goals: int, away_goals: int) -> dict:
+    """
+    Resolve handicap asiático dado um pick e o placar final.
+
+    Args:
+        pick: instância de Pick com market='handicap_asian', line=float, pick=str ('home'|'away')
+        home_goals: int — gols home
+        away_goals: int — gols away
+
+    Returns:
+        dict: {'outcome': 'win'|'lose'|'push'|'half_win'|'half_lose'|'void',
+               'hit': True|False|None,
+               'payout': float}
+
+        payout em unidades de stake:
+          1.0    = ganhou stake × odd (resultado normal de win)
+          0.0    = perdeu
+          1/odd  = push (devolveu stake)
+        Em quarter line: média entre as duas metades.
+    """
+    line = getattr(pick, "line", None)
+    side = getattr(pick, "pick", None)
+
+    if line is None or side not in ("home", "away"):
+        return {"outcome": "void", "hit": None, "payout": 0.0}
+
+    line = float(line)
+    # diff: a partir do lado apostado
+    diff = (home_goals - away_goals) if side == "home" else (away_goals - home_goals)
+    adjusted = diff + line
+
+    # Quarter line (.25, .75): split em 2 metades
+    line_x2 = line * 2.0
+    if abs(line_x2 - round(line_x2)) > 1e-9:
+        line_low = math.floor(line_x2) / 2.0
+        line_high = math.ceil(line_x2) / 2.0
+
+        class _PseudoPick:
+            def __init__(self, ln, sd, odd):
+                self.line = ln
+                self.pick = sd
+                self.market = "handicap_asian"
+                self.pick_odd = odd
+
+        odd_attr = getattr(pick, "pick_odd", None) or 1.0
+        r1 = resolve_handicap_asian(_PseudoPick(line_low, side, odd_attr), home_goals, away_goals)
+        r2 = resolve_handicap_asian(_PseudoPick(line_high, side, odd_attr), home_goals, away_goals)
+        avg_payout = (r1["payout"] + r2["payout"]) / 2.0
+
+        if avg_payout > 1.0 + 1e-9:
+            outcome = "half_win"
+            hit = True
+        elif avg_payout < 1.0 - 1e-9:
+            if avg_payout > 1e-9:
+                outcome = "half_lose"
+                hit = False
+            else:
+                outcome = "lose"
+                hit = False
+        else:
+            outcome = "push"
+            hit = None
+        return {"outcome": outcome, "hit": hit, "payout": avg_payout}
+
+    # Linha .5 ou .0 (inteira)
+    if adjusted > 1e-9:
+        return {"outcome": "win", "hit": True, "payout": 1.0}
+    elif adjusted < -1e-9:
+        return {"outcome": "lose", "hit": False, "payout": 0.0}
+    else:
+        odd_val = float(getattr(pick, "pick_odd", None) or 1.0)
+        if odd_val <= 0:
+            odd_val = 1.0
+        return {"outcome": "push", "hit": None, "payout": 1.0 / odd_val}
 
 
 def resolve_picks_for_game(session, game: Game) -> List[Pick]:
@@ -62,6 +139,15 @@ def resolve_picks_for_game(session, game: Game) -> List[Pick]:
                     else:
                         pick.outcome = "under"
                         pick.hit = (pick.pick == "under")
+
+        elif pick.market == "handicap_asian":
+            if pick.line is None or pick.pick not in ("home", "away"):
+                pick.outcome = "void"
+                pick.hit = None
+            else:
+                res = resolve_handicap_asian(pick, home, away)
+                pick.outcome = res["outcome"]
+                pick.hit = res["hit"]
 
         else:
             # Unknown market: skip without marking verified

@@ -680,6 +680,162 @@ def decide_total_goals(
     )
 
 
+def decide_handicap_asian(
+    markets: dict,
+    *,
+    game_id: Optional[int] = None,
+    competition: Optional[str] = None,
+    teams: Optional[tuple] = None,
+    enable_observation_mode: bool = True,
+) -> Optional["PickResult"]:
+    """
+    Decide aposta em Handicap Asiático.
+
+    Estratégia:
+    1. Calibra (λ_home, λ_away) via Poisson usando markets['match_result'] + markets['total_goals'].
+    2. Para cada linha de handicap em markets['handicap_asian']['options']:
+       - Calcula probabilidade real via prob_handicap_asian (modelo)
+       - Compara com odd ofertada → calcula EV
+    3. Filtra apenas linhas .5 (sem push) — descarta .0 e .25/.75
+       pra evitar edge cases de push.
+    4. Escolhe a (linha, lado) de MAIOR EV.
+    5. Aplica gate MIN_EV / MIN_PROB.
+
+    Em modo observação: will_bet=False mesmo se pick válido (não notifica),
+    mas guarda metadata pra análise posterior.
+
+    Args:
+        markets: dict com 'match_result', 'total_goals', e (opcional) 'handicap_asian'
+        enable_observation_mode: se True, picks gerados mas not bet (fase validação)
+
+    Returns:
+        PickResult com market='handicap_asian', line=<linha>, pick='home'|'away' ou
+        None se mercado handicap não disponível.
+    """
+    handicap_market = markets.get("handicap_asian") if isinstance(markets, dict) else None
+    if not handicap_market or not isinstance(handicap_market, dict):
+        return None
+    options = handicap_market.get("options") or {}
+    if not isinstance(options, dict) or not options:
+        return None
+
+    # Imports lazy
+    from betting.poisson import calibrate_from_markets, prob_handicap_asian
+
+    lambdas = calibrate_from_markets(markets)
+    if not lambdas:
+        return None
+    lam_h, lam_a = lambdas
+
+    # Padrão: "Casa -1.5", "Fora +0.5", "Home -1", "Away +0.5", etc.
+    pattern = re.compile(r'^(Casa|Fora|Home|Away)\s*([+-]?\d+(?:\.\d+)?)$', re.IGNORECASE)
+
+    candidates = []
+    for option_name, raw_odd in options.items():
+        if not isinstance(option_name, str):
+            continue
+        m = pattern.match(option_name.strip())
+        if not m:
+            continue
+        side_raw = m.group(1).lower()
+        try:
+            line = float(m.group(2))
+        except (TypeError, ValueError):
+            continue
+
+        # Normaliza side
+        if side_raw in ("casa", "home"):
+            side = "home"
+        elif side_raw in ("fora", "away"):
+            side = "away"
+        else:
+            continue
+
+        # Aceita SOMENTE linhas .5 puras (sem .0 nem quarter .25/.75)
+        # line*2 deve ser inteiro ímpar → abs(line) - floor(abs(line)) == 0.5
+        line_x2 = line * 2.0
+        if abs(line_x2 - round(line_x2)) > 1e-9:
+            # Quarter line — descarta
+            continue
+        # Agora line*2 é inteiro. Se também for inteiro puro (line.0), descarta.
+        if abs(line - round(line)) < 1e-9:
+            continue
+        # Confirma que é .5
+        if abs(abs(line) - int(abs(line)) - 0.5) > 1e-9:
+            continue
+
+        odd_val = _normalize_odd_value(raw_odd)
+        if odd_val < 1.01:
+            continue
+
+        # Calcula prob via Poisson
+        try:
+            hcp_probs = prob_handicap_asian(lam_h, lam_a, side, line)
+        except Exception:
+            continue
+        prob_win = hcp_probs.get("win", 0.0) if isinstance(hcp_probs, dict) else 0.0
+        if prob_win <= 0:
+            continue
+
+        ev = prob_win * odd_val - 1.0
+        candidates.append({
+            "side": side,
+            "line": line,
+            "odd": odd_val,
+            "prob": prob_win,
+            "ev": ev,
+            "option_name": option_name,
+        })
+
+    if not candidates:
+        return None
+
+    # Escolhe maior EV
+    best = max(candidates, key=lambda c: c["ev"])
+
+    # Gate: only will_bet=True se EV >= MIN_EV E prob >= MIN_PROB
+    will_bet = False
+    reason = (
+        f"Handicap asiático sem sinal (line={best['line']}, "
+        f"EV={best['ev']:.2%}, prob={best['prob']:.2%})"
+    )
+
+    if best["ev"] >= MIN_EV and best["prob"] >= MIN_PROB:
+        if enable_observation_mode:
+            # Modo observação: NÃO notifica (will_bet=False), mas guarda metadata
+            will_bet = False
+            reason = (
+                f"Handicap asiático em observação (line={best['line']}, "
+                f"EV={best['ev']:.2%}, prob={best['prob']:.2%})"
+            )
+        else:
+            will_bet = True
+            reason = (
+                f"Handicap asiático: line={best['line']}, "
+                f"EV={best['ev']:.2%}, prob={best['prob']:.2%}"
+            )
+
+    return PickResult(
+        market="handicap_asian",
+        line=best["line"],
+        will_bet=will_bet,
+        pick=best["side"],
+        pick_prob=best["prob"],
+        pick_ev=best["ev"],
+        pick_odd=best["odd"],
+        reason=reason,
+        metadata={
+            "market": "handicap_asian",
+            "lam_home": lam_h,
+            "lam_away": lam_a,
+            "option_name": best["option_name"],
+            "all_candidates": candidates[:10],  # max 10 candidatos pra debug
+            "observation_mode": enable_observation_mode,
+            "strategy": "poisson_ev",
+        },
+    )
+
+
 def decide_picks(
     game_data: dict,
     *,
@@ -690,7 +846,9 @@ def decide_picks(
     """
     Orquestrador. Roda decide_match_result sempre e, se feature flag
     ENABLE_TOTAL_GOALS_PICKS=true, também roda decide_total_goals.
-    Retorna lista de PickResult (1 ou 2 elementos, sem None).
+    Também roda decide_handicap_asian se markets['handicap_asian'] existir
+    (default em modo observação — picks gerados mas not bet).
+    Retorna lista de PickResult (1+ elementos, sem None).
     """
     results: List[PickResult] = []
 
@@ -721,6 +879,22 @@ def decide_picks(
             )
             if tg_result is not None:
                 results.append(tg_result)
+
+    # 3) handicap_asian (modo observação por padrão)
+    enable_obs = os.getenv("HANDICAP_ASIAN_OBSERVATION_MODE", "true").lower() == "true"
+    try:
+        hcp_pick = decide_handicap_asian(
+            markets,
+            game_id=game_id,
+            competition=competition,
+            teams=teams,
+            enable_observation_mode=enable_obs,
+        )
+        if hcp_pick is not None:
+            results.append(hcp_pick)
+    except Exception as exc:
+        from utils.logger import logger
+        logger.warning(f"decide_handicap_asian falhou: {exc}")
 
     return results
 
