@@ -972,57 +972,22 @@ _TEAM_RE = re.compile(
 _EXT_ID_RE = re.compile(r'/(\d{6,10})/?$')
 
 
-async def fetch_events_from_league_page(url: str) -> List[NS]:
-    """Coleta jogos de uma página de liga Betano via HTML SSR.
+def _parse_league_html(html: str, source_url: str) -> List[NS]:
+    """Parser síncrono: HTML da página de liga Betano → List[EventDigest].
 
-    Estratégia:
-        1. Carrega URL via Playwright (necessário pelo gate Cloudflare em VPS).
-        2. Extrai todos os <script type="application/ld+json"> com @type=SportsEvent.
-        3. Extrai blocos `participants` via regex pra pegar team_ids da Betano.
-        4. Faz match entre eventos JSON-LD e participants por nome (home/away).
-        5. Constrói EventDigest com ext_id Betano + team_ids + nomes + horário.
+    Reutilizável tanto pela versão single-URL quanto pela batch. Não toca em
+    Playwright nem em I/O — só processa string HTML. Sem estado mutável global.
+
+    Args:
+        html: HTML completo da página de liga (já carregado via Playwright).
+        source_url: URL original da liga (usado pra preencher EventDigest.source_link).
 
     Returns:
-        List[NS] com keys do contrato EventDigest + extras:
-            ext_id, source_link, game_url, competition (nome da liga),
-            country, team_home, team_away, start_local_str,
-            odds_home/draw/away (=0.0, sem odds ainda — overview enriquece depois),
-            is_live (False), betradar_match_id (None),
-            markets_dict (vazio),
-            home_team_id, away_team_id (NOVOS — id Betano dos times).
-
-        Se URL retornar Splash Screen ou HTML < 5000 bytes: retorna [].
+        List[NS] com EventDigests. Vazio se HTML inválido/Splash/sem JSON-LD.
     """
-    try:
-        from playwright.async_api import async_playwright
-    except ImportError as exc:
-        logger.error(f"Playwright não disponível: {exc}")
-        return []
-
-    html = ""
-    try:
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
-            ctx = await browser.new_context(user_agent=UA, locale="pt-BR")
-            page = await ctx.new_page()
-            try:
-                await page.goto(url, wait_until="networkidle", timeout=45000)
-            except Exception as exc:
-                logger.debug(f"goto {url} timeout/erro tolerado: {exc}")
-            await page.wait_for_timeout(4000)
-            try:
-                html = await page.content()
-            except Exception as exc:
-                logger.debug(f"page.content() falhou: {exc}")
-                html = ""
-            await browser.close()
-    except Exception as exc:
-        logger.warning(f"fetch_events_from_league_page falhou ({url}): {exc}")
-        return []
-
     if not html or len(html) < 5000 or "Splash Screen" in html:
         logger.warning(
-            f"League page bloqueada ou vazia: {url} (html_len={len(html)})"
+            f"League page bloqueada ou vazia: {source_url} (html_len={len(html)})"
         )
         return []
 
@@ -1044,7 +1009,7 @@ async def fetch_events_from_league_page(url: str) -> List[NS]:
             events_meta.append(item)
 
     if not events_meta:
-        logger.warning(f"Nenhum SportsEvent em JSON-LD: {url}")
+        logger.warning(f"Nenhum SportsEvent em JSON-LD: {source_url}")
         return []
 
     # ── 2) Extrai team_ids via bloco participants ─────────────────────────
@@ -1096,7 +1061,7 @@ async def fetch_events_from_league_page(url: str) -> List[NS]:
 
         digests.append(NS(
             ext_id=ext_id,
-            source_link=url,
+            source_link=source_url,
             game_url=ev_url,
             competition=competition or "",
             country="Brasil",  # heurística: páginas /brasil/... — refinar via parser se quiser
@@ -1114,8 +1079,108 @@ async def fetch_events_from_league_page(url: str) -> List[NS]:
             _teams_meta=(home_info, away_info),  # interno — pra persistir Team
         ))
 
-    logger.info(f"League page {url}: {len(digests)} eventos extraídos")
+    logger.info(f"League page {source_url}: {len(digests)} eventos extraídos")
     return digests
+
+
+async def fetch_events_from_league_pages_batch(
+    urls: List[str],
+    *,
+    concurrency: int = 3,
+    settle_ms: int = 4000,
+    timeout_ms: int = 45000,
+) -> Dict[str, List[NS]]:
+    """Coleta proativa BATCH de múltiplas páginas de liga Betano.
+
+    Performance:
+        - 1 browser chromium reutilizado pra TODAS as URLs (evita N startups).
+        - `concurrency` contexts em paralelo (default 3) via asyncio.Semaphore.
+        - settle_ms reduzido pra 4s (suficiente pra Schema.org JSON-LD).
+
+    Args:
+        urls: Lista de URLs de páginas de liga Betano.
+        concurrency: Quantos contexts paralelos. Default 3.
+        settle_ms: Tempo após networkidle pra deixar o JSON-LD assentar. Default 4000.
+        timeout_ms: Timeout do goto. Default 45000.
+
+    Returns:
+        dict {url: List[NS]} — chave por URL original, valor é a lista de
+        EventDigests extraídos daquela URL (vazia se falhou).
+
+    Idempotente. Tolera falha em URL individual (loga warning, continua).
+    """
+    result: Dict[str, List[NS]] = {url: [] for url in urls}
+    if not urls:
+        return result
+
+    try:
+        from playwright.async_api import async_playwright
+    except ImportError as exc:
+        logger.error(f"Playwright não disponível: {exc}")
+        return result
+
+    sem = asyncio.Semaphore(max(1, concurrency))
+
+    async def _process_one(browser, url: str) -> None:
+        async with sem:
+            try:
+                ctx = await browser.new_context(user_agent=UA, locale="pt-BR")
+                try:
+                    page = await ctx.new_page()
+                    try:
+                        await page.goto(url, wait_until="networkidle", timeout=timeout_ms)
+                    except Exception as exc:
+                        logger.debug(f"batch goto {url} timeout/erro tolerado: {exc}")
+                    await page.wait_for_timeout(settle_ms)
+                    try:
+                        html = await page.content()
+                    except Exception as exc:
+                        logger.debug(f"batch page.content() falhou ({url}): {exc}")
+                        html = ""
+                    if not html or len(html) < 5000 or "Splash Screen" in html:
+                        logger.warning(
+                            f"batch: page bloqueada/vazia {url} (html_len={len(html)})"
+                        )
+                        return
+                    digests = _parse_league_html(html, url)
+                    result[url] = digests
+                    logger.info(f"batch: {len(digests)} eventos | {url}")
+                finally:
+                    try:
+                        await ctx.close()
+                    except Exception:
+                        pass
+            except Exception as exc:
+                logger.warning(f"batch: falha em {url}: {exc}")
+
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            try:
+                tasks = [_process_one(browser, u) for u in urls]
+                await asyncio.gather(*tasks, return_exceptions=True)
+            finally:
+                try:
+                    await browser.close()
+                except Exception:
+                    pass
+    except Exception as exc:
+        logger.exception(f"fetch_events_from_league_pages_batch falhou: {exc}")
+
+    return result
+
+
+async def fetch_events_from_league_page(url: str) -> List[NS]:
+    """Wrapper single-URL — delega pra `fetch_events_from_league_pages_batch`.
+
+    Mantido por compatibilidade com chamadas existentes. Use o batch
+    diretamente quando tiver múltiplas URLs pra colher (ganho ~3-5x).
+
+    Returns:
+        List[NS] com EventDigests da URL. Vazia se falhou ou Splash Screen.
+    """
+    results = await fetch_events_from_league_pages_batch([url], concurrency=1)
+    return results.get(url, [])
 
 
 def upsert_team(

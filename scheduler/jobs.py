@@ -1,6 +1,7 @@
 """Jobs agendados do sistema."""
 import os
 import asyncio
+import time
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 import pytz
@@ -1164,33 +1165,46 @@ async def collect_tomorrow_games_job():
 
 
 async def collect_betano_league_pages_job():
-    """Coleta proativa: varre páginas de liga Betano configuradas em
-    BETANO_LEAGUE_URLS (CSV). Pra cada URL, extrai eventos via JSON-LD
-    + team_ids, persiste como Game no banco (sem odds — overview enriquece depois).
+    """Coleta proativa BATCH via fetch_events_from_league_pages_batch.
 
-    Idempotente: usa (ext_id, start_time) UNIQUE pra evitar duplicação.
-    Cron sugerido: a cada 1h (IntervalTrigger).
+    Lê BETANO_LEAGUE_URLS (CSV), processa em paralelo (concurrency configurável
+    via BETANO_LEAGUE_CONCURRENCY, default 3), persiste tudo no banco.
+    Idempotente via (ext_id, start_time) UNIQUE.
+
+    Tempo estimado: ~93 URLs / 3 paralelos / ~7s/url ≈ 4min total
+    (vs ~15min sequencial com lançamento de browser por URL).
     """
     urls_csv = os.getenv("BETANO_LEAGUE_URLS", "")
     if not urls_csv.strip():
         logger.debug("BETANO_LEAGUE_URLS vazio — pulando")
         return
     urls = [u.strip() for u in urls_csv.split(",") if u.strip()]
+    if not urls:
+        logger.debug("BETANO_LEAGUE_URLS vazio após parse — pulando")
+        return
 
-    from models.database import SessionLocal, Game
-    from scraping.betano import fetch_events_from_league_page, upsert_team
+    concurrency = int(os.getenv("BETANO_LEAGUE_CONCURRENCY", "3"))
+
+    from scraping.betano import fetch_events_from_league_pages_batch, upsert_team
+
+    logger.info(
+        f"📚 Iniciando coleta BATCH de {len(urls)} ligas (concurrency={concurrency})"
+    )
+    t0 = time.time()
+    results = await fetch_events_from_league_pages_batch(
+        urls, concurrency=concurrency
+    )
+    elapsed = time.time() - t0
 
     total_new = 0
     total_updated = 0
+    total_failed_urls = 0
 
-    for url in urls:
-        try:
-            digests = await fetch_events_from_league_page(url)
-        except Exception:
-            logger.exception(f"league_page fetch falhou: {url}")
-            continue
-
-        with SessionLocal() as session:
+    with SessionLocal() as session:
+        for url, digests in results.items():
+            if not digests:
+                total_failed_urls += 1
+                continue
             for d in digests:
                 try:
                     # Upsert teams se vier IDs
@@ -1262,12 +1276,16 @@ async def collect_betano_league_pages_job():
                         except IntegrityError:
                             session.rollback()
                 except Exception:
-                    logger.exception(f"Erro processando digest {getattr(d, 'ext_id', '?')}")
+                    logger.exception(
+                        f"Erro processando digest {getattr(d, 'ext_id', '?')}"
+                    )
                     session.rollback()
-            session.commit()
+        session.commit()
 
     logger.info(
-        f"📚 collect_betano_league_pages_job: {total_new} novos + {total_updated} atualizados"
+        f"📚 collect_betano_league_pages_job BATCH: {total_new} novos + "
+        f"{total_updated} atualizados | {total_failed_urls}/{len(urls)} URLs falharam "
+        f"| ⏱ {elapsed:.0f}s"
     )
 
 
@@ -2128,21 +2146,34 @@ def setup_scheduler():
     )
     logger.info("📥 Coleta de jogos de amanhã agendada para %02d:00", collect_tomorrow_hour)
 
-    # --- Coleta proativa via páginas de liga Betano (cada 1h) ---
+    # --- Coleta proativa via páginas de liga Betano (2× por dia) ---
     # Pesca jogos de campeonatos com horário fixo (ex: Brasileirão das 19h)
     # horas antes do overview/latest mostrar — overview só traz live + iminentes.
     # Games são criados com odds=0.0; overview enriquece odds quando entram ao vivo.
+    # Refatorado pra BATCH: 1 browser reutilizado + concurrency paralela →
+    # 2 execuções/dia bastam pra cobrir jogos do dia + adições matinais.
     if os.getenv("BETANO_LEAGUE_URLS"):
+        # Manhã: pega jogos do dia agendados pra noite
         scheduler.add_job(
             collect_betano_league_pages_job,
-            trigger=IntervalTrigger(hours=1),
-            id="collect_betano_league_pages",
+            trigger=CronTrigger(hour=5, minute=30),
+            id="collect_betano_league_pages_morning",
             replace_existing=True,
             coalesce=True,
             max_instances=1,
-            misfire_grace_time=60,
+            misfire_grace_time=300,
         )
-        logger.info("📚 Coleta proativa de páginas de liga agendada a cada 1h")
+        # Meio-dia: pega jogos novos adicionados pela Betano ao longo da manhã
+        scheduler.add_job(
+            collect_betano_league_pages_job,
+            trigger=CronTrigger(hour=12, minute=0),
+            id="collect_betano_league_pages_noon",
+            replace_existing=True,
+            coalesce=True,
+            max_instances=1,
+            misfire_grace_time=300,
+        )
+        logger.info("📚 Coleta proativa agendada: 05:30 + 12:00 (era a cada 1h)")
 
     # --- Envio de jogos da madrugada (23h do dia anterior) ---
     dawn_hour = int(os.getenv("DAWN_GAMES_HOUR", "23"))
