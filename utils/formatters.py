@@ -276,11 +276,27 @@ def _picks_for_results(g):
     return []
 
 
+def _format_handicap_side(g, pick) -> str:
+    """Renderiza pick de handicap asiático como 'Time -1.5' ou 'Time +0.5'."""
+    side = (getattr(pick, "pick", None) or "").lower()
+    line = pick.line
+    if line is None:
+        return "—"
+    team = g.team_home if side == "home" else g.team_away if side == "away" else "—"
+    # Sinal: linha sempre vem com sinal positivo no DB; aplicamos pelo lado escolhido
+    # Convenção: side='home' com line=-1.5 significa "home -1.5"
+    line_val = float(line)
+    sign = "+" if line_val > 0 else "" if line_val == 0 else "-"
+    return f"{team} {sign}{abs(line_val):.1f}"
+
+
 def _pick_label_for_results(g, pick) -> str:
     """Texto curto identificando o pick (ex: 'Resultado Final', 'Mais de 2.5')."""
     market = getattr(pick, "market", "match_result") or "match_result"
     if market == "total_goals":
         return _format_total_goals_side(pick)
+    if market == "handicap_asian":
+        return _format_handicap_side(g, pick)
     return "Resultado Final"
 
 
@@ -300,6 +316,28 @@ def _pick_outcome_str(g, pick) -> str:
             total = (g.final_score_home or 0) + (g.final_score_away or 0)
             return f"{total} gols"
         return "—"
+    if market == "handicap_asian":
+        # outcome no handicap asiático: 'win', 'lose', 'push', 'half_win', 'half_lose'
+        # Mostra: placar + descrição amigável do resultado pro pick específico
+        if g.final_score_home is None or g.final_score_away is None:
+            return "—"
+        diff = g.final_score_home - g.final_score_away
+        side = (getattr(pick, "pick", None) or "").lower()
+        # Diff a favor do lado escolhido
+        side_diff = diff if side == "home" else -diff
+        winner_team = g.team_home if diff > 0 else (g.team_away if diff < 0 else "Empate")
+        score_part = f"{g.final_score_home}-{g.final_score_away}"
+        if outcome == "win":
+            return f"{score_part} ({winner_team})"
+        if outcome == "lose":
+            return f"{score_part} ({winner_team})"
+        if outcome == "push":
+            return f"{score_part} → push (devolvido)"
+        if outcome == "half_win":
+            return f"{score_part} → meia (win)"
+        if outcome == "half_lose":
+            return f"{score_part} → meia (lose)"
+        return score_part
     # match_result
     pick_map = {"home": g.team_home, "draw": "Empate", "away": g.team_away}
     return pick_map.get(outcome or g.outcome, (outcome or g.outcome or "—"))
