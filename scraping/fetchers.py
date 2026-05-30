@@ -430,9 +430,11 @@ async def fetch_events_via_api(
     from scraping.betnacional import parse_events_from_api_json
     from playwright.async_api import async_playwright
 
-    page_url = (
-        f"https://betnacional.bet.br/events/{sport_id}/{category_id}/{tournament_id}"
-    )
+    # IMPORTANTE: sempre navegar pra URL global do esporte (events/{sport}/0/0).
+    # Páginas de torneio específico não disparam a chamada events-by-seasons via XHR
+    # (são renderizadas direto). A URL global dispara o XHR com TODOS os jogos.
+    # Filtramos o tournament_id localmente após capturar.
+    page_url = f"https://betnacional.bet.br/events/{sport_id}/0/0"
     UA = (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
@@ -477,8 +479,14 @@ async def fetch_events_via_api(
     for body in captured:
         merged_odds.extend(body.get("odds", []))
         merged_scores.extend(body.get("scores", []))
-    merged = {"odds": merged_odds, "outrights": [], "scores": merged_scores}
 
+    # Filtragem local por tournament/category quando especificado (>0)
+    if tournament_id and tournament_id > 0:
+        merged_odds = [o for o in merged_odds if o.get("tournament_id") == tournament_id]
+    if category_id and category_id > 0:
+        merged_odds = [o for o in merged_odds if o.get("category_id") == category_id]
+
+    merged = {"odds": merged_odds, "outrights": [], "scores": merged_scores}
     events = parse_events_from_api_json(merged, source_link=page_url)
     logger.info(
         f"API fetch: {len(events)} eventos extraídos via Playwright XHR capture "
