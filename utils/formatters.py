@@ -777,9 +777,16 @@ def fmt_combined_bet(combined_bet: CombinedBet, games: List[Game]) -> str:
         prob = float(game.pick_prob or 0.0)
         confidence_icon = "🔥" if prob >= HIGH_CONF_THRESHOLD else "⭐"
 
+        url = (getattr(game, "game_url", None) or getattr(game, "source_link", None) or "").strip()
         msg += f"{confidence_icon} <b>{idx}.</b> {esc(game.team_home)} vs {esc(game.team_away)}\n"
-        msg += f"   🗓 {date_short} 🕐 {hhmm} | Pick: <b>{pick_str}</b> @ {pick_odd:.2f}\n"
-        msg += f"   📈 Prob: {prob*100:.0f}% | EV: {game.pick_ev*100:+.1f}%\n\n"
+        msg += f"🗓 {date_short} 🕐 {hhmm} |\n"
+        msg += f"Pick: <b>{pick_str}</b> @ {pick_odd:.2f}\n"
+        msg += f"📈 Prob: {prob*100:.0f}% | EV: {game.pick_ev*100:+.1f}%\n"
+        if url:
+            msg += f'Link: <a href="{esc(url)}">{esc(url)}</a>\n'
+        else:
+            msg += "Link: —\n"
+        msg += "\n"
     
     msg += "━━━━━━━━━━━━━━━━━━━━\n"
     msg += "💡 <i>Esta aposta combina todos os jogos de alta confiança do dia.</i>\n"
