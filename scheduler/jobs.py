@@ -1303,56 +1303,161 @@ async def send_dawn_games_job():
 async def send_combined_bet_job():
     """
     Job que envia aposta combinada com todos os jogos de alta confiança do dia.
-    Executa diariamente às 08:00 para enviar a aposta combinada do dia.
+    Executa diariamente às 08:00.
+
+    Resiliência:
+      - Retry 3x com backoff 5s/15s/45s pra absorver SQLite lock transitório
+      - Try/except envolvendo TUDO (nada de falha silenciosa)
+      - HTTP do Telegram FORA do `with SessionLocal()` (libera conexão antes)
+      - Alerta operacional se todas as tentativas falharem
     """
     from betting.combined_bets import (
         select_games_for_combined_bet,
         create_combined_bet,
-        calculate_combined_odd,
-        calculate_potential_return,
-        calculate_avg_confidence
     )
 
     now_utc = datetime.now(pytz.UTC)
     today_utc = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
 
-    with SessionLocal() as session:
-        # Seleção inteligente: max 10, min 3, diversificação por liga/time, exclui draws,
-        # ranking por pick_prob, valida min_combined_odd. Tudo configurável via env.
-        games = select_games_for_combined_bet(session, date_filter=today_utc)
+    MAX_RETRIES = 3
+    RETRY_DELAYS = [5, 15, 45]
+    last_error: Optional[str] = None
+    combined_bet_id: Optional[int] = None
+    games_count = 0
+    combined_odd = 0.0
+    potential_return = 0.0
+    message: Optional[str] = None
 
-        if not games:
-            logger.info("📊 Nenhuma múltipla criada hoje (sem jogos elegíveis após filtros).")
-            return
-        
-        # Cria aposta combinada
-        combined_bet = create_combined_bet(
-            games=games,
-            bet_date=today_utc,
-            example_stake=10.0,
-            session=session
-        )
-        
-        if not combined_bet:
-            logger.error("❌ Erro ao criar aposta combinada.")
-            return
-        
-        # Formata e envia mensagem
-        message = fmt_combined_bet(combined_bet, games)
-        
-        # Envia notificação
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            with SessionLocal() as session:
+                games = select_games_for_combined_bet(session, date_filter=today_utc)
+
+                if not games:
+                    logger.info("📊 Nenhuma múltipla criada hoje (sem jogos elegíveis após filtros).")
+                    return
+
+                combined_bet = create_combined_bet(
+                    games=games,
+                    bet_date=today_utc,
+                    example_stake=10.0,
+                    session=session,
+                )
+
+                if not combined_bet:
+                    last_error = "create_combined_bet retornou None"
+                    raise RuntimeError(last_error)
+
+                # Captura tudo o que precisa pro Telegram ANTES de fechar a session
+                message = fmt_combined_bet(combined_bet, games)
+                combined_bet_id = combined_bet.id
+                games_count = len(games)
+                combined_odd = combined_bet.combined_odd
+                potential_return = combined_bet.potential_return
+            # ← conexão devolvida ao pool aqui
+            break  # sucesso da etapa de DB
+        except Exception as e:
+            last_error = f"{type(e).__name__}: {e}"
+            if attempt < MAX_RETRIES:
+                wait_s = RETRY_DELAYS[attempt - 1]
+                logger.warning(
+                    "⚠️ send_combined_bet tentativa %d/%d falhou (%s). Retry em %ds...",
+                    attempt, MAX_RETRIES, last_error, wait_s,
+                )
+                await asyncio.sleep(wait_s)
+            else:
+                logger.exception("❌ send_combined_bet_job falhou após %d tentativas", MAX_RETRIES)
+                _alert_combined_bet_failure(last_error or "desconhecido")
+                return
+
+    if message is None or combined_bet_id is None:
+        # Defensivo: se chegou aqui sem mensagem montada, é falha
+        logger.error("❌ send_combined_bet_job: estado inválido pós-retry — message/id None")
+        _alert_combined_bet_failure(last_error or "estado inválido pós-retry")
+        return
+
+    # Envia Telegram FORA do `with SessionLocal()`
+    try:
         tg_send_message(
             message,
             message_type="combined_bet",
-            game_id=None,  # Não é um jogo específico
-            ext_id=f"combined_{combined_bet.id}"
+            game_id=None,
+            ext_id=f"combined_{combined_bet_id}",
         )
-        
-        # Atualiza sent_at
-        combined_bet.sent_at = now_utc
-        session.commit()
-        
-        logger.info(f"✅ Aposta combinada enviada: {len(games)} jogos, odd {combined_bet.combined_odd:.2f}, retorno R$ {combined_bet.potential_return:.2f}")
+    except Exception as e:
+        logger.exception("❌ Falha ao enviar combinada no Telegram")
+        _alert_combined_bet_failure(f"telegram_send: {type(e).__name__}: {e}")
+        return
+
+    # Atualiza sent_at em session leve nova (já fora do gargalo)
+    try:
+        with SessionLocal() as session:
+            bet = session.query(CombinedBet).filter(CombinedBet.id == combined_bet_id).first()
+            if bet is not None:
+                bet.sent_at = now_utc
+                session.commit()
+    except Exception:
+        logger.exception("⚠️ Combinada %d enviada ao Telegram mas falhou ao gravar sent_at", combined_bet_id)
+        # não é fatal, mensagem já foi pro Telegram
+
+    logger.info(
+        "✅ Aposta combinada enviada: %d jogos, odd %.2f, retorno R$ %.2f",
+        games_count, combined_odd, potential_return,
+    )
+
+
+def _alert_combined_bet_failure(reason: str) -> None:
+    """Envia alerta operacional via Telegram quando a múltipla das 8h falha em todas as tentativas."""
+    try:
+        msg = (
+            "🚨 <b>ALERTA OPERACIONAL — BetAuto</b>\n"
+            "Múltipla das 08:00 NÃO foi enviada hoje.\n\n"
+            f"<b>Motivo:</b> <code>{reason[:300]}</code>\n\n"
+            "<i>Verifique logs do VPS (pm2 logs betauto) e SQLite lock.</i>"
+        )
+        tg_send_message(
+            msg,
+            parse_mode="HTML",
+            message_type="system_alert",
+            game_id=None,
+            ext_id="combined_bet_alert",
+            skip_rate_limit=True,
+        )
+    except Exception:
+        logger.exception("Falha ao enviar alerta de falha de combinada")
+
+
+async def combined_bet_health_check_job():
+    """
+    Roda 08:30 BRT. Se a combinada de hoje não foi enviada (sent_at NULL e
+    bet_date == hoje), dispara alerta operacional. Defesa contra falha silenciosa.
+    """
+    try:
+        now_utc = datetime.now(pytz.UTC)
+        today_utc = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+        end_today_utc = today_utc + timedelta(days=1)
+
+        with SessionLocal() as session:
+            # Procura match_result combined_bet de hoje
+            row = session.query(CombinedBet).filter(
+                CombinedBet.bet_date >= today_utc,
+                CombinedBet.bet_date < end_today_utc,
+                CombinedBet.market != "handicap_asian",  # handicap roda 08:30, ignorar aqui
+            ).order_by(CombinedBet.id.desc()).first()
+
+        if row is None:
+            _alert_combined_bet_failure("nenhuma combined_bet criada hoje (08:30 health check)")
+            return
+
+        if row.sent_at is None:
+            _alert_combined_bet_failure(
+                f"combined_bet id={row.id} criada mas sent_at=NULL às 08:30"
+            )
+            return
+
+        logger.info("✅ Health check OK: combined_bet id=%d enviada às %s", row.id, row.sent_at)
+    except Exception:
+        logger.exception("combined_bet_health_check_job falhou")
 
 
 async def send_handicap_combined_bet_job():
@@ -2519,6 +2624,18 @@ def setup_scheduler():
         misfire_grace_time=60,
     )
     logger.info("⚖️ Múltipla de Handicap Asiático agendada para 08:30")
+
+    # --- Health check da múltipla das 08:00 (roda 08:30) ---
+    scheduler.add_job(
+        combined_bet_health_check_job,
+        trigger=CronTrigger(hour=8, minute=30),
+        id="combined_bet_health_check",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+        misfire_grace_time=300,
+    )
+    logger.info("🩺 Health check da combinada agendado para 08:30")
 
     # --- Resumo diário (opcional, via env) ---
     daily_summary_hour = os.getenv("DAILY_SUMMARY_HOUR", "")

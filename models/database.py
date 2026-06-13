@@ -6,7 +6,18 @@ from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 from config.settings import DB_URL
 
 Base = declarative_base()
-engine = create_engine(DB_URL, echo=False, future=True)
+# SQLite tuning: timeout=30s no driver (espera lock até 30s antes de SQLITE_BUSY),
+# check_same_thread=False (compartilha conexão entre threads do APScheduler),
+# pool aumentado + pre_ping pra reaproveitar conexões sem zumbi.
+engine = create_engine(
+    DB_URL,
+    echo=False,
+    future=True,
+    connect_args={"timeout": 30, "check_same_thread": False},
+    pool_size=10,
+    max_overflow=5,
+    pool_pre_ping=True,
+)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
 
 
@@ -365,9 +376,11 @@ def init_database():
             mode = result[0] if result else "?"
             conn.execute(text("PRAGMA synchronous=NORMAL;"))  # NORMAL é OK com WAL e é mais rápido
             conn.execute(text("PRAGMA busy_timeout=5000;"))  # 5s antes de levantar SQLITE_BUSY
+            conn.execute(text("PRAGMA wal_autocheckpoint=1000;"))  # Checkpoint mais frequente reduz tamanho do WAL
+            conn.execute(text("PRAGMA cache_size=-64000;"))  # 64MB cache (negativo = KB)
         import logging
         logging.getLogger("betauto").info(
-            f"📚 SQLite mode: journal_mode={mode}, synchronous=NORMAL, busy_timeout=5000ms"
+            f"📚 SQLite mode: journal_mode={mode}, synchronous=NORMAL, busy_timeout=5000ms, wal_autocheckpoint=1000, cache_size=-64000"
         )
     except Exception:
         pass  # Best-effort, não bloqueia init
