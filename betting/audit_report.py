@@ -45,9 +45,20 @@ def _fmt_int(v: Any) -> str:
     return str(int(v))
 
 
-def _fmt_date_short(dt: Optional[datetime]) -> str:
+def _fmt_date_short(dt: Any) -> str:
+    """Aceita datetime ou string ISO ('YYYY-MM-DD ...' do SQLite). Retorna 'dd/mm'."""
     if dt is None:
         return "—"
+    if isinstance(dt, str):
+        # SQLite retorna 'YYYY-MM-DD HH:MM:SS[.ffffff]' — só preciso dos 10 primeiros chars
+        s = dt[:10]
+        try:
+            y, m, d = s.split("-")
+            return f"{int(d):02d}/{int(m):02d}"
+        except (ValueError, IndexError):
+            return esc(s)
+    if not isinstance(dt, datetime):
+        return esc(str(dt))
     if dt.tzinfo is None:
         dt = pytz.UTC.localize(dt)
     return dt.astimezone(ZONE_BR).strftime("%d/%m")
