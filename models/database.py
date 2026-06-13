@@ -244,12 +244,15 @@ class CombinedBet(Base):
     avg_confidence = Column(Float, nullable=True)  # Média de confiança (pick_prob) dos jogos
     total_games = Column(Integer, nullable=False)  # Número de jogos na aposta
     sent_at = Column(DateTime, nullable=True)  # Quando foi enviada a notificação
-    status = Column(String, default="pending")  # pending | completed | won | lost
+    status = Column(String, default="pending")  # pending | won | lost | unresolved | completed (legado)
     outcome = Column(JSON, nullable=True)  # Resultados dos jogos após finalização {"game_id": "home", ...}
     hit = Column(Boolean, nullable=True)  # True se acertou, False se errou, None se ainda pendente
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, onupdate=func.now())
-    
+    # Auditoria do resolver (máquina de estados explícita)
+    resolution_reason = Column(Text, nullable=True)  # ex: "early_miss:game_id=3611", "all_resolved", "ttl_exceeded:games=[X,Y]", "manual_backfill:..."
+    resolved_at = Column(DateTime, nullable=True)    # quando status saiu de 'pending'
+
     __table_args__ = (
         Index('idx_combined_bet_date', 'bet_date'),
         Index('idx_combined_bet_status', 'status'),
@@ -309,6 +312,85 @@ def _safe_migrate_metadata_column():
                     conn.execute(text("ALTER TABLE analytics_events_new RENAME TO analytics_events"))
         except Exception:
             pass  # Ignora erro se não conseguir migrar
+
+
+def _create_combined_bet_audit_views():
+    """
+    Cria 2 views pra auditoria de assertividade das múltiplas:
+      - v_combined_bet_audit: linha-a-linha com realized_pnl, was_sent, age_days
+      - v_combined_bet_kpis: agregada por market com hit_rate, ROI, total_pnl
+    """
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("DROP VIEW IF EXISTS v_combined_bet_audit"))
+            conn.execute(text("""
+                CREATE VIEW v_combined_bet_audit AS
+                SELECT
+                    id,
+                    market,
+                    bet_date,
+                    total_games,
+                    combined_odd,
+                    avg_confidence,
+                    example_stake,
+                    potential_return,
+                    status,
+                    hit,
+                    resolution_reason,
+                    resolved_at,
+                    sent_at,
+                    CASE WHEN sent_at IS NOT NULL THEN 1 ELSE 0 END AS was_sent,
+                    CASE WHEN status IN ('won','lost') THEN 1 ELSE 0 END AS is_resolved_strict,
+                    CASE WHEN status IN ('won','lost','unresolved') THEN 1 ELSE 0 END AS is_resolved_inclusive,
+                    CASE
+                        WHEN hit = 1 THEN potential_return - example_stake
+                        WHEN hit = 0 THEN -example_stake
+                        ELSE NULL
+                    END AS realized_pnl,
+                    CAST((julianday('now') - julianday(bet_date)) AS REAL) AS age_days,
+                    created_at,
+                    updated_at
+                FROM combined_bets
+            """))
+
+            conn.execute(text("DROP VIEW IF EXISTS v_combined_bet_kpis"))
+            conn.execute(text("""
+                CREATE VIEW v_combined_bet_kpis AS
+                SELECT
+                    market,
+                    COUNT(*) AS total,
+                    SUM(was_sent) AS sent,
+                    SUM(is_resolved_strict) AS resolved_strict,
+                    SUM(is_resolved_inclusive) AS resolved_inclusive,
+                    SUM(CASE WHEN status='won'  THEN 1 ELSE 0 END) AS won,
+                    SUM(CASE WHEN status='lost' THEN 1 ELSE 0 END) AS lost,
+                    SUM(CASE WHEN status='unresolved' THEN 1 ELSE 0 END) AS unresolved,
+                    SUM(CASE WHEN status='pending'    THEN 1 ELSE 0 END) AS pending,
+                    ROUND(
+                        100.0 * SUM(CASE WHEN status='won' THEN 1 ELSE 0 END)
+                        / NULLIF(SUM(is_resolved_strict), 0),
+                        2
+                    ) AS hit_rate_strict_pct,
+                    ROUND(
+                        100.0 * SUM(CASE WHEN status='won' THEN 1 ELSE 0 END)
+                        / NULLIF(SUM(is_resolved_inclusive), 0),
+                        2
+                    ) AS hit_rate_inclusive_pct,
+                    ROUND(AVG(combined_odd), 2) AS avg_combined_odd,
+                    ROUND(SUM(COALESCE(realized_pnl, 0)), 2) AS total_pnl,
+                    ROUND(
+                        100.0 * SUM(COALESCE(realized_pnl, 0))
+                        / NULLIF(SUM(CASE WHEN was_sent = 1 THEN example_stake ELSE 0 END), 0),
+                        2
+                    ) AS roi_pct_on_sent
+                FROM v_combined_bet_audit
+                GROUP BY market
+            """))
+        import logging
+        logging.getLogger("betauto").info("📊 Views de auditoria criadas: v_combined_bet_audit, v_combined_bet_kpis")
+    except Exception:
+        import logging
+        logging.getLogger("betauto").exception("Falha ao criar views de auditoria de combined_bets")
 
 
 def _backfill_picks_from_games():
@@ -443,6 +525,10 @@ def init_database():
     except Exception:
         pass  # idempotente
 
+    # Migração: auditoria do resolver de combined_bets
+    _safe_add_column("combined_bets", "resolution_reason TEXT")
+    _safe_add_column("combined_bets", "resolved_at DATETIME")
+
     # Backfill one-shot: Game.pick → Pick(market='match_result')
     try:
         _backfill_picks_from_games()
@@ -461,6 +547,9 @@ def init_database():
             conn.execute(text("CREATE INDEX IF NOT EXISTS idx_game_away_team ON games(away_team_id)"))
     except Exception:
         pass
+
+    # Views de auditoria de assertividade das múltiplas
+    _create_combined_bet_audit_views()
 
 
 # Inicializa o banco ao importar o módulo

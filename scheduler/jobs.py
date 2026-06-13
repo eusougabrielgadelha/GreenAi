@@ -2057,6 +2057,13 @@ async def fetch_finished_games_results_job():
             except Exception:
                 logger.exception("Falha ao snapshot scores")
 
+            # Resolver de combined_bets: aplica máquina de estados (early_miss, all_resolved, ttl_exceeded)
+            try:
+                from betting.combined_bet_resolver import resolve_pending_combined_bets
+                resolve_pending_combined_bets(session)
+            except Exception:
+                logger.exception("Falha ao rodar resolver de combined_bets")
+
     except Exception as e:
         logger.exception(f"Erro ao executar job de busca de resultados: {e}")
 
