@@ -1460,6 +1460,32 @@ async def combined_bet_health_check_job():
         logger.exception("combined_bet_health_check_job falhou")
 
 
+async def send_weekly_audit_report_job():
+    """
+    Domingo 09:00 BRT.
+
+    Envia HTML com KPIs de assertividade das combined_bets (últimos 7 dias +
+    all-time) + últimas 7 combinadas detalhadas + alertas de unresolved /
+    pending atrasadas.
+
+    Falha silenciosa só dentro de try/except — não derruba scheduler.
+    """
+    try:
+        from betting.audit_report import generate_weekly_audit_report
+        msg = generate_weekly_audit_report()
+        tg_send_message(
+            msg,
+            parse_mode="HTML",
+            message_type="audit_report",
+            game_id=None,
+            ext_id=f"audit_weekly_{datetime.now(pytz.UTC).strftime('%Y%m%d')}",
+            skip_rate_limit=True,
+        )
+        logger.info("📊 Relatório semanal de auditoria enviado")
+    except Exception:
+        logger.exception("send_weekly_audit_report_job falhou")
+
+
 async def send_handicap_combined_bet_job():
     """
     Job diário de múltipla paralela de Handicap Asiático.
@@ -2643,6 +2669,24 @@ def setup_scheduler():
         misfire_grace_time=300,
     )
     logger.info("🩺 Health check da combinada agendado para 08:30")
+
+    # --- Relatório semanal de auditoria (domingo 09:00 BRT) ---
+    # day_of_week: APScheduler usa 0=mon..6=sun OU strings 'mon'..'sun'. Usamos string pra clareza.
+    audit_report_hour = int(os.getenv("AUDIT_REPORT_HOUR", "9"))
+    audit_report_day = os.getenv("AUDIT_REPORT_DAY", "sun")
+    scheduler.add_job(
+        send_weekly_audit_report_job,
+        trigger=CronTrigger(day_of_week=audit_report_day, hour=audit_report_hour, minute=0),
+        id="send_weekly_audit_report",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+        misfire_grace_time=1800,  # 30min — se PM2 reiniciar perto do horário, ainda dispara
+    )
+    logger.info(
+        "📊 Relatório semanal de auditoria agendado para %s %02d:00",
+        audit_report_day, audit_report_hour,
+    )
 
     # --- Resumo diário (opcional, via env) ---
     daily_summary_hour = os.getenv("DAILY_SUMMARY_HOUR", "")
