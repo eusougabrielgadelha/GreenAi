@@ -1935,6 +1935,16 @@ async def fetch_finished_games_results_job():
     """
     Job periódico que busca resultados de jogos finalizados que ainda não têm resultado.
     Garante que mesmo após reiniciar o script, os resultados sejam buscados eventualmente.
+
+    Arquitetura anti-lock (refatorado em 2026-06-14):
+    - FASE 1: SELECT curto pra coletar IDs/metadados dos candidatos (session fecha em ms)
+    - FASE 2: HTTP fetch FORA de qualquer session (cada um pode levar até 30s)
+    - FASE 3: UPDATE em session NOVA e curta por jogo (1 jogo = 1 session = ms)
+    - FASE 4: Envio do batch via Telegram FORA de session
+    - FASE 5: snapshot_live_scores_from_betano e resolve_pending_combined_bets em sessions próprias
+
+    Antes a session ficava aberta segurando o writer do SQLite WAL por minutos
+    durante os HTTP fetches, causando lock-thrashing nos outros jobs críticos.
     """
     from datetime import datetime, timedelta
     import pytz
@@ -1942,11 +1952,11 @@ async def fetch_finished_games_results_job():
     from scraping.fetchers import fetch_game_result
     from utils.formatters import fmt_result
     from notifications.telegram import tg_send_message
-    
+
     def _normalize_datetime_to_utc(dt: datetime) -> datetime:
         """
         Normaliza um datetime para UTC (offset-aware).
-        
+
         Se o datetime já for offset-aware, retorna convertido para UTC.
         Se for offset-naive, assume que está em UTC e adiciona timezone UTC.
         """
@@ -1957,138 +1967,190 @@ async def fetch_finished_games_results_job():
             return pytz.UTC.localize(dt)
         # Offset-aware: converte para UTC
         return dt.astimezone(pytz.UTC)
-    
+
     now_utc = datetime.now(pytz.UTC)
-    
+
     try:
-        with SessionLocal() as session:
-            # Buscar jogos que terminaram mas não têm resultado
-            # IMPORTANTE: Verificar se o jogo já aconteceu (data/hora) antes de buscar resultado
-            # Busca jogos que terminaram há mais de 30 minutos e nas últimas 48 horas
-            finished_no_result = (
-                session.query(Game)
-                .filter(
-                    Game.status.in_(["live", "ended", "scheduled"]),  # Incluir scheduled também
-                    Game.will_bet.is_(True),
-                    Game.outcome.is_(None),  # Não tem resultado
-                    Game.start_time >= now_utc - timedelta(days=2),  # Últimas 48 horas
-                    Game.start_time <= now_utc - timedelta(minutes=30)  # Terminou há mais de 30min (já aconteceu)
+        # ───── FASE 1 — SELECT curto: snapshot dos candidatos ─────
+        # Carrega só IDs/metadados, fecha session em ms (não segura writer durante HTTP)
+        try:
+            with SessionLocal() as session:
+                finished_no_result = (
+                    session.query(Game)
+                    .filter(
+                        Game.status.in_(["live", "ended", "scheduled"]),  # Incluir scheduled também
+                        Game.will_bet.is_(True),
+                        Game.outcome.is_(None),  # Não tem resultado
+                        Game.start_time >= now_utc - timedelta(days=2),  # Últimas 48 horas
+                        Game.start_time <= now_utc - timedelta(minutes=30)  # Terminou há mais de 30min (já aconteceu)
+                    )
+                    .all()
                 )
-                .all()
-            )
-            
-            if not finished_no_result:
-                logger.debug("✅ Nenhum jogo finalizado sem resultado para buscar")
-                return
-            
-            logger.info(f"🔍 Buscando resultados para {len(finished_no_result)} jogo(s) finalizado(s) sem resultado")
-            
-            results_batch = []
-            for game in finished_no_result:
-                try:
-                    # Verificar se o jogo já aconteceu (comparando data/hora)
-                    # Se start_time está no passado (há mais de 30 minutos), o jogo já aconteceu
-                    # Normalizar start_time para UTC (offset-aware)
-                    game_start_utc = _normalize_datetime_to_utc(game.start_time)
-                    time_since_start = now_utc - game_start_utc
-                    game_duration_minutes = 95  # Reduzido de 105→95: Betano dropa eventos ~106min pós start_time, janela de captura útil é ~11min. Com 95min, janela ativa vira ~21min.
-                    
-                    # Verificar se já passou tempo suficiente para o jogo ter terminado
-                    if time_since_start.total_seconds() / 60 < game_duration_minutes:
-                        # Jogo ainda pode estar em andamento, pular
-                        logger.debug(f"⏳ Jogo {game.id} ainda pode estar em andamento (iniciou há {int(time_since_start.total_seconds() / 60)} minutos)")
-                        continue
-                    
-                    logger.info(f"🔎 Buscando resultado para jogo {game.id} ({game.ext_id}) - {game.team_home} vs {game.team_away} (iniciou há {int(time_since_start.total_seconds() / 60)} minutos)")
-                    
-                    # Atualizar status para "ended" se ainda não estiver
-                    if game.status != "ended":
-                        game.status = "ended"
-                        logger.debug(f"📝 Status do jogo {game.id} atualizado para 'ended'")
-                    
-                    from datetime import datetime
-                    import pytz
-                    result_data = await fetch_game_result(game.ext_id, game.game_url or game.source_link)
-                    
-                    if result_data:
-                        game.outcome = result_data.get("outcome")
-                        game.final_score_home = result_data.get("home_goals")
-                        game.final_score_away = result_data.get("away_goals")
-                        game.final_score = result_data.get("score")
-                        game.result_fetched_at = datetime.now(pytz.UTC)
-                        game.status = "ended"
-                        game.hit = (game.outcome == game.pick) if game.pick else None  # mirror legado pra match_result
 
-                        # Resolve TODOS os picks multi-mercado (match_result + total_goals quando houver)
+                # Detach: copia campos primitivos antes da session fechar
+                candidates = [
+                    {
+                        "id": g.id,
+                        "ext_id": g.ext_id,
+                        "game_url": g.game_url,
+                        "source_link": g.source_link,
+                        "start_time": g.start_time,
+                        "team_home": g.team_home,
+                        "team_away": g.team_away,
+                        "status": g.status,
+                    }
+                    for g in finished_no_result
+                ]
+        except Exception:
+            logger.exception("Erro ao listar jogos sem resultado (FASE 1)")
+            candidates = []
+
+        if not candidates:
+            logger.debug("✅ Nenhum jogo finalizado sem resultado para buscar")
+        else:
+            logger.info(f"🔍 Buscando resultados para {len(candidates)} jogo(s) finalizado(s) sem resultado")
+
+        # Acumuladores que sobrevivem entre os jogos
+        results_batch_ids = []  # game_ids que tiveram resultado salvo (recarrega na FASE 4)
+        finalized_combined_notifications = []  # (bet_id,) pra notificar no Telegram fora de session
+
+        # ───── FASE 2+3 — pra cada candidato: HTTP fora, UPDATE em session nova ─────
+        for meta in candidates:
+            game_id = meta["id"]
+            try:
+                # Verificar se o jogo já aconteceu (comparando data/hora)
+                # Se start_time está no passado (há mais de 30 minutos), o jogo já aconteceu
+                # Normalizar start_time para UTC (offset-aware)
+                game_start_utc = _normalize_datetime_to_utc(meta["start_time"])
+                time_since_start = now_utc - game_start_utc
+                game_duration_minutes = 95  # Reduzido de 105→95: Betano dropa eventos ~106min pós start_time, janela de captura útil é ~11min. Com 95min, janela ativa vira ~21min.
+
+                # Verificar se já passou tempo suficiente para o jogo ter terminado
+                if time_since_start.total_seconds() / 60 < game_duration_minutes:
+                    # Jogo ainda pode estar em andamento, pular
+                    logger.debug(f"⏳ Jogo {game_id} ainda pode estar em andamento (iniciou há {int(time_since_start.total_seconds() / 60)} minutos)")
+                    continue
+
+                logger.info(f"🔎 Buscando resultado para jogo {game_id} ({meta['ext_id']}) - {meta['team_home']} vs {meta['team_away']} (iniciou há {int(time_since_start.total_seconds() / 60)} minutos)")
+
+                # ───── FASE 2 — HTTP FORA de qualquer session (pode levar até 30s) ─────
+                from datetime import datetime
+                import pytz
+                result_data = await fetch_game_result(meta["ext_id"], meta["game_url"] or meta["source_link"])
+
+                if not result_data:
+                    logger.debug(f"⚠️  Não foi possível obter resultado para jogo {game_id} ainda (tentará novamente)")
+                    # Mesmo sem result_data, atualiza status pra "ended" em session curta (best-effort)
+                    if meta["status"] != "ended":
                         try:
-                            from betting.result_resolver import resolve_picks_for_game
-                            resolve_picks_for_game(session, game)
-                        except Exception as exc:
-                            logger.warning(f"Falha ao resolver picks pro game {game.id}: {exc}")
-
-                        result_msg = "✅ ACERTOU" if game.hit else "❌ ERROU" if game.hit is False else "⚠️ SEM PALPITE"
-                        score_str = f" ({game.final_score})" if game.final_score else ""
-                        logger.info(f"✅ Resultado obtido para jogo {game.id}: {game.outcome}{score_str} | {result_msg}")
-                        
-                        # Acumula resultados desta execução para envio em lote
-                        if 'results_batch' not in locals():
-                            results_batch = []
-                        results_batch.append(game)
-                        
-                        # Atualiza resultado de apostas combinadas
-                        try:
-                            from betting.combined_bets import update_combined_bet_result
-                            from utils.formatters import fmt_combined_bet_result
-                            pending_bets = session.query(CombinedBet).filter(
-                                CombinedBet.status == "pending"
-                            ).all()
-
-                            for bet in pending_bets:
-                                if game.id in bet.game_ids:
-                                    result_status = update_combined_bet_result(bet, session)
-                                    if result_status in ("won", "lost"):
-                                        session.commit()
-                                        try:
-                                            msg = fmt_combined_bet_result(bet, session)
-                                            tg_send_message(msg, parse_mode="HTML", message_type="combined_result")
-                                            logger.info("📊 Resultado de múltipla #%s enviado: %s", bet.id, result_status)
-                                        except Exception:
-                                            logger.exception("Erro ao enviar notificação da múltipla #%s", bet.id)
+                            with SessionLocal() as session:
+                                game = session.query(Game).filter(Game.id == game_id).first()
+                                if game is not None and game.status != "ended":
+                                    game.status = "ended"
+                                    session.commit()
+                                    logger.debug(f"📝 Status do jogo {game_id} atualizado para 'ended'")
                         except Exception:
-                            logger.exception(f"Erro ao atualizar apostas combinadas após jogo {game.id}")
-                        
-                        session.commit()
-                        logger.info(f"✅ Resultado do jogo {game.id} salvo (notificação em lote)")
-                    else:
-                        logger.debug(f"⚠️  Não foi possível obter resultado para jogo {game.id} ainda (tentará novamente)")
-                except Exception as e:
-                    logger.exception(f"Erro ao buscar resultado para jogo {game.id}: {e}")
+                            logger.exception(f"Falha ao atualizar status do jogo {game_id} pra 'ended'")
+                    continue
 
-            # Após processar o bloco, se houver jogos com resultado, enviar mensagem única
-            try:
-                if results_batch:
-                    from utils.formatters import fmt_results_batch
-                    from notifications.telegram import tg_send_message
-                    msg = fmt_results_batch(results_batch)
-                    tg_send_message(msg)  # HTML por padrão
-            except Exception:
-                logger.exception("Erro ao enviar mensagem em lote de resultados")
+                # ───── FASE 3 — UPDATE em session NOVA e curta ─────
+                bets_to_notify_for_this_game = []  # (bet_id,) pra notificar fora da session
+                with SessionLocal() as session:
+                    game = session.query(Game).filter(Game.id == game_id).first()
+                    if game is None:
+                        logger.warning(f"Jogo {game_id} sumiu entre FASE 1 e FASE 3, pulando")
+                        continue
 
-            # Snapshot incremental dos games ainda live (defesa em profundidade)
-            try:
+                    game.outcome = result_data.get("outcome")
+                    game.final_score_home = result_data.get("home_goals")
+                    game.final_score_away = result_data.get("away_goals")
+                    game.final_score = result_data.get("score")
+                    game.result_fetched_at = datetime.now(pytz.UTC)
+                    game.status = "ended"
+                    game.hit = (game.outcome == game.pick) if game.pick else None  # mirror legado pra match_result
+
+                    # Resolve TODOS os picks multi-mercado (match_result + total_goals quando houver)
+                    try:
+                        from betting.result_resolver import resolve_picks_for_game
+                        resolve_picks_for_game(session, game)
+                    except Exception as exc:
+                        logger.warning(f"Falha ao resolver picks pro game {game_id}: {exc}")
+
+                    result_msg = "✅ ACERTOU" if game.hit else "❌ ERROU" if game.hit is False else "⚠️ SEM PALPITE"
+                    score_str = f" ({game.final_score})" if game.final_score else ""
+                    logger.info(f"✅ Resultado obtido para jogo {game_id}: {game.outcome}{score_str} | {result_msg}")
+
+                    # Atualiza resultado de apostas combinadas (ainda dentro da session pra coerência transacional)
+                    try:
+                        from betting.combined_bets import update_combined_bet_result
+                        pending_bets = session.query(CombinedBet).filter(
+                            CombinedBet.status == "pending"
+                        ).all()
+
+                        for bet in pending_bets:
+                            if game_id in bet.game_ids:
+                                result_status = update_combined_bet_result(bet, session)
+                                if result_status in ("won", "lost"):
+                                    # Notificação vai pra FORA da session (após commit)
+                                    bets_to_notify_for_this_game.append(bet.id)
+                    except Exception:
+                        logger.exception(f"Erro ao atualizar apostas combinadas após jogo {game_id}")
+
+                    session.commit()
+                    logger.info(f"✅ Resultado do jogo {game_id} salvo (notificação em lote)")
+
+                # session fechada — adicionar id ao batch
+                results_batch_ids.append(game_id)
+                # Notificações de combined_bets que resolveram com este jogo
+                finalized_combined_notifications.extend(bets_to_notify_for_this_game)
+
+                # Envia notificações de combined_bets FORA da session (com session efêmera de leitura)
+                for bet_id in bets_to_notify_for_this_game:
+                    try:
+                        from utils.formatters import fmt_combined_bet_result
+                        with SessionLocal() as session:
+                            bet = session.query(CombinedBet).filter(CombinedBet.id == bet_id).first()
+                            if bet is None:
+                                continue
+                            msg = fmt_combined_bet_result(bet, session)
+                        tg_send_message(msg, parse_mode="HTML", message_type="combined_result")
+                        logger.info("📊 Resultado de múltipla #%s enviado", bet_id)
+                    except Exception:
+                        logger.exception("Erro ao enviar notificação da múltipla #%s", bet_id)
+
+            except Exception as e:
+                logger.exception(f"Erro ao buscar resultado para jogo {game_id}: {e}")
+
+        # ───── FASE 4 — envia batch de resultados (FORA de session) ─────
+        try:
+            if results_batch_ids:
+                from utils.formatters import fmt_results_batch
+                from notifications.telegram import tg_send_message as _tg_send
+                # Recarrega os Game objects numa session curta só pra formatar
+                with SessionLocal() as session:
+                    games_for_msg = session.query(Game).filter(Game.id.in_(results_batch_ids)).all()
+                    # Pré-formata enquanto session aberta (alguns formatters tocam em lazy attrs)
+                    msg = fmt_results_batch(games_for_msg)
+                _tg_send(msg)  # HTML por padrão — fora da session
+        except Exception:
+            logger.exception("Erro ao enviar mensagem em lote de resultados")
+
+        # ───── FASE 5 — snapshot e resolver em sessions próprias e curtas ─────
+        try:
+            with SessionLocal() as session:
                 snap_count = await snapshot_live_scores_from_betano(session)
                 if snap_count > 0:
                     session.commit()
                     logger.info(f"📸 Score snapshot: {snap_count} games atualizados")
-            except Exception:
-                logger.exception("Falha ao snapshot scores")
+        except Exception:
+            logger.exception("Falha ao snapshot scores")
 
-            # Resolver de combined_bets: aplica máquina de estados (early_miss, all_resolved, ttl_exceeded)
-            try:
+        try:
+            with SessionLocal() as session:
                 from betting.combined_bet_resolver import resolve_pending_combined_bets
                 resolve_pending_combined_bets(session)
-            except Exception:
-                logger.exception("Falha ao rodar resolver de combined_bets")
+        except Exception:
+            logger.exception("Falha ao rodar resolver de combined_bets")
 
     except Exception as e:
         logger.exception(f"Erro ao executar job de busca de resultados: {e}")

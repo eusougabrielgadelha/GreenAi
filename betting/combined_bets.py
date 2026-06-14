@@ -421,105 +421,172 @@ def create_combined_bet(
     games: List[Game],
     bet_date: datetime,
     example_stake: float = 10.0,
-    session = None
+    session = None,
+    market: str = "match_result",
 ) -> Optional[CombinedBet]:
     """
-    Cria uma aposta combinada no banco de dados.
-    
+    Cria/atualiza uma aposta combinada.
+
+    Defesa contra SQLite lock: retry com backoff exponencial em OperationalError
+    (1s/5s/15s) — só pra esse tipo específico. Outros erros levantam direto.
+
+    Idempotente: UPSERT por (bet_date_day, market). Se já existir bet pendente
+    do dia, atualiza no lugar.
+
     Args:
-        games: Lista de jogos para incluir na aposta
-        bet_date: Data da aposta (dia dos jogos)
-        example_stake: Valor de exemplo da aposta (padrão R$ 10)
-        session: Sessão do banco (se None, cria nova)
-        
+        games: Lista de jogos da combinada
+        bet_date: Data da aposta (dia)
+        example_stake: Valor exemplo (default R$ 10)
+        session: Session opcional (se None, cria nova interna)
+        market: 'match_result' (default) | 'handicap_asian'
+
     Returns:
-        Objeto CombinedBet criado ou None se falhar
+        CombinedBet criada/atualizada ou None se falhar todas as tentativas
     """
+    import time
+    from sqlalchemy.exc import OperationalError
+
     if not games:
         return None
-    
-    # Calcula valores
+
     combined_odd, odds_list, picks_list = calculate_combined_odd(games)
     potential_return = calculate_potential_return(combined_odd, example_stake)
     avg_confidence = calculate_avg_confidence(games)
     game_ids = [game.id for game in games]
-    
-    # Verifica se já existe aposta combinada para este dia
-    should_create_session = session is None
-    if should_create_session:
-        session = SessionLocal()
-    
-    try:
-        # Verifica se já existe aposta combinada para este dia
-        start_of_day = bet_date.replace(hour=0, minute=0, second=0, microsecond=0)
-        end_of_day = start_of_day + timedelta(days=1)
-        
-        existing = session.query(CombinedBet).filter(
-            CombinedBet.bet_date >= start_of_day,
-            CombinedBet.bet_date < end_of_day,
-            CombinedBet.status == "pending"
-        ).first()
-        
-        if existing:
-            # Atualiza aposta existente
-            existing.game_ids = game_ids
-            existing.picks = picks_list
-            existing.odds = odds_list
-            existing.combined_odd = combined_odd
-            existing.example_stake = example_stake
-            existing.potential_return = potential_return
-            existing.avg_confidence = avg_confidence
-            existing.total_games = len(games)
-            session.commit()
-            return existing
-        
-        # Cria nova aposta combinada
-        combined_bet = CombinedBet(
-            bet_date=bet_date,
-            game_ids=game_ids,
-            picks=picks_list,
-            odds=odds_list,
-            combined_odd=combined_odd,
-            example_stake=example_stake,
-            potential_return=potential_return,
-            avg_confidence=avg_confidence,
-            total_games=len(games),
-            status="pending"
-        )
-        
-        session.add(combined_bet)
-        session.commit()
-        session.refresh(combined_bet)
-        
-        log_with_context(
-            "info",
-            f"Aposta combinada criada: {len(games)} jogos, odd {combined_odd:.2f}, retorno potencial R$ {potential_return:.2f}",
-            stage="create_combined_bet",
-            status="success",
-            extra_fields={
-                "combined_bet_id": combined_bet.id,
-                "total_games": len(games),
-                "combined_odd": combined_odd,
-                "potential_return": potential_return
-            }
-        )
-        
-        return combined_bet
-        
-    except Exception as e:
-        log_with_context(
-            "error",
-            f"Erro ao criar aposta combinada: {e}",
-            stage="create_combined_bet",
-            status="failed"
-        )
-        if should_create_session:
-            session.rollback()
-            session.close()
-        return None
-    finally:
-        if should_create_session:
-            session.close()
+
+    MAX_RETRIES = 3
+    BACKOFF = [1, 5, 15]
+
+    for attempt in range(1, MAX_RETRIES + 1):
+        should_create_session = session is None
+        s = session if not should_create_session else SessionLocal()
+        try:
+            start_of_day = bet_date.replace(hour=0, minute=0, second=0, microsecond=0)
+            end_of_day = start_of_day + timedelta(days=1)
+
+            existing = s.query(CombinedBet).filter(
+                CombinedBet.bet_date >= start_of_day,
+                CombinedBet.bet_date < end_of_day,
+                CombinedBet.status == "pending",
+                CombinedBet.market == market,
+            ).first()
+
+            if existing:
+                existing.game_ids = game_ids
+                existing.picks = picks_list
+                existing.odds = odds_list
+                existing.combined_odd = combined_odd
+                existing.example_stake = example_stake
+                existing.potential_return = potential_return
+                existing.avg_confidence = avg_confidence
+                existing.total_games = len(games)
+                s.commit()
+                return existing
+
+            combined_bet = CombinedBet(
+                market=market,
+                bet_date=bet_date,
+                game_ids=game_ids,
+                picks=picks_list,
+                odds=odds_list,
+                combined_odd=combined_odd,
+                example_stake=example_stake,
+                potential_return=potential_return,
+                avg_confidence=avg_confidence,
+                total_games=len(games),
+                status="pending",
+            )
+            s.add(combined_bet)
+            s.commit()
+            s.refresh(combined_bet)
+
+            log_with_context(
+                "info",
+                f"Aposta combinada criada: {len(games)} jogos, odd {combined_odd:.2f}, retorno potencial R$ {potential_return:.2f}",
+                stage="create_combined_bet",
+                status="success",
+                extra_fields={
+                    "combined_bet_id": combined_bet.id,
+                    "total_games": len(games),
+                    "combined_odd": combined_odd,
+                    "potential_return": potential_return,
+                    "market": market,
+                },
+            )
+            return combined_bet
+
+        except OperationalError as e:
+            # Retry só pra SQLite lock — outros erros não retentam
+            err_msg = str(e).lower()
+            if "database is locked" not in err_msg and "deadlock" not in err_msg:
+                # Outro tipo de OperationalError — não retry
+                log_with_context(
+                    "error",
+                    f"OperationalError não-lock em create_combined_bet: {e}",
+                    stage="create_combined_bet",
+                    status="failed",
+                )
+                try:
+                    s.rollback()
+                except Exception:
+                    pass
+                if should_create_session:
+                    try:
+                        s.close()
+                    except Exception:
+                        pass
+                return None
+
+            try:
+                s.rollback()
+            except Exception:
+                pass
+            if should_create_session:
+                try:
+                    s.close()
+                except Exception:
+                    pass
+
+            if attempt < MAX_RETRIES:
+                wait_s = BACKOFF[attempt - 1]
+                log_with_context(
+                    "warning",
+                    f"create_combined_bet tentativa {attempt}/{MAX_RETRIES} falhou (SQLite locked). Retry em {wait_s}s...",
+                    stage="create_combined_bet",
+                    status="retry",
+                )
+                time.sleep(wait_s)
+                # reabre session pra próximo loop
+                session = None if should_create_session else session
+                continue
+            else:
+                log_with_context(
+                    "error",
+                    f"create_combined_bet falhou após {MAX_RETRIES} tentativas (SQLite locked persistente)",
+                    stage="create_combined_bet",
+                    status="failed",
+                )
+                return None
+
+        except Exception as e:
+            log_with_context(
+                "error",
+                f"Erro inesperado em create_combined_bet: {e}",
+                stage="create_combined_bet",
+                status="failed",
+            )
+            try:
+                s.rollback()
+            except Exception:
+                pass
+            if should_create_session:
+                try:
+                    s.close()
+                except Exception:
+                    pass
+            return None
+
+    return None
 
 
 def update_combined_bet_result(combined_bet: CombinedBet, session) -> Optional[str]:
